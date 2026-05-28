@@ -14,7 +14,13 @@ import MarkdownUI
 /// is live so the user sees something happen immediately; collapses
 /// to a one-line summary once the answer arrives.
 struct AnalysisReportColumn: View {
-    let session: AnalysisStore.Session
+    /// Observed directly so streaming chunk appends to `session.report`
+    /// / `session.thinking` re-render *only this column*, not the
+    /// entire page. Previously this was a `let`; the page passed a
+    /// struct snapshot, which forced a parent-driven re-diff for
+    /// every chunk. With Session as a class (Performance Fix 7),
+    /// observation is per-view. (Performance Fix 7.)
+    @ObservedObject var session: AnalysisStore.Session
     /// Idle-state hint shown when there's no report yet. Composed by
     /// the page since it knows the selected kind + engine names.
     let idleHint: String
@@ -273,11 +279,13 @@ struct AnalysisReportColumn: View {
                     }
                     if !stage1Chunks.isEmpty {
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(stage1Chunks) { chunk in
-                                Markdown(chunk.text)
-                                    .markdownTheme(Theme.goldMarkdown)
-                                    .textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            ForEach(Array(stage1Chunks.enumerated()), id: \.element.id) { idx, chunk in
+                                chunkView(
+                                    chunk,
+                                    isStreamingTail: idx == stage1Chunks.count - 1
+                                        && !hasStage2
+                                        && session.phase == .running
+                                )
                             }
                         }
                     } else if cleanReportCache.isEmpty {
@@ -308,11 +316,12 @@ struct AnalysisReportColumn: View {
                         )
                         if !stage2Chunks.isEmpty {
                             LazyVStack(alignment: .leading, spacing: 0) {
-                                ForEach(stage2Chunks) { chunk in
-                                    Markdown(chunk.text)
-                                        .markdownTheme(Theme.goldMarkdown)
-                                        .textSelection(.enabled)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                ForEach(Array(stage2Chunks.enumerated()), id: \.element.id) { idx, chunk in
+                                    chunkView(
+                                        chunk,
+                                        isStreamingTail: idx == stage2Chunks.count - 1
+                                            && session.phase == .running
+                                    )
                                 }
                             }
                         }
@@ -349,18 +358,46 @@ struct AnalysisReportColumn: View {
             // Scroll on either the report OR the thinking growing so
             // the streaming caret stays in view even while the model
             // is still in its thinking phase.
+            //
+            // No `withAnimation` here: the chunk batcher flushes at
+            // 10 Hz and the previous 200 ms animation was *twice*
+            // the flush interval, so animations stacked / cancelled
+            // into jitter. Unanimated `scrollTo` keeps up cleanly
+            // and is essentially free. (Performance Fix 2.)
             .onChange(of: session.report) { newValue in
                 refreshReportCache(from: newValue)
-                withAnimation(.easeOut(duration: 0.2)) {
-                    scroll.scrollTo("report-end", anchor: .bottom)
-                }
+                scroll.scrollTo("report-end", anchor: .bottom)
             }
             .onChange(of: session.thinking) { _ in
-                withAnimation(.easeOut(duration: 0.2)) {
-                    scroll.scrollTo("report-end", anchor: .bottom)
-                }
+                scroll.scrollTo("report-end", anchor: .bottom)
             }
             .onAppear { refreshReportCache(from: session.report) }
+        }
+    }
+
+    /// Render one report chunk. The trailing chunk of a still-running
+    /// run is rendered as plain `Text` instead of `MarkdownUI.Markdown`
+    /// — markdown re-parses the whole input each time `chunk.text`
+    /// changes, which used to be the dominant cost during streaming
+    /// (every 100 ms flush re-tokenised + re-laid out the entire
+    /// active chunk). Once a new H3 lands and the chunk is no longer
+    /// the tail, it promotes to Markdown on the next render. Visual
+    /// tint slightly muted while still streaming so it reads as
+    /// "in-flight" content. (Performance Fix 5.)
+    @ViewBuilder
+    private func chunkView(_ chunk: ReportChunk, isStreamingTail: Bool) -> some View {
+        if isStreamingTail {
+            Text(chunk.text)
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Markdown(chunk.text)
+                .markdownTheme(Theme.goldMarkdown)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -454,6 +491,15 @@ struct AnalysisReportColumn: View {
         @State private var userToggled: Bool = false
         @State private var manualExpanded: Bool = false
 
+        /// Pre-split paragraph windows for streaming rendering.
+        /// A single growing `Text(text)` was the dominant cost during
+        /// thinking phase — AppKit re-laid out the entire trace on
+        /// every 100 ms chunk flush. Splitting on `\n\n` and rendering
+        /// each paragraph as its own Text inside a LazyVStack lets
+        /// SwiftUI's Equatable diff skip everything but the growing
+        /// last paragraph. (Performance Fix 6.)
+        @State private var paragraphs: [String] = []
+
         var body: some View {
             let expanded = currentlyExpanded
             VStack(alignment: .leading, spacing: 0) {
@@ -470,6 +516,17 @@ struct AnalysisReportColumn: View {
                 RoundedRectangle(cornerRadius: Theme.Radius.md)
                     .strokeBorder(Theme.Color.border, lineWidth: 1)
             )
+            .onAppear { refreshParagraphs(text) }
+            .onChange(of: text) { refreshParagraphs($0) }
+        }
+
+        /// Resplit on every text change. `components(separatedBy:)` is
+        /// O(n) but n is small (<10 KB typical) and we're already on
+        /// the main thread for a state update. The win is downstream:
+        /// SwiftUI sees identical leading paragraphs and skips them.
+        private func refreshParagraphs(_ t: String) {
+            let next = t.components(separatedBy: "\n\n")
+            if next != paragraphs { paragraphs = next }
         }
 
         /// Auto-open while streaming; auto-collapse once the
@@ -532,12 +589,22 @@ struct AnalysisReportColumn: View {
                         .foregroundStyle(Theme.Color.textMuted)
                         .padding(Theme.Spacing.md)
                 } else {
-                    Text(text)
-                        .font(.system(size: 11).italic())
-                        .foregroundStyle(Theme.Color.textSecondary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(Theme.Spacing.md)
+                    // Per-paragraph Text views in a LazyVStack: only
+                    // the trailing paragraph relays out as new tokens
+                    // arrive; earlier paragraphs short-circuit via
+                    // SwiftUI's Equatable diff because their String
+                    // identity is stable across flushes.
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, p in
+                            Text(p)
+                                .font(.system(size: 11).italic())
+                                .foregroundStyle(Theme.Color.textSecondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(Theme.Spacing.md)
                 }
             }
         }

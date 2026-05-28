@@ -63,17 +63,26 @@ final class AnalysisStore: ObservableObject {
     /// Per-(pair, kind) state. The user can start one analysis per kind
     /// on each pair and switch between them mid-stream without the
     /// picker yanking text out from under them.
-    struct Session {
-        var report: String = ""
+    ///
+    /// **Reference type (Performance Fix 7)**: was a struct; converted
+    /// to a class so streaming chunk appends can mutate the live
+    /// instance without re-assigning the dict subscript. The dict's
+    /// `@Published` only fires on session add/remove/explicit phase
+    /// transition (via `mutateAndPublish`) — the 10 Hz chunk flushes
+    /// bypass the store publisher entirely. Views that need to react
+    /// to streaming text (the report column) bind via
+    /// `@ObservedObject` to the session directly.
+    final class Session: ObservableObject {
+        @Published var report: String = ""
         /// Internal reasoning trace emitted by extended-thinking
         /// models (Claude Opus / Sonnet 4.x with thinking on). The
         /// report column renders this in a collapsible section above
         /// the main answer — same UX as the Claude Code VSCode
         /// extension's "Thinking" disclosure. Empty for engines that
         /// don't surface thinking (Codex, older Claude CLIs).
-        var thinking: String = ""
-        var phase: Phase = .idle
-        var lastError: String?
+        @Published var thinking: String = ""
+        @Published var phase: Phase = .idle
+        @Published var lastError: String?
         var startedAt: Date?
         /// Cached prompts used to kick the initial run. The
         /// follow-up flow re-uses both so the model has the same
@@ -86,7 +95,7 @@ final class AnalysisStore: ObservableObject {
         /// element per follow-up the user has asked. `isStreaming`
         /// flips true while the assistant chunk is still landing
         /// so the UI can show its own caret per turn.
-        var conversation: [Turn] = []
+        @Published var conversation: [Turn] = []
         /// Snapshot of the run context. We carry it on the session so
         /// the history entry can be created at completion time without
         /// re-reading the dashboard's "current" pair (which may have
@@ -100,8 +109,10 @@ final class AnalysisStore: ObservableObject {
         /// report column to split the thinking trace into two
         /// inline disclosures (one per stage) instead of one
         /// concatenated blob.
-        var expandThinkingOffset: Int? = nil
+        @Published var expandThinkingOffset: Int? = nil
         fileprivate var task: Task<Void, Never>? = nil
+
+        init() {}
     }
 
     /// HTML-comment marker injected at the stage 2 boundary in
@@ -253,7 +264,7 @@ final class AnalysisStore: ObservableObject {
     @Published private(set) var history: [HistoryEntry] = []
 
     /// Per-key chunk batching state. Claude streams text deltas
-    /// at 30-100 Hz; appending to `sessions[key].report` per-chunk
+    /// at 30-100 Hz; appending to the session storage per-chunk
     /// re-publishes the dict and forces the entire report column
     /// (Markdown re-parse + 5 JSON extract+parse passes + chart
     /// re-render) to redraw at that same rate, which pegs the
@@ -261,9 +272,26 @@ final class AnalysisStore: ObservableObject {
     /// / `pendingThinking` buffers and flush at most 10 Hz via
     /// `flushTimers`. Net effect: ~5× fewer redraws with no
     /// visible delay (≤ 100 ms is invisible for streaming text).
-    private var pendingText: [SessionKey: String] = [:]
-    private var pendingThinking: [SessionKey: String] = [:]
-    private var flushTimers: [SessionKey: DispatchSourceTimer] = [:]
+    ///
+    /// The buffer is keyed by `(SessionKey, target)` — `target` is
+    /// either `.report` (the main streamed answer + thinking) or
+    /// `.conversationTurn(UUID)` (one specific follow-up turn).
+    /// Both flows funnel through the same flush so the follow-up
+    /// path also gets 10 Hz batching instead of the raw 30-100 Hz
+    /// republish-per-token it used to do. (Performance Fix 1.)
+    private struct BufferKey: Hashable {
+        let session: SessionKey
+        let target: Target
+
+        enum Target: Hashable {
+            case report
+            case conversationTurn(UUID)
+        }
+    }
+
+    private var pendingText: [BufferKey: String] = [:]
+    private var pendingThinking: [BufferKey: String] = [:]
+    private var flushTimers: [BufferKey: DispatchSourceTimer] = [:]
     private static let chunkFlushIntervalMS: Int = 100
 
     /// Look up the session for a specific pair + kind. Returns an
@@ -461,7 +489,7 @@ final class AnalysisStore: ObservableObject {
         tabID: UUID? = nil
     ) {
         let key = SessionKey(pairID: pair.id, kind: .confluenceScanner, tabID: tabID)
-        guard var session = sessions[key],
+        guard let session = sessions[key],
               session.phase == .done,
               !session.report.isEmpty
         else { return }
@@ -483,13 +511,18 @@ final class AnalysisStore: ObservableObject {
         // can interleave a second thinking disclosure here.
         // Reset the existing task handle so a Stop kills the new
         // stream.
-        session.phase = .running
-        session.startedAt = session.startedAt ?? Date()
-        session.userPromptUsed = user
-        session.systemPromptUsed = system
-        session.expandThinkingOffset = session.thinking.count
-        session.report.append("\n\n\(Self.expandMarker)\n\n---\n\n")
-        sessions[key] = session
+        //
+        // mutateAndPublish forces a single store-level publish for
+        // the whole prelude so the page sees the phase flip back
+        // to `.running` in one pass.
+        mutateAndPublish(key) {
+            $0.phase = .running
+            $0.startedAt = $0.startedAt ?? Date()
+            $0.userPromptUsed = user
+            $0.systemPromptUsed = system
+            $0.expandThinkingOffset = $0.thinking.count
+            $0.report.append("\n\n\(Self.expandMarker)\n\n---\n\n")
+        }
 
         let task = Task { @MainActor [weak self] in
             do {
@@ -504,7 +537,7 @@ final class AnalysisStore: ObservableObject {
                 }
                 guard let self = self else { return }
                 self.endBatching(for: key)
-                self.sessions[key]?.phase = .done
+                self.mutateAndPublish(key) { $0.phase = .done }
                 // Re-record onto history so the latest entry
                 // captures the appended SCENARIOS_JSON +
                 // expanded report. Stage 1 already inserted a
@@ -516,12 +549,14 @@ final class AnalysisStore: ObservableObject {
             } catch is CancellationError {
                 guard let self = self else { return }
                 self.endBatching(for: key)
-                self.sessions[key]?.phase = .done
+                self.mutateAndPublish(key) { $0.phase = .done }
             } catch {
                 guard let self = self else { return }
                 self.endBatching(for: key)
-                self.sessions[key]?.lastError = error.localizedDescription
-                self.sessions[key]?.phase = .error
+                self.mutateAndPublish(key) {
+                    $0.lastError = error.localizedDescription
+                    $0.phase = .error
+                }
             }
         }
         sessions[key]?.task = task
@@ -614,10 +649,12 @@ final class AnalysisStore: ObservableObject {
                 let hasContent = !report.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                  || !thinking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 if !hasContent {
-                    self.sessions[key]?.lastError = "Empty response"
-                    self.sessions[key]?.phase = .error
+                    self.mutateAndPublish(key) {
+                        $0.lastError = "Empty response"
+                        $0.phase = .error
+                    }
                 } else {
-                    self.sessions[key]?.phase = .done
+                    self.mutateAndPublish(key) { $0.phase = .done }
                     if let snap = self.sessions[key] {
                         self.recordCompletion(kind: key.kind, session: snap)
                     }
@@ -626,12 +663,14 @@ final class AnalysisStore: ObservableObject {
                 guard let self = self else { return }
                 self.endBatching(for: key)
                 let hadAny = !(self.sessions[key]?.report.isEmpty ?? true)
-                self.sessions[key]?.phase = hadAny ? .done : .idle
+                self.mutateAndPublish(key) { $0.phase = hadAny ? .done : .idle }
             } catch {
                 guard let self = self else { return }
                 self.endBatching(for: key)
-                self.sessions[key]?.lastError = error.localizedDescription
-                self.sessions[key]?.phase = .error
+                self.mutateAndPublish(key) {
+                    $0.lastError = error.localizedDescription
+                    $0.phase = .error
+                }
             }
         }
         session.task = task
@@ -648,54 +687,115 @@ final class AnalysisStore: ObservableObject {
     // ── Chunk batching helpers ────────────────────────────────────
 
     /// Stash a streamed text or thinking chunk; the timer will
-    /// flush it into `sessions[key]` at most ~10 Hz. First call
-    /// for the key also spins up the flush timer.
-    private func bufferChunk(_ chunk: String, kind: ChunkKind, key: SessionKey) {
+    /// flush it into the targeted destination at most ~10 Hz. First
+    /// call for the buffer key also spins up the flush timer.
+    ///
+    /// `target` defaults to `.report` for the main streamed answer.
+    /// Follow-up turns pass `.conversationTurn(turnID)` so their
+    /// deltas land on the right `Turn.assistant` field — the same
+    /// 100 ms coalescing as the main report. (Performance Fix 1.)
+    private func bufferChunk(
+        _ chunk: String,
+        kind: ChunkKind,
+        key: SessionKey,
+        target: BufferKey.Target = .report
+    ) {
+        let bk = BufferKey(session: key, target: target)
         switch kind {
-        case .text:     pendingText[key, default: ""].append(chunk)
-        case .thinking: pendingThinking[key, default: ""].append(chunk)
+        case .text:     pendingText[bk, default: ""].append(chunk)
+        case .thinking: pendingThinking[bk, default: ""].append(chunk)
         }
-        ensureFlushTimer(for: key)
+        ensureFlushTimer(for: bk)
     }
 
     private enum ChunkKind { case text, thinking }
 
-    private func ensureFlushTimer(for key: SessionKey) {
-        guard flushTimers[key] == nil else { return }
+    private func ensureFlushTimer(for bk: BufferKey) {
+        guard flushTimers[bk] == nil else { return }
         let t = DispatchSource.makeTimerSource(queue: .main)
         let ms = Self.chunkFlushIntervalMS
         t.schedule(deadline: .now() + .milliseconds(ms), repeating: .milliseconds(ms))
         t.setEventHandler { [weak self] in
-            MainActor.assumeIsolated { self?.flushPendingChunks(for: key) }
+            MainActor.assumeIsolated { self?.flushPendingChunks(for: bk) }
         }
         t.resume()
-        flushTimers[key] = t
+        flushTimers[bk] = t
     }
 
-    /// Drain `pendingText` / `pendingThinking` into the session.
+    /// Drain `pendingText` / `pendingThinking` into the targeted
+    /// destination — either the session's report/thinking fields
+    /// or a specific conversation turn's `assistant` field.
     /// No-op when both buffers are empty (timer keeps running so
     /// the next chunk doesn't pay the timer-setup cost again).
-    private func flushPendingChunks(for key: SessionKey) {
-        let text = pendingText[key] ?? ""
-        let think = pendingThinking[key] ?? ""
+    private func flushPendingChunks(for bk: BufferKey) {
+        let text = pendingText[bk] ?? ""
+        let think = pendingThinking[bk] ?? ""
         guard !text.isEmpty || !think.isEmpty else { return }
-        pendingText[key] = ""
-        pendingThinking[key] = ""
-        if !text.isEmpty {
-            sessions[key]?.report.append(text)
-        }
-        if !think.isEmpty {
-            sessions[key]?.thinking.append(think)
+        pendingText[bk] = ""
+        pendingThinking[bk] = ""
+
+        let sessionKey = bk.session
+        switch bk.target {
+        case .report:
+            if !text.isEmpty {
+                sessions[sessionKey]?.report.append(text)
+            }
+            if !think.isEmpty {
+                sessions[sessionKey]?.thinking.append(think)
+            }
+        case .conversationTurn(let turnID):
+            // Follow-ups stream into a specific Turn. Thinking
+            // deltas are dropped for follow-ups (the initial run
+            // already burned through reasoning) but we handle the
+            // case defensively in case future engines surface
+            // thinking on follow-ups too.
+            guard var sess = sessions[sessionKey],
+                  let idx = sess.conversation.firstIndex(where: { $0.id == turnID })
+            else { return }
+            var changed = false
+            if !text.isEmpty {
+                sess.conversation[idx].assistant.append(text)
+                changed = true
+            }
+            if changed {
+                sessions[sessionKey] = sess
+            }
         }
     }
 
-    /// Stop coalescing for this key, flushing whatever's left so
-    /// the final tail isn't dropped on stream completion / error /
+    /// Stop coalescing for this buffer key, flushing whatever's left
+    /// so the final tail isn't dropped on stream completion / error /
     /// cancellation.
+    private func endBatching(for bk: BufferKey) {
+        flushPendingChunks(for: bk)
+        flushTimers[bk]?.cancel()
+        flushTimers[bk] = nil
+    }
+
+    /// Convenience overload for the main-report streaming path —
+    /// keeps the existing call sites in `startSession` /
+    /// `runConfluenceScannerExpand` short.
     private func endBatching(for key: SessionKey) {
-        flushPendingChunks(for: key)
-        flushTimers[key]?.cancel()
-        flushTimers[key] = nil
+        endBatching(for: BufferKey(session: key, target: .report))
+    }
+
+    /// Mutate a session in place, then re-assign the dict subscript
+    /// so the store's `@Published` fires.
+    ///
+    /// **Why**: with Session as a class, plain `sessions[key]?.x = y`
+    /// mutates the live instance but does NOT trip the dict publisher
+    /// (the dict's value — the reference — is unchanged). That's the
+    /// desired behaviour for streaming chunk appends (we want them to
+    /// stay below the store-level publish radar). It's the WRONG
+    /// behaviour for phase transitions, which page-level views
+    /// observe via the store. So phase/error transitions go through
+    /// here and chunk appends go directly. (Performance Fix 7.)
+    private func mutateAndPublish(_ key: SessionKey, _ block: (Session) -> Void) {
+        guard let s = sessions[key] else { return }
+        block(s)
+        // Re-assign the same reference back. Dict subscript writes
+        // always invoke the @Published setter, so observers re-render.
+        sessions[key] = s
     }
 
     /// Wipe a (pair, kind) session back to idle. Used by the "Clear"
@@ -752,26 +852,28 @@ final class AnalysisStore: ObservableObject {
         )
         let turnID = turn.id
 
+        let turnBufferKey = BufferKey(session: key, target: .conversationTurn(turnID))
+
         let task = Task { @MainActor [weak self] in
             do {
                 for try await event in engine.run(system: system, user: followUpUser) {
                     guard let self = self else { return }
-                    // We append .text into the turn's assistant
-                    // field; .thinking deltas are dropped on the
-                    // floor for follow-ups (the initial report
-                    // already burned through reasoning — the
-                    // follow-up surface is for the answer, not the
-                    // trace).
-                    if case .text(let chunk) = event,
-                       var sess = self.sessions[key],
-                       let idx = sess.conversation.firstIndex(where: { $0.id == turnID })
-                    {
-                        sess.conversation[idx].assistant.append(chunk)
-                        self.sessions[key] = sess
+                    // Route .text through the same 100 ms chunk
+                    // batcher as the main report stream. .thinking
+                    // deltas are dropped — the follow-up UI doesn't
+                    // surface a reasoning trace per turn.
+                    if case .text(let chunk) = event {
+                        self.bufferChunk(
+                            chunk,
+                            kind: .text,
+                            key: key,
+                            target: .conversationTurn(turnID)
+                        )
                     }
                 }
-                guard let self = self,
-                      var sess = self.sessions[key],
+                guard let self = self else { return }
+                self.endBatching(for: turnBufferKey)
+                guard var sess = self.sessions[key],
                       let idx = sess.conversation.firstIndex(where: { $0.id == turnID })
                 else { return }
                 sess.conversation[idx].isStreaming = false
@@ -782,15 +884,17 @@ final class AnalysisStore: ObservableObject {
                 }
                 self.sessions[key] = sess
             } catch is CancellationError {
-                guard let self = self,
-                      var sess = self.sessions[key],
+                guard let self = self else { return }
+                self.endBatching(for: turnBufferKey)
+                guard var sess = self.sessions[key],
                       let idx = sess.conversation.firstIndex(where: { $0.id == turnID })
                 else { return }
                 sess.conversation[idx].isStreaming = false
                 self.sessions[key] = sess
             } catch {
-                guard let self = self,
-                      var sess = self.sessions[key],
+                guard let self = self else { return }
+                self.endBatching(for: turnBufferKey)
+                guard var sess = self.sessions[key],
                       let idx = sess.conversation.firstIndex(where: { $0.id == turnID })
                 else { return }
                 sess.conversation[idx].isStreaming = false

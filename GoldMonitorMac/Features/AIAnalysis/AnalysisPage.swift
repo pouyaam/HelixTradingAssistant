@@ -184,6 +184,18 @@ struct AnalysisPage: View {
     /// → "starts in 11 min"). Cheap — no network, just a tick.
     @State private var countdownTick: Date = Date()
 
+    /// Cached upcoming high-impact event so we don't re-scan
+    /// `news.events` on every body invocation. Refreshed on
+    /// appear, on the 30 s countdown tick, and when the news
+    /// feed itself changes. (Performance Fix 4.)
+    @State private var cachedUpcomingEvent: ForexFactoryEvent? = nil
+
+    /// Timestamp of the most recent successful `refreshParsedPayloads`
+    /// call. Used to throttle parser work during streaming — six
+    /// brace-walking JSON parsers running at 10 Hz was a measurable
+    /// slice of the page's CPU budget. (Performance Fix 3.)
+    @State private var lastParseAt: Date = .distantPast
+
     private var session: AnalysisStore.Session {
         store.session(kind: currentTab.kind, pairID: pair.id, tabID: currentTab.id)
     }
@@ -192,7 +204,7 @@ struct AnalysisPage: View {
         VStack(spacing: 0) {
             header
             Divider().background(Theme.Color.border)
-            if let event = upcomingHighImpactEvent {
+            if let event = cachedUpcomingEvent {
                 eventWarningBanner(event)
             }
             if showHistory {
@@ -273,18 +285,47 @@ struct AnalysisPage: View {
             // coalesces in-flight requests, so calling refresh()
             // when it's already loading is a no-op.
             news.refresh()
+            refreshUpcomingEvent()
             // Tick the countdown every 30s while the page is on
             // screen. Long-lived loop with cancellation tied to
             // the View task scope.
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 30_000_000_000)
                 countdownTick = Date()
+                refreshUpcomingEvent()
             }
         }
         .onAppear { refreshParsedPayloads() }
         .onChange(of: session.report) { _ in refreshParsedPayloads() }
+        .onChange(of: session.phase)  { _ in
+            // Phase transitions (esp. → .done) are exactly when we
+            // want a guaranteed final parse, regardless of throttle.
+            lastParseAt = .distantPast
+            refreshParsedPayloads()
+        }
         .onChange(of: selectedKind)  { _ in refreshParsedPayloads() }
         .onChange(of: currentAnalysisTabID) { _ in refreshParsedPayloads() }
+        .onChange(of: news.events.count) { _ in refreshUpcomingEvent() }
+    }
+
+    /// Recompute the cached upcoming high-impact event. Called from
+    /// the 30 s countdown loop, on appear, and when the news feed
+    /// changes — never per body render. (Performance Fix 4.)
+    private func refreshUpcomingEvent() {
+        let now = Date()
+        let window: TimeInterval = 30 * 60
+        let pastWindow: TimeInterval = 15 * 60
+        let next = news.events.first { event in
+            guard event.impactLevel == .high,
+                  event.currency.uppercased() == "USD",
+                  let at = event.eventAt
+            else { return false }
+            let delta = at.timeIntervalSince(now)
+            return delta <= window && delta >= -pastWindow
+        }
+        if cachedUpcomingEvent?.id != next?.id {
+            cachedUpcomingEvent = next
+        }
     }
 
     /// Re-read of the current-tab id so `.onChange` fires when the
@@ -293,27 +334,6 @@ struct AnalysisPage: View {
     private var currentAnalysisTabID: UUID { currentTab.id }
 
     // ── Economic-event warning banner ──────────────────────────────
-
-    /// First high-impact USD event in the next 30 minutes (or
-    /// currently happening, within ±15min of its start). Gold is
-    /// event-driven, so a FOMC / CPI / NFP release minutes away
-    /// makes any technical analysis dangerous — surface it loudly
-    /// at the top of the page so the user thinks twice before
-    /// committing.
-    private var upcomingHighImpactEvent: ForexFactoryEvent? {
-        _ = countdownTick   // re-read so the @State tick reruns this
-        let now = Date()
-        let window: TimeInterval = 30 * 60
-        let pastWindow: TimeInterval = 15 * 60
-        return news.events.first { event in
-            guard event.impactLevel == .high,
-                  event.currency.uppercased() == "USD",
-                  let at = event.eventAt
-            else { return false }
-            let delta = at.timeIntervalSince(now)
-            return delta <= window && delta >= -pastWindow
-        }
-    }
 
     private func eventWarningBanner(_ event: ForexFactoryEvent) -> some View {
         let delta = event.eventAt?.timeIntervalSince(Date()) ?? 0
@@ -1198,8 +1218,28 @@ struct AnalysisPage: View {
     /// session report. Called once per `session.report` change
     /// (or kind switch / page appear), not per render — the
     /// computed properties above just read this cache.
+    ///
+    /// **Throttling while streaming** *(Performance Fix 3)*:
+    /// during `.running`, six brace-walking parsers per flush were
+    /// the dominant CPU cost. JSON blocks almost always arrive in a
+    /// single late chunk, so we:
+    ///   1. Short-circuit when no `_JSON` marker is in the report yet
+    ///      (~70% of mid-stream calls); and
+    ///   2. Throttle remaining calls to once per 500 ms.
+    /// `lastParseAt` is reset to `.distantPast` on phase transitions
+    /// (`.done` / `.error`) so the final guaranteed parse always
+    /// fires regardless of throttle state.
     private func refreshParsedPayloads() {
         let report = session.report
+        if session.phase == .running {
+            guard report.contains("_JSON") else { return }
+            let now = Date()
+            guard now.timeIntervalSince(lastParseAt) >= 0.5 else { return }
+            lastParseAt = now
+        } else {
+            lastParseAt = Date()
+        }
+
         // `.custom`, `.combined`, `.topDownSniper` are permissive
         // (they can emit any of the structured blocks).
         let permissive = (selectedKind == .custom || selectedKind == .combined || selectedKind == .topDownSniper)
@@ -1224,8 +1264,9 @@ struct AnalysisPage: View {
 
         // Clarify is combined-only and lives outside the cached
         // payloads struct (it's an ephemeral question, not chart data).
-        parsedClarify = selectedKind == .combined
+        let clarify = selectedKind == .combined
             ? PromptBuilder.parseClarify(report)
             : nil
+        if parsedClarify != clarify { parsedClarify = clarify }
     }
 }
