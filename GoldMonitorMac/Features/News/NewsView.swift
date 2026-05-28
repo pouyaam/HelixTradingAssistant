@@ -40,10 +40,83 @@ struct NewsView: View {
                         .foregroundStyle(Theme.Color.textMuted)
                 }
                 Spacer()
+                timeZoneMenu
                 refreshButton
                 datePager
             }
         }
+    }
+
+    // MARK: - Timezone picker
+
+    /// Menu chip that lets the user pin the news feed to a different
+    /// timezone (or "Local" — i.e. follow the OS). Default is OS-local
+    /// since most traders watch the desk clock; the picker's there for
+    /// people who track London/NY/Tokyo opens from another zone.
+    private var timeZoneMenu: some View {
+        Menu {
+            Button {
+                store.timeZonePreference = ""
+            } label: {
+                Label("Local (\(systemZoneTitle))", systemImage: store.timeZonePreference.isEmpty ? "checkmark" : "")
+            }
+            Divider()
+            Section("Quick picks") {
+                ForEach(NewsStore.curatedZones) { zone in
+                    Button {
+                        store.timeZonePreference = zone.id
+                    } label: {
+                        if store.timeZonePreference == zone.id {
+                            Label(zone.title, systemImage: "checkmark")
+                        } else {
+                            Text(zone.title)
+                        }
+                    }
+                }
+            }
+            Divider()
+            Menu("All zones…") {
+                ForEach(TimeZone.knownTimeZoneIdentifiers, id: \.self) { id in
+                    Button {
+                        store.timeZonePreference = id
+                    } label: {
+                        if store.timeZonePreference == id {
+                            Label(id, systemImage: "checkmark")
+                        } else {
+                            Text(id)
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "globe")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(store.timeZoneShortLabel)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .opacity(0.6)
+            }
+            .foregroundStyle(Theme.Color.textSecondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.Radius.md).fill(Theme.Color.surface)
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Display timezone for event times and countdowns")
+    }
+
+    /// Pretty name for the OS zone, used inside the "Local (…)" menu
+    /// row so the user can see what they'd be falling back to.
+    private var systemZoneTitle: String {
+        let id = TimeZone.current.identifier
+        if let abbr = TimeZone.current.abbreviation() { return "\(id) · \(abbr)" }
+        return id
     }
 
     private var datePager: some View {
@@ -209,7 +282,7 @@ struct NewsView: View {
             emptyState
         } else {
             ForEach(store.filteredEvents) { event in
-                NewsEventRow(event: event)
+                NewsEventRow(event: event, timeZone: store.effectiveTimeZone)
             }
         }
     }
@@ -260,16 +333,19 @@ struct NewsView: View {
 
     private var dateLabel: String {
         let f = DateFormatter()
+        f.timeZone = store.effectiveTimeZone
         f.dateFormat = "MMM d"
         return f.string(from: store.selectedDate)
     }
 
     private var weekdayLabel: String {
-        let cal = Calendar.current
+        var cal = Calendar.current
+        cal.timeZone = store.effectiveTimeZone
         if cal.isDateInToday(store.selectedDate) { return "TODAY" }
         if cal.isDateInTomorrow(store.selectedDate) { return "TOMORROW" }
         if cal.isDateInYesterday(store.selectedDate) { return "YESTERDAY" }
         let f = DateFormatter()
+        f.timeZone = store.effectiveTimeZone
         f.dateFormat = "EEEE"
         return f.string(from: store.selectedDate).uppercased()
     }
@@ -299,6 +375,11 @@ struct NewsView: View {
 
 private struct NewsEventRow: View {
     let event: ForexFactoryEvent
+    /// Display zone for this row's time + countdown. Pulled from
+    /// `NewsStore.effectiveTimeZone` upstream — passed in rather
+    /// than read from the EnvironmentObject so the row stays a
+    /// pure value-render and SwiftUI can diff it cheaply.
+    let timeZone: TimeZone
 
     var body: some View {
         Card(padding: Theme.Spacing.md) {
@@ -326,8 +407,15 @@ private struct NewsEventRow: View {
         .frame(width: 10)
     }
 
+    /// Time + currency badge + live countdown chip.
+    ///
+    /// The countdown is wrapped in a `TimelineView(.periodic(...))`
+    /// that fires every second — but only this view subtree
+    /// re-renders, so the rest of the row (title, values, sentiment)
+    /// stays static and SwiftUI doesn't re-diff the whole list each
+    /// tick. Widened from 90→110pt to fit the countdown text.
     private var timeColumn: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(localTimeLabel)
                 .font(.system(size: 12, weight: .semibold).monospacedDigit())
                 .foregroundStyle(Theme.Color.textPrimary)
@@ -340,8 +428,72 @@ private struct NewsEventRow: View {
                 .background(
                     Capsule().fill(Theme.Color.surface)
                 )
+            if event.eventAt != nil {
+                TimelineView(.periodic(from: .now, by: 1.0)) { ctx in
+                    countdownChip(now: ctx.date)
+                }
+            }
         }
-        .frame(width: 90, alignment: .leading)
+        .frame(width: 110, alignment: .leading)
+    }
+
+    /// Live countdown / since-fired chip. Colours:
+    ///   • amber when the event is within the next 30 minutes
+    ///   • red while it's "live" (within ±1 min of the timestamp)
+    ///   • muted grey otherwise (both future and past)
+    @ViewBuilder
+    private func countdownChip(now: Date) -> some View {
+        if let when = event.eventAt {
+            let delta = when.timeIntervalSince(now)
+            let (text, tint) = countdownText(delta: delta)
+            HStack(spacing: 3) {
+                Image(systemName: delta >= 0 ? "timer" : "clock.arrow.circlepath")
+                    .font(.system(size: 8, weight: .bold))
+                Text(text)
+                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+            }
+            .foregroundStyle(tint)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(
+                Capsule().fill(tint.opacity(0.12))
+            )
+            .accessibilityLabel(Text(text))
+        }
+    }
+
+    /// Format the time-until / time-since the event. Resolution:
+    ///   • |Δ| < 60s  → "now"
+    ///   • |Δ| < 1h   → "in 12m" / "12m ago"
+    ///   • |Δ| < 24h  → "in 3h 4m" / "3h 4m ago"
+    ///   • otherwise  → "in 2d 4h" / "2d 4h ago"
+    /// Hand-rolled rather than `RelativeDateTimeFormatter` because we
+    /// want fixed-width "h/m/d/s" tokens that monospace-align across
+    /// rows; the formatter's localised output ("a few seconds")
+    /// jitters width every tick.
+    private func countdownText(delta: TimeInterval) -> (String, Color) {
+        let abs = Swift.abs(delta)
+        // Within ±60s → "now" (red — the event is essentially live).
+        if abs < 60 {
+            return ("now", Theme.Color.danger)
+        }
+        let inFuture = delta >= 0
+        let total = Int(abs)
+        let mins = (total / 60) % 60
+        let hours = (total / 3600) % 24
+        let days = total / 86400
+        let body: String
+        if days > 0 {
+            body = hours > 0 ? "\(days)d \(hours)h" : "\(days)d"
+        } else if hours > 0 {
+            body = mins > 0 ? "\(hours)h \(mins)m" : "\(hours)h"
+        } else {
+            body = "\(mins)m"
+        }
+        let phrase = inFuture ? "in \(body)" : "\(body) ago"
+        // Imminent (within 30 min, future) → amber for the trader's eye.
+        let tint: Color = (inFuture && abs <= 1800) ? Theme.Color.warn : Theme.Color.textMuted
+        return (phrase, tint)
     }
 
     private var titleColumn: some View {
@@ -449,6 +601,7 @@ private struct NewsEventRow: View {
             return event.time.isEmpty ? "—" : event.time
         }
         let f = DateFormatter()
+        f.timeZone = timeZone
         f.dateFormat = "HH:mm"
         return f.string(from: when)
     }

@@ -5,11 +5,18 @@ import Foundation
 /// the Go backend uses) and parses the weekly XML payload into
 /// `ForexFactoryEvent` values.
 ///
-/// The "thisweek" XML covers the rolling current week in feed
-/// timezone (US/Eastern). Per-event timestamps come back without a
-/// timezone offset; we resolve them in `parseDateTime` by anchoring
-/// to America/New_York and converting to UTC for storage. The UI
-/// then displays in the user's local zone via `DateFormatter`.
+/// **Feed timezone**: the `nfs.faireconomy.media/ff_calendar_thisweek.xml`
+/// public mirror publishes events with **UTC** clock times — the
+/// per-event `<time>` field (e.g. "12:30pm") is UTC, not Eastern.
+/// This was confirmed by cross-checking known release times:
+/// StatCan releases at 08:30 ET = 12:30 UTC, and the feed lists
+/// that as "12:30pm". Anchoring to America/New_York (as we used
+/// to, and as the Go backend still does) introduced a 4-hour
+/// error that only became visible for users far off the NY meridian
+/// (Tehran, +3:30, reported 20:00 for a 16:00-local event in May).
+///
+/// We resolve in `parseDateTime` by anchoring to UTC. The UI then
+/// displays in the user's chosen zone via `NewsStore.effectiveTimeZone`.
 ///
 /// The schema is small and stable, so we use Foundation's
 /// `XMLParser` directly. No third-party deps.
@@ -79,13 +86,15 @@ private final class WeeklyXMLDelegate: NSObject, XMLParserDelegate {
     private var currentTag: String = ""
     private var charBuffer: String = ""
 
-    /// Lazy formatter for US-Eastern → UTC conversion. Feed dates use
-    /// "MM-DD-YYYY" and times use "h:mma" — both are 12-hour US
-    /// conventions.
+    /// Lazy formatter for feed clock → absolute Date conversion.
+    /// Feed dates are "MM-DD-YYYY" and times "h:mma" (12-hour US
+    /// conventions), and — critically — the clock is **UTC**, not
+    /// Eastern. See the file header for the empirical confirmation
+    /// that pinned this down.
     private lazy var dateTimeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+        f.timeZone = TimeZone(identifier: "UTC") ?? .current
         f.dateFormat = "MM-dd-yyyy h:mma"
         return f
     }()

@@ -41,6 +41,71 @@ final class NewsStore: ObservableObject {
     @Published var showMedium: Bool = true
     @Published var showLow: Bool = true
 
+    // ── Timezone preference ───────────────────────────────────────
+
+    /// IANA timezone identifier (e.g. `America/New_York`,
+    /// `Europe/London`) or the sentinel `""` meaning "follow the OS"
+    /// — which is the default. Persisted to UserDefaults so the
+    /// picker remembers the choice across launches. Set this and
+    /// every formatter that reads `effectiveTimeZone` updates on
+    /// the next render.
+    @Published var timeZonePreference: String = NewsStore.loadTimeZonePref() {
+        didSet {
+            UserDefaults.standard.set(timeZonePreference, forKey: Self.timeZoneDefaultsKey)
+        }
+    }
+
+    /// Resolved zone for display. Falls back to the OS if the saved
+    /// identifier is empty *or* doesn't resolve (e.g. a deprecated
+    /// IANA id). UI binds to this — never to the raw preference —
+    /// so the fallback is centralised.
+    var effectiveTimeZone: TimeZone {
+        if timeZonePreference.isEmpty { return TimeZone.current }
+        return TimeZone(identifier: timeZonePreference) ?? TimeZone.current
+    }
+
+    /// Short label for the picker chip ("Local", "NY", "UTC", …).
+    /// Falls back to the abbreviation (`EST`, `JST`) so unfamiliar
+    /// zones still get a readable handle.
+    var timeZoneShortLabel: String {
+        if timeZonePreference.isEmpty { return "Local" }
+        if let pretty = Self.curatedZones.first(where: { $0.id == timeZonePreference })?.shortLabel {
+            return pretty
+        }
+        return effectiveTimeZone.abbreviation() ?? effectiveTimeZone.identifier
+    }
+
+    /// Curated quick-pick list shown at the top of the timezone
+    /// menu. The full IANA list lives in the "All zones" submenu
+    /// for the long tail.
+    static let curatedZones: [TimeZoneOption] = [
+        .init(id: "UTC",                 shortLabel: "UTC",      title: "UTC"),
+        .init(id: "America/New_York",    shortLabel: "NY",       title: "New York · EST/EDT"),
+        .init(id: "America/Chicago",     shortLabel: "CHI",      title: "Chicago · CST/CDT"),
+        .init(id: "America/Los_Angeles", shortLabel: "LA",       title: "Los Angeles · PST/PDT"),
+        .init(id: "Europe/London",       shortLabel: "LDN",      title: "London · GMT/BST"),
+        .init(id: "Europe/Frankfurt",    shortLabel: "FRA",      title: "Frankfurt · CET/CEST"),
+        .init(id: "Asia/Dubai",          shortLabel: "DXB",      title: "Dubai · GST"),
+        .init(id: "Asia/Tehran",         shortLabel: "TEH",      title: "Tehran · IRST"),
+        .init(id: "Asia/Hong_Kong",      shortLabel: "HK",       title: "Hong Kong · HKT"),
+        .init(id: "Asia/Tokyo",          shortLabel: "TYO",      title: "Tokyo · JST"),
+        .init(id: "Australia/Sydney",    shortLabel: "SYD",      title: "Sydney · AEST/AEDT"),
+    ]
+
+    /// A bookmark on a zone — id is the IANA identifier we persist,
+    /// `shortLabel` is the chip text, `title` is the menu row.
+    struct TimeZoneOption: Hashable, Identifiable {
+        let id: String
+        let shortLabel: String
+        let title: String
+    }
+
+    private static let timeZoneDefaultsKey = "news.timezone.v1"
+
+    private static func loadTimeZonePref() -> String {
+        UserDefaults.standard.string(forKey: timeZoneDefaultsKey) ?? ""
+    }
+
     // ── Internals ─────────────────────────────────────────────────
 
     private var refreshTask: Task<Void, Never>?
