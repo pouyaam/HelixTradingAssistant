@@ -1,0 +1,375 @@
+import Foundation
+import Combine
+
+/// Live-price + history coordinator for every pair that doesn't go
+/// through the Iranian snapshot pipeline. Despite the legacy name
+/// (kept so env-object wiring stays intact), this scheduler manages
+/// FOUR pairs concurrently: `ounce`, `btc`, `sol`, `eth`. Each has
+/// its own Yahoo history symbol (`GC=F` / `BTC-USD` / `SOL-USD` /
+/// `ETH-USD`) and Twelve Data WebSocket symbol (`XAU/USD` / `BTC/USD`
+/// / `SOL/USD` / `ETH/USD`).
+///
+/// Source priority per pair:
+///   1. **Twelve Data WebSocket** — primary live tick stream for all
+///      four symbols on a single socket (free-tier allows 8 symbols).
+///   2. **gold-api.com** — fallback ONLY for `ounce` (no equivalent
+///      free spot endpoint for crypto). Polled every 10s when the
+///      stream's last `XAU/USD` tick is older than `streamStaleSeconds`.
+///   3. **Yahoo Finance** — authoritative history sync per pair every
+///      6th tick (~60s). Overwrites whatever the live sources rolled
+///      and provides the long-tail backfill on launch / gap-fill.
+@MainActor
+final class YahooScheduler: ObservableObject {
+    /// Latest spot price per pair, keyed by internal pair id
+    /// (`ounce`, `btc`, `sol`, `eth`). The dashboard reads this map
+    /// directly for sidebar / header / chart-tag price display.
+    @Published private(set) var latestPrices: [String: Double] = [:]
+    /// Back-compat accessor — many existing call sites still read
+    /// `latestOuncePrice` specifically. Returns the entry in the map
+    /// rather than a separate stored field.
+    var latestOuncePrice: Double? { latestPrices["ounce"] }
+
+    /// Timestamp of the last successful update (any source). Drives
+    /// the dashboard's "fresh as of …" indicator and the countdown.
+    @Published private(set) var lastUpdateAt: Date?
+    /// Last error string, source-prefixed (`twelve-data:` /
+    /// `gold-api:` / `yahoo:`) so the UI can see which feed died.
+    @Published private(set) var lastError: String?
+    /// True once the first Yahoo history bootstrap completed for at
+    /// least one pair. Used to gate "no data" UI states.
+    @Published private(set) var hasBootstrapped: Bool = false
+    /// In-flight indicator for the spinner.
+    @Published private(set) var isFetching: Bool = false
+    /// Which source delivered the most recent price tick to ANY pair.
+    /// Surfaced in the debug pane.
+    @Published private(set) var activeLiveSource: String = "(none)"
+
+    /// 10s tick — for the gold-api fallback path. Twelve Data ticks
+    /// arrive on their own clock independent of this.
+    let tickIntervalSeconds: Int = 10
+
+    /// Yahoo history sync runs every Nth tick (~60s).
+    private let yahooEveryNTicks: Int = 6
+
+    /// gold-api fallback kicks in when the XAU stream has been quiet
+    /// for this long. 30s is well past Twelve Data's heartbeat
+    /// cadence — anything longer means we've actually lost the
+    /// stream.
+    private let streamStaleSeconds: TimeInterval = 30
+
+    /// Per-pair config: which symbol to ask each upstream for, plus
+    /// market-calendar flags. Driven directly from
+    /// `TradingPair.catalog` so adding a new metal/crypto pair is
+    /// purely a catalog entry + this static map.
+    private struct PairConfig {
+        let pairID: String
+        let yahooSymbol: String         // e.g. "GC=F", "BTC-USD", "^DJI"
+        /// nil = no Twelve Data WS feed for this symbol (e.g. US
+        /// indices on the free tier). The bar history still syncs
+        /// via Yahoo polling — the chart just doesn't get
+        /// sub-second live ticks for these pairs.
+        let twelveDataSymbol: String?
+        let respectsWeekend: Bool       // forex + indices = yes, crypto = no
+        let goldAPIFallback: Bool       // only ounce has a free spot fallback
+    }
+
+    private let pairs: [PairConfig] = [
+        .init(pairID: "ounce", yahooSymbol: "GC=F",    twelveDataSymbol: "XAU/USD",
+              respectsWeekend: true,  goldAPIFallback: true),
+        .init(pairID: "btc",   yahooSymbol: "BTC-USD", twelveDataSymbol: "BTC/USD",
+              respectsWeekend: false, goldAPIFallback: false),
+        .init(pairID: "sol",   yahooSymbol: "SOL-USD", twelveDataSymbol: "SOL/USD",
+              respectsWeekend: false, goldAPIFallback: false),
+        .init(pairID: "eth",   yahooSymbol: "ETH-USD", twelveDataSymbol: "ETH/USD",
+              respectsWeekend: false, goldAPIFallback: false),
+        .init(pairID: "dji",   yahooSymbol: "^DJI",    twelveDataSymbol: nil,
+              respectsWeekend: true,  goldAPIFallback: false),
+    ]
+
+    /// Reverse-lookup helper: Twelve Data symbol → internal pair id.
+    /// Built once from `pairs` and used in the WS tick callback to
+    /// route a tick by symbol back to the right OHLC bucket. Pairs
+    /// with no Twelve Data feed (nil `twelveDataSymbol`) drop out.
+    private var pairIDByTwelveDataSymbol: [String: String] {
+        Dictionary(uniqueKeysWithValues: pairs.compactMap { cfg in
+            cfg.twelveDataSymbol.map { ($0, cfg.pairID) }
+        })
+    }
+
+    private var task: Task<Void, Never>?
+    private var stream: TwelveDataSpotStream?
+    private var tickCount: Int = 0
+
+    /// Optional higher-priority source for the XAU/USD live feed. When
+    /// set and "fresh", TwelveData ticks AND the gold-api fallback are
+    /// suppressed for the ounce pair — same data flows through, just
+    /// from cTrader instead. Other symbols are unaffected.
+    private weak var cTraderProvider: CTraderScheduler?
+    /// Repo reference cached at start() so external entry points
+    /// (cTrader pushes via applyExternalTick) can roll bars without
+    /// re-plumbing the AppDatabase through every call. OHLCRepo is a
+    /// value type so a strong reference is fine.
+    private var cachedRepo: OHLCRepo?
+
+    /// Inject the cTrader scheduler so this YahooScheduler can ask
+    /// "should I suppress my XAU ticks because cTrader is hotter?".
+    /// Pass `nil` to clear (e.g. for unit tests). Called once at boot.
+    func attachCTraderProvider(_ provider: CTraderScheduler) {
+        self.cTraderProvider = provider
+    }
+
+    /// External entry point for ticks from sources OTHER than this
+    /// scheduler's owned TwelveData / gold-api / Yahoo. Used by
+    /// `CTraderScheduler` to feed cTrader ticks through the exact
+    /// same OHLC + published-price pipeline as everything else.
+    /// No-op until `start(database:)` has populated `cachedRepo`.
+    func applyExternalTick(price: Double, pairID: String, source: String) {
+        guard let repo = cachedRepo else { return }
+        applyLiveTick(price: price, pairID: pairID, source: source, repo: repo)
+    }
+
+    /// Start every loop. Idempotent — repeated calls from AppState's
+    /// boot path are no-ops once running.
+    func start(database: AppDatabase) {
+        guard task == nil else { return }
+        let repo = database.ohlcRepo
+        cachedRepo = repo
+
+        // 1) Twelve Data WebSocket — one socket, all four symbols.
+        let s = TwelveDataSpotStream(symbols: pairs.compactMap { $0.twelveDataSymbol })
+        s.onTick = { [weak self] symbol, price in
+            guard let self = self else { return }
+            let id = self.pairIDByTwelveDataSymbol[symbol] ?? symbol
+            // Fallback gate: if cTrader is currently the authoritative
+            // source for ounce, don't let TwelveData overwrite it.
+            // Other pairs are unaffected because cTrader only streams
+            // XAU/USD today.
+            if id == "ounce", self.cTraderProvider?.isFreshForXAUUSD() == true {
+                return
+            }
+            self.applyLiveTick(price: price, pairID: id, source: "twelve-data", repo: repo)
+        }
+        s.start()
+        stream = s
+
+        // 2) Bootstrap + polling/sync loop.
+        task = Task { [weak self] in
+            await self?.bootstrapAndGapFill(repo: repo)
+            while !Task.isCancelled {
+                let interval = UInt64(self?.tickIntervalSeconds ?? 60) * 1_000_000_000
+                try? await Task.sleep(nanoseconds: interval)
+                if Task.isCancelled { break }
+                await self?.tick(repo: repo)
+            }
+        }
+    }
+
+    func stop() {
+        task?.cancel()
+        task = nil
+        stream?.stop()
+        stream = nil
+    }
+
+    // ── Bootstrap / gap-fill ──────────────────────────────────────────
+    //
+    // Yahoo-only: gold-api has no history, Twelve Data's free tier
+    // doesn't expose historical OHLC over WS. One pass over every
+    // managed pair at launch; gaps detected by latest stored bar.
+    private func bootstrapAndGapFill(repo: OHLCRepo) async {
+        isFetching = true
+        defer { isFetching = false }
+        let now = Date()
+        for cfg in pairs {
+            // Weekend cleanup only matters for markets that have
+            // weekends; crypto never has closed-day rows.
+            if cfg.respectsWeekend {
+                _ = try? repo.deleteClosedDayBars(pairID: cfg.pairID)
+            }
+            do {
+                // 5-minute history (1 month deep).
+                let last5m = try repo.latestBucket(pairID: cfg.pairID, timeframe: "5m")
+                if last5m == nil || now.timeIntervalSince(last5m!) > 5 * 60 {
+                    let bars = try await YahooGoldSource.fetchHistory(
+                        pairID: cfg.pairID,
+                        symbol: cfg.yahooSymbol,
+                        skipWeekends: cfg.respectsWeekend,
+                        range: "1mo",
+                        interval: "5m"
+                    )
+                    try repo.upsertMany(bars)
+                }
+                // 1-minute history (8 days deep).
+                let last1m = try repo.latestBucket(pairID: cfg.pairID, timeframe: "1m")
+                if last1m == nil || now.timeIntervalSince(last1m!) > 60 {
+                    let bars = try await YahooGoldSource.fetchHistory(
+                        pairID: cfg.pairID,
+                        symbol: cfg.yahooSymbol,
+                        skipWeekends: cfg.respectsWeekend,
+                        range: "8d",
+                        interval: "1m"
+                    )
+                    try repo.upsertMany(bars)
+                }
+                // Seed the published price from the last stored bar.
+                if let last1m = try repo.latestBucket(pairID: cfg.pairID, timeframe: "1m"),
+                   let recent = try repo.read(
+                    pairID: cfg.pairID, timeframe: "1m",
+                    since: last1m.addingTimeInterval(-60),
+                    until: last1m
+                   ).last {
+                    latestPrices[cfg.pairID] = recent.close
+                }
+                self.hasBootstrapped = true
+                self.lastError = nil
+            } catch {
+                self.lastError = "yahoo \(cfg.pairID): \(error.localizedDescription)"
+            }
+        }
+        self.lastUpdateAt = Date()
+    }
+
+    // ── Periodic tick ─────────────────────────────────────────────────
+    private func tick(repo: OHLCRepo) async {
+        isFetching = true
+        defer { isFetching = false }
+        tickCount += 1
+
+        // Yahoo authoritative history sync every Nth tick. Fans out
+        // across all managed pairs in parallel. The Twelve Data WS
+        // and cTrader bridge (when running) keep the *latest tick*
+        // fresher than this in between syncs; Yahoo is what gives
+        // us the OHLC bars.
+        if tickCount % yahooEveryNTicks == 0 {
+            await withTaskGroup(of: Void.self) { group in
+                for cfg in pairs {
+                    group.addTask { [self] in
+                        await syncYahoo(cfg: cfg, repo: repo)
+                    }
+                }
+            }
+            self.lastUpdateAt = Date()
+        }
+    }
+
+    /// Sync one pair's 1m + 5m history in parallel. Errors are
+    /// captured into `lastError` but don't bail — one pair failing
+    /// shouldn't stop the others.
+    private func syncYahoo(cfg: PairConfig, repo: OHLCRepo) async {
+        do {
+            async let oneMinT = YahooGoldSource.fetchHistory(
+                pairID: cfg.pairID, symbol: cfg.yahooSymbol,
+                skipWeekends: cfg.respectsWeekend,
+                range: "8d", interval: "1m"
+            )
+            async let fiveMinT = YahooGoldSource.fetchHistory(
+                pairID: cfg.pairID, symbol: cfg.yahooSymbol,
+                skipWeekends: cfg.respectsWeekend,
+                range: "1mo", interval: "5m"
+            )
+            let oneMin = try await oneMinT
+            let fiveMin = try await fiveMinT
+            try repo.upsertMany(oneMin)
+            try repo.upsertMany(fiveMin)
+        } catch {
+            self.lastError = "yahoo \(cfg.pairID): \(error.localizedDescription)"
+        }
+    }
+
+    // ── Live-tick handler (Twelve Data + gold-api) ───────────────────
+
+    /// Common path for an incoming live price. Publishes it for the
+    /// pair, rolls 1m + 5m buckets, updates timestamps + source tag.
+    private func applyLiveTick(
+        price: Double,
+        pairID: String,
+        source: String,
+        repo: OHLCRepo
+    ) {
+        latestPrices[pairID] = price
+        activeLiveSource = "\(source)/\(pairID)"
+        let cfg = pairs.first { $0.pairID == pairID }
+        let respectsWeekend = cfg?.respectsWeekend ?? false
+        try? rollLiveBar(pairID: pairID, timeframe: "1m", bucketSize: 60,
+                         respectsWeekend: respectsWeekend, price: price, repo: repo)
+        try? rollLiveBar(pairID: pairID, timeframe: "5m", bucketSize: 300,
+                         respectsWeekend: respectsWeekend, price: price, repo: repo)
+        // Throttle lastUpdateAt writes — it's @Published and feeds
+        // several heavy observers (chart reload trigger, header
+        // FetchTimerView re-render, status bar). At cTrader's 2+ Hz
+        // flush rate, writing it every tick would fire
+        // `objectWillChange` on the scheduler 2× per second, which
+        // re-evaluates every view that reads ANY of this scheduler's
+        // properties. 1 Hz here keeps the timer countdown looking
+        // live without those cascade costs.
+        let now = Date()
+        if let prev = lastUpdateAt, now.timeIntervalSince(prev) < 1.0 {
+            hasBootstrapped = true
+            return
+        }
+        lastUpdateAt = now
+        hasBootstrapped = true
+    }
+
+    /// True if Twelve Data has delivered an XAU/USD tick recently.
+    /// Drives the gold-api fallback gate (which only applies to the
+    /// ounce — crypto symbols have no fallback path).
+    private func streamIsFreshForOunce() -> Bool {
+        guard let last = stream?.lastTickAtBySymbol["XAU/USD"] else { return false }
+        return Date().timeIntervalSince(last) < streamStaleSeconds
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────
+
+    /// Upsert (or extend) the open OHLC bar for "right now" at the
+    /// given pair + timeframe. Open is captured on first touch;
+    /// high/low expand monotonically; close always reflects the
+    /// latest tick. For markets with a weekly close (gold), skips
+    /// weekend buckets to keep stale Friday quotes out of the chart.
+    private func rollLiveBar(
+        pairID: String,
+        timeframe: String,
+        bucketSize: TimeInterval,
+        respectsWeekend: Bool,
+        price: Double,
+        repo: OHLCRepo
+    ) throws {
+        let nowSecs = Date().timeIntervalSince1970
+        let bucketSecs = floor(nowSecs / bucketSize) * bucketSize
+        let bucketStart = Date(timeIntervalSince1970: bucketSecs)
+        if respectsWeekend && MarketCalendar.isClosedDay(bucketStart) { return }
+
+        let existing = (try? repo.read(
+            pairID: pairID,
+            timeframe: timeframe,
+            since: bucketStart,
+            until: bucketStart
+        ))?.first
+
+        let bar: OHLCBar
+        if let existing = existing {
+            bar = OHLCBar(
+                pairID: pairID,
+                timeframe: timeframe,
+                bucketStart: bucketStart,
+                open:  existing.open,
+                high:  max(existing.high, price),
+                low:   min(existing.low,  price),
+                close: price,
+                volume: existing.volume
+            )
+        } else {
+            bar = OHLCBar(
+                pairID: pairID,
+                timeframe: timeframe,
+                bucketStart: bucketStart,
+                open:  price,
+                high:  price,
+                low:   price,
+                close: price,
+                volume: nil
+            )
+        }
+        try repo.upsertMany([bar])
+    }
+}

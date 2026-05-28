@@ -1,0 +1,78 @@
+# xcodegen spec — run `xcodegen generate` in this directory to produce HelixTradingApp.xcodeproj.
+# Keeps the project file declarative and free of merge conflicts vs hand-rolled .pbxproj.
+
+name: HelixTradingApp
+options:
+  bundleIdPrefix: club.helixtrading
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  groupSortPosition: top
+  developmentLanguage: en
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    ENABLE_HARDENED_RUNTIME: YES
+    # Allows debug builds without a paid developer account.
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+    # SwiftUI previews + macOS app need this on.
+    ENABLE_PREVIEWS: YES
+
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: 7.0.0
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui
+    from: 2.4.0
+
+targets:
+  HelixTradingApp:
+    type: application
+    platform: macOS
+    sources:
+      - path: GoldMonitorMac
+      - path: GoldMonitorMac/Resources
+      # cBot source bundled into the app so the Wizard can show
+      # it inline and copy to clipboard. Canonical location is
+      # CTraderBridge/HelixBridgeBot.cs (sibling of the app
+      # sources); listed here with `buildPhase: resources` to
+      # force it into the Resources phase rather than Sources.
+      - path: CTraderBridge/HelixBridgeBot.cs
+        buildPhase: resources
+    resources:
+      - path: GoldMonitorMac/Resources/Assets.xcassets
+    dependencies:
+      - package: GRDB
+        product: GRDB
+      - package: MarkdownUI
+        product: MarkdownUI
+    info:
+      path: GoldMonitorMac/Info.plist
+      properties:
+        CFBundleName: HelixTrading
+        CFBundleDisplayName: Helix Trading App
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: "13.0"
+        NSHumanReadableCopyright: "Copyright © 2026 Helix Trading Club. All rights reserved."
+        NSAppTransportSecurity:
+          # Open ATS — the app connects to user-configured backends which
+          # may be on plain HTTP / local IPs (e.g. http://192.168.x.x:5173
+          # for a server on the same LAN). Locking this down would force
+          # every user to add their own NSExceptionDomains entry.
+          # We're not on the App Store; this trade is acceptable.
+          NSAllowsArbitraryLoads: true
+        # No mic/camera/location — explicitly omit usage strings.
+        LSApplicationCategoryType: public.app-category.finance
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: club.helixtrading.app
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_USER_SCRIPT_SANDBOXING: NO

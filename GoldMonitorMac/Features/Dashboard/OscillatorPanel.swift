@@ -1,0 +1,250 @@
+import SwiftUI
+import Charts
+
+/// One oscillator rendered as a thin sub-chart underneath the price
+/// chart. Each kind has its own Y scale (0-100 for RSI/Stoch, auto for
+/// MACD) and per-kind reference lines (overbought / oversold for RSI &
+/// Stochastic; zero baseline for MACD).
+///
+/// X axis is hidden — the main chart's X axis labels the time for the
+/// whole stack via shared `xDomain`.
+struct OscillatorPanel: View {
+    let kind: OscillatorKind
+    let candles: [Candle]
+    let config: OscillatorConfig
+    /// Same bar-index domain the price chart uses; lets pan/zoom on the
+    /// price chart move this panel in lock-step.
+    let xDomain: ClosedRange<Double>?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(kind.displayName(config: config))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                Spacer()
+                latestReadout
+            }
+            Chart {
+                marks
+                referenceLines
+            }
+            .chartXScale(domain: effectiveDomain)
+            .chartYScale(domain: yDomain)
+            .chartXAxis(.hidden)
+            .chartYAxis {
+                AxisMarks(position: .leading, values: yAxisValues) { value in
+                    AxisGridLine().foregroundStyle(Theme.Color.border.opacity(0.5))
+                    AxisValueLabel {
+                        if let v = value.as(Double.self) {
+                            Text(yLabel(v))
+                                .font(.system(size: 8, weight: .medium).monospacedDigit())
+                                .foregroundStyle(Theme.Color.textMuted)
+                        }
+                    }
+                }
+            }
+            .frame(height: 90)
+            .clipped()
+        }
+    }
+
+    // MARK: - Marks dispatch
+
+    @ChartContentBuilder
+    private var marks: some ChartContent {
+        let pts = computedPoints
+        switch kind {
+        case .rsi:
+            ForEach(pts) { p in
+                LineMark(
+                    x: .value("Bar", Double(p.index)),
+                    y: .value("RSI", p.value),
+                    series: .value("Series", "rsi")
+                )
+                .foregroundStyle(rsiColor)
+                .lineStyle(StrokeStyle(lineWidth: 1.4))
+                .interpolationMethod(.monotone)
+            }
+        case .macd:
+            ForEach(pts) { p in
+                if p.band == "histogram" {
+                    BarMark(
+                        x: .value("Bar", Double(p.index)),
+                        y: .value("Hist", p.value)
+                    )
+                    .foregroundStyle((p.value >= 0
+                                       ? Theme.Color.success
+                                       : Theme.Color.danger).opacity(0.6))
+                } else {
+                    LineMark(
+                        x: .value("Bar", Double(p.index)),
+                        y: .value("MACD", p.value),
+                        series: .value("Series", p.band)
+                    )
+                    .foregroundStyle(p.band == "macd" ? macdLineColor : signalColor)
+                    .lineStyle(StrokeStyle(lineWidth: p.band == "macd" ? 1.4 : 1.2))
+                    .interpolationMethod(.monotone)
+                }
+            }
+        case .stochastic:
+            ForEach(pts) { p in
+                LineMark(
+                    x: .value("Bar", Double(p.index)),
+                    y: .value("%", p.value),
+                    series: .value("Series", p.band)
+                )
+                .foregroundStyle(p.band == "k" ? stochKColor : stochDColor)
+                .lineStyle(StrokeStyle(lineWidth: p.band == "k" ? 1.4 : 1.2))
+                .interpolationMethod(.monotone)
+            }
+        }
+    }
+
+    /// Horizontal reference lines specific to each oscillator. RSI uses
+    /// 30/70 (oversold/overbought), Stochastic uses 20/80, MACD uses 0.
+    @ChartContentBuilder
+    private var referenceLines: some ChartContent {
+        switch kind {
+        case .rsi:
+            RuleMark(y: .value("Overbought", 70))
+                .foregroundStyle(Theme.Color.danger.opacity(0.35))
+                .lineStyle(StrokeStyle(lineWidth: 0.6, dash: [3, 3]))
+            RuleMark(y: .value("Oversold", 30))
+                .foregroundStyle(Theme.Color.success.opacity(0.35))
+                .lineStyle(StrokeStyle(lineWidth: 0.6, dash: [3, 3]))
+        case .stochastic:
+            RuleMark(y: .value("Overbought", 80))
+                .foregroundStyle(Theme.Color.danger.opacity(0.35))
+                .lineStyle(StrokeStyle(lineWidth: 0.6, dash: [3, 3]))
+            RuleMark(y: .value("Oversold", 20))
+                .foregroundStyle(Theme.Color.success.opacity(0.35))
+                .lineStyle(StrokeStyle(lineWidth: 0.6, dash: [3, 3]))
+        case .macd:
+            RuleMark(y: .value("Zero", 0))
+                .foregroundStyle(Theme.Color.border.opacity(0.6))
+                .lineStyle(StrokeStyle(lineWidth: 0.6))
+        }
+    }
+
+    // MARK: - Latest readout (top-right label)
+
+    /// Shows the most recent value(s) of the oscillator so the user can
+    /// read them without hovering. RSI/Stoch are bounded — print as
+    /// rounded ints. MACD prints as a 2-decimal float.
+    @ViewBuilder
+    private var latestReadout: some View {
+        let pts = computedPoints
+        switch kind {
+        case .rsi:
+            if let last = pts.last {
+                Text(String(format: "%.1f", last.value))
+                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(rsiColor)
+            }
+        case .macd:
+            if let macd = pts.last(where: { $0.band == "macd" }),
+               let sig  = pts.last(where: { $0.band == "signal" }) {
+                HStack(spacing: 8) {
+                    label("MACD", String(format: "%.2f", macd.value), color: macdLineColor)
+                    label("SIG",  String(format: "%.2f", sig.value),  color: signalColor)
+                }
+            }
+        case .stochastic:
+            if let k = pts.last(where: { $0.band == "k" }),
+               let d = pts.last(where: { $0.band == "d" }) {
+                HStack(spacing: 8) {
+                    label("%K", String(format: "%.1f", k.value), color: stochKColor)
+                    label("%D", String(format: "%.1f", d.value), color: stochDColor)
+                }
+            }
+        }
+    }
+
+    private func label(_ key: String, _ value: String, color: Color) -> some View {
+        HStack(spacing: 3) {
+            Text(key)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Theme.Color.textMuted)
+            Text(value)
+                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                .foregroundStyle(color)
+        }
+    }
+
+    // MARK: - Compute
+
+    /// Cached per-render. Recomputing across all marks/readouts in the
+    /// same body call would be wasteful for large series.
+    private var computedPoints: [IndicatorPoint] {
+        switch kind {
+        case .rsi:
+            return Oscillators.rsi(candles, period: config.rsiPeriod)
+        case .macd:
+            return Oscillators.macd(
+                candles,
+                fast: config.macdFast,
+                slow: config.macdSlow,
+                signal: config.macdSignal
+            )
+        case .stochastic:
+            return Oscillators.stochastic(
+                candles,
+                kPeriod: config.stochK,
+                dPeriod: config.stochD
+            )
+        }
+    }
+
+    // MARK: - Scales
+
+    private var effectiveDomain: ClosedRange<Double> {
+        if let d = xDomain { return d }
+        let n = candles.count
+        guard n > 0 else { return 0 ... 1 }
+        if n == 1 { return -0.5 ... 0.5 }
+        return -0.5 ... Double(n - 1) + 0.5
+    }
+
+    private var yDomain: ClosedRange<Double> {
+        switch kind {
+        case .rsi, .stochastic:
+            return 0 ... 100
+        case .macd:
+            // Pad ±5% around the visible MACD range so the histogram
+            // bars don't sit flush against the top/bottom edges.
+            let pts = computedPoints
+            let values = pts.map(\.value)
+            let lo = values.min() ?? -1
+            let hi = values.max() ?? 1
+            let span = max(hi - lo, 0.001)
+            let pad = span * 0.1
+            return (lo - pad) ... (hi + pad)
+        }
+    }
+
+    private var yAxisValues: [Double] {
+        switch kind {
+        case .rsi:        return [30, 50, 70]
+        case .stochastic: return [20, 50, 80]
+        case .macd:       return [yDomain.lowerBound, 0, yDomain.upperBound]
+        }
+    }
+
+    private func yLabel(_ v: Double) -> String {
+        switch kind {
+        case .rsi, .stochastic:
+            return String(format: "%.0f", v)
+        case .macd:
+            return String(format: "%.2f", v)
+        }
+    }
+
+    // MARK: - Colors
+
+    private var rsiColor:    Color { Color(red: 1.00, green: 0.78, blue: 0.20) }
+    private var macdLineColor: Color { Color(red: 0.38, green: 0.65, blue: 1.00) }
+    private var signalColor:   Color { Color(red: 1.00, green: 0.45, blue: 0.65) }
+    private var stochKColor:   Color { Color(red: 0.38, green: 0.65, blue: 1.00) }
+    private var stochDColor:   Color { Color(red: 1.00, green: 0.45, blue: 0.65) }
+}

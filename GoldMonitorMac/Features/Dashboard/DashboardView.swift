@@ -1,0 +1,1908 @@
+import SwiftUI
+import Combine
+
+/// Dashboard with live chart. Phases A+B were a placeholder; this is the
+/// real implementation using ChartView from Phase D + scheduler from Phase C.
+struct DashboardView: View {
+    @EnvironmentObject private var app: AppState
+    @EnvironmentObject private var yahoo: YahooScheduler
+
+    // Persisted session state — every selection the user makes here gets
+    // restored on relaunch. RawRepresentable<String> enums and primitive
+    // toggles use @AppStorage directly; the indicator/oscillator Sets are
+    // backed by comma-separated rawValue strings (see helpers below).
+    @AppStorage("dashboard.timeframe")  private var timeframe: Timeframe = .h1
+    @AppStorage("dashboard.chartType")  private var userChartType: ChartType = .candle
+    @AppStorage("dashboard.showVolume") private var showVolume: Bool = true
+    @AppStorage("dashboard.indicators")  private var indicatorsRaw: String = ""
+    @AppStorage("dashboard.oscillators") private var oscillatorsRaw: String = ""
+    /// Layers temporarily hidden by the Layers popover. Distinct from
+    /// "disabled" — a hidden indicator stays in `enabledIndicators`
+    /// (and so persists / shows up in the menu as toggled-on) but the
+    /// chart skips rendering it. Same shape as the enabled sets: CSV
+    /// of rawValues, persisted via @AppStorage.
+    @AppStorage("dashboard.hiddenIndicators")  private var hiddenIndicatorsRaw: String = ""
+    @AppStorage("dashboard.hiddenOscillators") private var hiddenOscillatorsRaw: String = ""
+
+    @State private var candles: [Candle] = []
+    @State private var isLoading: Bool = false
+    /// User-pinned X-axis window, in *bar indices* (Double for fractional
+    /// smoothness during pan/zoom). nil ⇒ chart auto-fits to the full
+    /// series. Index-based so consecutive candles never get separated by
+    /// calendar gaps (weekend market closures, etc.). Reset whenever the
+    /// underlying series changes (pair / timeframe). Deliberately NOT
+    /// persisted — user expectations are that relaunching shows fresh
+    /// auto-fit, not a stale zoomed window.
+    @State private var xDomain: ClosedRange<Double>? = nil
+    /// User-tunable parameters for the oscillators (RSI period, MACD
+    /// fast/slow/signal, etc.). Loaded from UserDefaults on init so
+    /// settings stick across launches.
+    @State private var oscillatorConfig: OscillatorConfig = .load()
+    /// Indicator-settings sheet visibility.
+    @State private var showIndicatorSettings: Bool = false
+    /// Support / Resistance levels the user has chosen to draw on the
+    /// chart from an AI analysis. Cleared when the pair changes; kept
+    /// across timeframe switches since levels are price-based, not
+    /// time-based.
+    @State private var srLevels: PromptBuilder.SRLevels = .init(support: [], resistance: [])
+    /// FVG / iFVG zones from the AI analysis. Same lifecycle as
+    /// `srLevels` — pair-scoped, cleared on pair change.
+    @State private var fvgZones: [PromptBuilder.FVGZone] = []
+    /// Supply & Demand rectangles from a Confluence Scanner (or custom) run.
+    /// Same lifecycle as `fvgZones` — pair-scoped, cleared when
+    /// the user switches pairs. Rendered by ChartView as
+    /// translucent rectangles tinted green for Demand / red for
+    /// Supply.
+    @State private var supplyDemandZones: [PromptBuilder.SupplyDemandZone] = []
+    /// Full TA main trade plan (entry / TP / SL + bias). Rendered as
+    /// three dashed lines + a bias capsule. Pair-scoped, cleared on
+    /// pair change.
+    @State private var taScenario: PromptBuilder.TAScenario? = nil
+    /// Optional alternative trade plan from the same TA run. Same
+    /// shape as `taScenario`; ChartView draws it with muted styling
+    /// so the user can tell at a glance which lines belong to which
+    /// plan.
+    @State private var taAltScenario: PromptBuilder.TAScenario? = nil
+    /// Visibility flags for each AI overlay. "Hidden" = chart skips
+    /// drawing, underlying data preserved. Distinct from "delete"
+    /// (clears the state outright).
+    @State private var srVisible: Bool = true
+    @State private var fvgVisible: Bool = true
+    @State private var supplyDemandVisible: Bool = true
+    @State private var scenarioVisible: Bool = true
+    @State private var altScenarioVisible: Bool = true
+    /// Layers popover open/close.
+    @State private var showLayersPopover: Bool = false
+    /// Network debug sheet open/close. Driven by the 🐞 toolbar
+    /// button.
+    @State private var showDebugLogSheet: Bool = false
+
+    /// Lives at the dashboard scope so AI analysis runs survive opening
+    /// and closing the AnalysisSheet — the user can launch a run, dismiss
+    /// the sheet, scroll the chart, then reopen and find the stream
+    /// still going (or done, with the report waiting). Also holds the
+    /// persistent history of past analyses.
+    /// Lifted to the app root (see HelixTradingApp.swift) so the
+    /// Analytics view in the Portfolio tab can read the outcome
+    /// history. Still consumed here for AnalysisPage's child wiring.
+    @EnvironmentObject private var analysisStore: AnalysisStore
+    /// Per-pair persistent store of user-drawn shapes (horizontal /
+    /// trend / rectangle). One store across all pairs — `pairID` is
+    /// part of the lookup key, not a separate object per pair.
+    @StateObject private var drawingStore = DrawingStore()
+    /// Per-pair persistent store of paper trades activated from AI
+    /// scenarios. Subscribes to the live price stream below to drive
+    /// pending → active → closed transitions.
+    /// Lifted to the app root so AutoTraderEngine can mutate the
+    /// same instance the dashboard observes. Reads come back via
+    /// the same `byPair` map so existing chart overlays / Layers
+    /// popover / outcome stamping all keep working.
+    @EnvironmentObject private var tradeStore: TradeStore
+    /// Per-pair auto-trader config — read for the AUTO pill colour
+    /// + click action (jumps to the matching Settings category).
+    @EnvironmentObject private var autoTraderConfig: AutoTraderConfigStore
+    /// Auto-trader engine — read for the live state badge label.
+    @EnvironmentObject private var autoTrader: AutoTraderEngine
+    @EnvironmentObject private var paperBalance: PaperBalance
+    /// Per-app store of price alerts (manual + scenario-derived).
+    /// Receives the same yahoo / scheduler ticks the trade
+    /// evaluator does and pops macOS notifications on hit.
+    @StateObject private var alertStore = AlertStore()
+    /// Drives the "set price alert" sheet from the chart header.
+    @State private var showAlertSheet: Bool = false
+
+    /// Strategy-profile picker sheet — fires from the AUTO toggle
+    /// when the user enables auto-trading for a pair. The CTS
+    /// Analyze button in the analysis page has its own
+    /// equivalent sheet so each surface owns its own state.
+    @State private var profileSheet: ProfileSheetMode? = nil
+    struct ProfileSheetMode: Identifiable {
+        let pairID: String
+        var id: String { pairID }
+    }
+    /// Drives the activation sheet. Non-nil when the user has just
+    /// clicked "Activate as trade" on a completed full-TA analysis.
+    /// Carries both the scenario AND the source history entry ID so
+    /// the resulting Trade can stamp its outcome back onto the
+    /// entry when it closes (drives the win-rate stat).
+    @State private var pendingActivation: PendingActivation?
+
+    /// Wraps a scenario + its source history entry ID for
+    /// presentation via `.sheet(item:)`. Identifiable on the
+    /// scenario's stable id (composed from bias + prices) so two
+    /// activations of the same plan don't fragment into separate
+    /// sheets.
+    private struct PendingActivation: Identifiable, Equatable {
+        let scenario: PromptBuilder.TAScenario
+        let sourceHistoryEntryID: UUID?
+        var id: String { scenario.id }
+    }
+
+    /// IDs of trades whose terminal outcomes we've already stamped
+    /// back onto the source history entry. Prevents the
+    /// `tradeStore.$byPair` observer from double-recording a win
+    /// or loss on every subsequent emission. Deliberately not
+    /// persisted — the history entry's own `outcome` field is
+    /// idempotent (recordOutcome is a no-op when already set), so
+    /// even if this set resets across launches the worst case is
+    /// one redundant lookup per trade.
+    @State private var recordedOutcomeTradeIDs: Set<UUID> = []
+
+    /// Create or refresh the entry + SL alerts paired with a
+    /// scenario. `suffix` distinguishes main vs alt so the
+    /// notification titles read sensibly. Removing the scenario
+    /// (passing nil) wipes its alerts. Called from `.onChange` on
+    /// the dashboard's scenario state.
+    private func syncScenarioAlerts(_ scenario: PromptBuilder.TAScenario?, suffix: String) {
+        guard let pairID = app.selectedPairID,
+              let pairName = app.pairs.first(where: { $0.id == pairID })?.name
+        else { return }
+        // Always drop the previous batch under this (pair, suffix)
+        // slot — if scenario is now nil this just cleans up; if
+        // it's a different scenario the new add() below installs
+        // replacements. Prefix-based so we catch the old
+        // fingerprint even when scenario.id changes.
+        let prefix = "\(pairID)|\(suffix)|"
+        alertStore.removeWithSourcePrefix(prefix)
+
+        guard let scenario = scenario else { return }
+        let fingerprint = "\(prefix)\(scenario.id)"
+        if let entry = scenario.entry {
+            alertStore.add(PriceAlert(
+                id: UUID(),
+                pairID: pairID,
+                kind: .scenarioEntry,
+                level: entry,
+                title: "\(pairName) — entry filled \(suffix)",
+                body: "\(scenario.bias.rawValue.uppercased()) entry at \(entry) touched.",
+                createdAt: Date(),
+                firedAt: nil,
+                sourceScenarioID: fingerprint
+            ))
+        }
+        alertStore.add(PriceAlert(
+            id: UUID(),
+            pairID: pairID,
+            kind: .scenarioSL,
+            level: scenario.stopLoss,
+            title: "\(pairName) — stop hit \(suffix)",
+            body: "\(scenario.bias.rawValue.uppercased()) plan invalidated at SL \(scenario.stopLoss).",
+            createdAt: Date(),
+            firedAt: nil,
+            sourceScenarioID: fingerprint
+        ))
+    }
+    /// Tool currently armed in the chart toolbar. `.none` ⇒ pointer
+    /// (drag pans). Set via the drawing toolbar buttons; deliberately
+    /// NOT persisted — relaunching with a tool armed would be
+    /// confusing because the cursor changes behavior silently.
+    @State private var activeDrawingTool: DrawingTool = .none
+    /// Drawing currently in "edit mode" — handles are rendered at its
+    /// endpoints/corners and the inspector popover is shown. Nil ⇒
+    /// nothing selected. Cleared when the pair changes (the drawing
+    /// wouldn't exist on the new pair anyway).
+    @State private var selectedDrawingID: UUID? = nil
+    /// Convenience accessor — fullscreen mode is stored in AppState so
+    /// the sidebar can collapse when it flips on.
+    private var isChartFull: Bool { app.isChartFullscreen }
+
+    /// One-word validity tag for the Layers popover. Computes
+    /// `LONG VALID` / `SHORT INVALID` / `NEUTRAL VALID` etc. using the
+    /// current pair's live price. When no live price is available
+    /// (the bootstrap hasn't landed yet, or a non-live-stream pair
+    /// without a snapshot tick) we just show the bias label and skip
+    /// the validity verdict.
+    private func scenarioValidityLabel(_ s: PromptBuilder.TAScenario) -> String {
+        let bias = s.bias.rawValue.uppercased()
+        guard let pairID = app.selectedPairID else { return bias }
+        let live: Double? = {
+            if let p = yahoo.latestPrices[pairID] { return p }
+            return app.pairs.first(where: { $0.id == pairID })?.price
+        }()
+        guard let price = live, price > 0 else { return bias }
+        return s.isValid(at: price) ? "\(bias) · VALID" : "\(bias) · INVALID"
+    }
+
+    /// Decoded view of the persisted indicator/oscillator selections.
+    /// Both are stored in @AppStorage as a comma-separated rawValue
+    /// string — Set isn't a @AppStorage-supported type directly, so we
+    /// translate at the boundary.
+    private var enabledIndicators: Set<IndicatorKind> {
+        Set(indicatorsRaw.split(separator: ",")
+            .compactMap { IndicatorKind(rawValue: String($0)) })
+    }
+    private var enabledOscillators: Set<OscillatorKind> {
+        Set(oscillatorsRaw.split(separator: ",")
+            .compactMap { OscillatorKind(rawValue: String($0)) })
+    }
+
+    private func setIndicator(_ kind: IndicatorKind, enabled: Bool) {
+        var s = enabledIndicators
+        if enabled { s.insert(kind) } else { s.remove(kind) }
+        // Sort so the persisted string is canonical — easier to eyeball
+        // in `defaults read` and avoids cache-busting on no-op writes.
+        indicatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+    }
+    private func setOscillator(_ kind: OscillatorKind, enabled: Bool) {
+        var s = enabledOscillators
+        if enabled { s.insert(kind) } else { s.remove(kind) }
+        oscillatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+    }
+
+    /// Hidden indicators/oscillators — same persistence shape as the
+    /// enabled sets so visibility survives a relaunch.
+    private var hiddenIndicators: Set<IndicatorKind> {
+        Set(hiddenIndicatorsRaw.split(separator: ",")
+            .compactMap { IndicatorKind(rawValue: String($0)) })
+    }
+    private var hiddenOscillators: Set<OscillatorKind> {
+        Set(hiddenOscillatorsRaw.split(separator: ",")
+            .compactMap { OscillatorKind(rawValue: String($0)) })
+    }
+
+    /// What ChartView / the oscillator panel stack actually render:
+    /// enabled minus hidden. Lets the Layers popover hide a layer
+    /// without disturbing the menu's enabled state.
+    private var visibleIndicators: Set<IndicatorKind> {
+        enabledIndicators.subtracting(hiddenIndicators)
+    }
+    private var visibleOscillators: Set<OscillatorKind> {
+        enabledOscillators.subtracting(hiddenOscillators)
+    }
+
+    private func setIndicatorHidden(_ kind: IndicatorKind, hidden: Bool) {
+        var s = hiddenIndicators
+        if hidden { s.insert(kind) } else { s.remove(kind) }
+        hiddenIndicatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+    }
+    private func setOscillatorHidden(_ kind: OscillatorKind, hidden: Bool) {
+        var s = hiddenOscillators
+        if hidden { s.insert(kind) } else { s.remove(kind) }
+        hiddenOscillatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+    }
+
+    /// 1m forces line view because candlesticks at minute granularity look
+    /// like a wall of green/red toothpicks. Same rule as the web app.
+    private var effectiveChartType: ChartType {
+        timeframe == .m1 ? .line : userChartType
+    }
+
+    var body: some View {
+        let pair = app.pairs.first(where: { $0.id == app.selectedPairID })
+
+        // Wrap the dashboard content in a ZStack so the AI analysis
+        // page can overlay on top when the user hits Analyze. Keeping
+        // the dashboard mounted underneath preserves its @State (pan
+        // window, drawing selection, armed tool, …) across the
+        // transition — switching it out at the RootView level would
+        // drop all of that on the floor.
+        ZStack {
+            // No ScrollView: the dashboard is intentionally a single
+            // screen that fills the window. The chart card expands to
+            // consume any vertical space left over after the
+            // (fixed-height) pair header, volume strip, oscillator
+            // panels, and stats row. Resize the window and the chart
+            // breathes accordingly — nothing scrolls.
+            VStack(spacing: isChartFull ? 0 : Theme.Spacing.lg) {
+                if let pair = pair {
+                    // In maximised mode, hide the pair header so the
+                    // chart card can stretch even further. The AI page
+                    // is opened via a button on the chart header
+                    // regardless of mode.
+                    if !isChartFull {
+                        pairHeader(pair)
+                    }
+                    chartCard(pair)
+                } else {
+                    emptyState
+                }
+            }
+            // Zero padding in fullscreen: chart edges align with the
+            // window edges so the chart truly fills the area.
+            .padding(isChartFull ? 0 : Theme.Spacing.xl)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .animation(.easeInOut(duration: 0.2), value: isChartFull)
+
+            if app.showAnalysisFullPage, let pair = pair {
+                AnalysisPage(
+                    pair: pair,
+                    timeframe: timeframe,
+                    candles: candles,
+                    livePrice: pair.usesLiveStream
+                               ? yahoo.latestPrices[pair.id]
+                               : pair.price,
+                    loadCandles: { tf in
+                        await MainActor.run { candles(for: tf) }
+                    },
+                    onApplySRLevels:      { srLevels = $0 },
+                    onApplyFVGZones:      { fvgZones = $0 },
+                    onApplySupplyDemand:  { supplyDemandZones = $0 },
+                    onApplyTAScenario:    { taScenario = $0 },
+                    onApplyTAAltScenario: { taAltScenario = $0 },
+                    onActivateTradeFromScenario: { scenario, entryID in
+                        // Defer the activation sheet by one render —
+                        // SwiftUI can race when one modal transition
+                        // hands off directly to another. Carries the
+                        // source entry ID so the resulting trade can
+                        // stamp its outcome back onto history.
+                        pendingActivation = PendingActivation(
+                            scenario: scenario,
+                            sourceHistoryEntryID: entryID
+                        )
+                    },
+                    onRestoreSRLevels:      { srLevels = $0 },
+                    onRestoreFVGZones:      { fvgZones = $0 },
+                    onRestoreSupplyDemand:  { supplyDemandZones = $0 },
+                    onRestoreTAScenario:    { taScenario = $0 },
+                    onRestoreTAAltScenario: { taAltScenario = $0 }
+                )
+                .environmentObject(analysisStore)
+                .transition(.opacity)
+            }
+        }
+        .background(Theme.Color.canvas)
+        .task(id: app.selectedPairID) {
+            xDomain = nil   // new pair ⇒ drop any pinned window
+            srLevels = .init(support: [], resistance: [])  // overlays are per-pair
+            fvgZones = []
+            supplyDemandZones = []
+            taScenario = nil
+            taAltScenario = nil
+            selectedDrawingID = nil   // drawing belonged to the prior pair
+            await reloadCandles()
+        }
+        // Wire the AutoTraderEngine's headless candle loader once
+        // the dashboard mounts. The engine needs this to fire
+        // Confluence Trade Scanner after a trade closes without the user opening
+        // the analysis page.
+        .task {
+            autoTrader.candleLoader = { [weak app = self.app] pairID, tf in
+                guard app != nil else { return [] }
+                return await MainActor.run { candles(for: pairID, tf: tf) }
+            }
+            // Continuous-mode validation needs a fresh live price
+            // to compare against the staged scenario's entry / TP /
+            // SL. Read from YahooScheduler — already the source for
+            // every header + chart.
+            autoTrader.livePriceProvider = { [weak yahoo = self.yahoo] pairID in
+                yahoo?.latestPrices[pairID]
+            }
+        }
+        .onChange(of: timeframe) { _ in
+            xDomain = nil   // different bucket size ⇒ refit to data
+            Task { await reloadCandles() }
+        }
+        .sheet(isPresented: $showAlertSheet) {
+            if let cur = pair {
+                AlertSheet(
+                    pairID: cur.id,
+                    pairName: cur.name,
+                    livePrice: cur.usesLiveStream
+                               ? yahoo.latestPrices[cur.id]
+                               : cur.price,
+                    onCreate: { alert in alertStore.add(alert) }
+                )
+                // Inject the store into the sheet's environment
+                // so the new "current alerts" list can read +
+                // mutate it (toggle / re-arm / delete).
+                .environmentObject(alertStore)
+            }
+        }
+        .sheet(isPresented: $showIndicatorSettings) {
+            // Persist on dismiss so the user's choice survives a relaunch
+            // even if they close via clicking the backdrop / hitting Esc.
+            oscillatorConfig.save()
+        } content: {
+            IndicatorSettingsSheet(config: $oscillatorConfig)
+        }
+        .sheet(item: $profileSheet) { mode in
+            strategyProfileSheet(for: mode)
+        }
+        .onReceive(
+            // Throttle: cTrader's bridge can drive `lastUpdateAt` at
+            // 5 Hz (or whatever the scheduler's flush rate is), and a
+            // full `reloadCandles()` rebuilds the chart's scene
+            // graph + re-runs every indicator's O(n) sweep over the
+            // visible candle window. At 5 Hz on a moderately busy
+            // chart that was pinning the main thread at 99% CPU.
+            // 1 Hz is the visual ceiling for noticeable candle
+            // wiggle anyway — the live price tag in the header
+            // updates separately at the scheduler's full cadence
+            // because it reads `yahoo.latestPrices[…]`, which isn't
+            // gated by this throttle.
+            yahoo.$lastUpdateAt
+                .compactMap { $0 }
+                .throttle(for: .seconds(1), scheduler: DispatchQueue.main, latest: true)
+        ) { _ in
+            if let cur = app.pairs.first(where: { $0.id == app.selectedPairID }),
+               cur.usesLiveStream
+            {
+                Task { await reloadCandles() }
+            }
+        }
+        // Paper-trade evaluator: any live-stream pair's price tick
+        // (metal + crypto) gets pushed into TradeStore so pending
+        // trades can fill and active trades can hit TP / SL on the
+        // right pair. Iran pairs evaluate on the FetchScheduler tick
+        // below.
+        .onReceive(yahoo.$latestPrices) { prices in
+            for (pairID, price) in prices {
+                tradeStore.evaluate(price: price, for: pairID)
+                alertStore.evaluate(price: price, for: pairID)
+            }
+        }
+        // Auto-create entry + SL alerts when a scenario lands on
+        // the chart. Sync removes them when the scenario clears
+        // (or replaces them when a new one comes in).
+        .onChange(of: taScenario) { scenario in
+            syncScenarioAlerts(scenario, suffix: "(main)")
+        }
+        .onChange(of: taAltScenario) { scenario in
+            syncScenarioAlerts(scenario, suffix: "(alt)")
+        }
+        // Activation sheet — driven by `pendingActivation` so the
+        // analysis sheet can dismiss first and this one presents on
+        // the next render (SwiftUI is fussy about back-to-back modal
+        // transitions).
+        .sheet(item: $pendingActivation) { pending in
+            if let pair = pair {
+                ActivateTradeSheet(
+                    scenario: pending.scenario,
+                    pairID: pair.id,
+                    livePrice: pair.usesLiveStream
+                               ? yahoo.latestPrices[pair.id]
+                               : pair.price,
+                    sourceHistoryEntryID: pending.sourceHistoryEntryID,
+                    onActivate: { trade in
+                        tradeStore.add(trade, for: pair.id)
+                    }
+                )
+            }
+        }
+        // Outcome observer — whenever the trade store mutates, scan
+        // for newly-terminal trades that carry a source history
+        // entry ID and stamp the outcome back onto the entry. The
+        // diff vs `previouslyClosedTradeIDs` ensures we only record
+        // the *first* terminal observation per trade, so re-renders
+        // don't double-count wins/losses.
+        .onReceive(tradeStore.$byPair) { byPair in
+            for (_, trades) in byPair {
+                for trade in trades {
+                    guard let entryID = trade.sourceHistoryEntryID,
+                          trade.isClosed,
+                          !recordedOutcomeTradeIDs.contains(trade.id)
+                    else { continue }
+                    let outcome: AnalysisStore.Outcome
+                    switch trade.status {
+                    case .closedHitTP:    outcome = .hitTP
+                    case .closedHitSL:    outcome = .hitSL
+                    case .closedManually: outcome = .manual
+                    case .cancelled:      outcome = .cancelled
+                    case .pending, .active: continue
+                    }
+                    // currentPL on a closed trade already uses the
+                    // frozen closePrice/fillPrice — no need to pass
+                    // the live price.
+                    let pl: Double? = trade.closePrice.map { trade.currentPL(at: $0) }
+                    analysisStore.recordOutcome(
+                        entryID: entryID,
+                        outcome: outcome,
+                        realisedPL: pl,
+                        at: trade.closedAt ?? Date()
+                    )
+                    recordedOutcomeTradeIDs.insert(trade.id)
+                }
+            }
+        }
+    }
+
+    // ── Pair header ────────────────────────────────────────────────
+    private func pairHeader(_ pair: TradingPair) -> some View {
+        Card(padding: Theme.Spacing.lg) {
+            HStack(alignment: .center, spacing: Theme.Spacing.lg) {
+                ZStack {
+                    Circle().fill(pair.color.opacity(0.18))
+                    Circle().strokeBorder(pair.color.opacity(0.55), lineWidth: 1.5)
+                    Text(String(pair.symbol.prefix(2)))
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(pair.color)
+                }
+                .frame(width: 48, height: 48)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(pair.name)
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(Theme.Color.textPrimary)
+                    Text(pair.symbol)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.Color.textMuted)
+                }
+
+                Spacer()
+
+                fetchTimer(for: pair)
+
+                refreshButton
+
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(displayedPrice(pair))
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(Theme.Color.textPrimary)
+                        .monospacedDigit()
+                    Text(formatChange(pair))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(pair.changePercent >= 0
+                                          ? Theme.Color.success
+                                          : Theme.Color.danger)
+                        .monospacedDigit()
+                }
+            }
+        }
+    }
+
+    /// Live countdown chip. Picks which scheduler's timestamps to display
+    /// based on the pair: metal + crypto read from YahooScheduler;
+    /// Iran pairs read from FetchScheduler. Two separate fetch
+    /// cadences = two possible timers; only the one driving the
+    /// visible pair is shown.
+    @ViewBuilder
+    private func fetchTimer(for pair: TradingPair) -> some View {
+        FetchTimerView(
+            lastFetchAt: yahoo.lastUpdateAt,
+            intervalSeconds: yahoo.tickIntervalSeconds,
+            isFetching: yahoo.isFetching
+        )
+    }
+
+    /// Manual refresh — kicks the Yahoo scheduler to fetch a fresh
+    /// bar. Live-stream pairs auto-update at the scheduler's own
+    /// cadence; this just lets the user force a tick without
+    /// waiting.
+    private var refreshButton: some View {
+        Button {
+            Task { await reloadCandles() }
+        } label: {
+            if yahoo.isFetching {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 32, height: 32)
+            } else {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .frame(width: 32, height: 32)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(yahoo.isFetching)
+    }
+
+    // ── Chart card ─────────────────────────────────────────────────
+    @ViewBuilder
+    private func chartCard(_ pair: TradingPair) -> some View {
+        if isChartFull {
+            // Fullscreen: no Card chrome (rounded corners, shadow,
+            // surface fill, inner padding all gone). The chart sits
+            // directly on the canvas so its edges meet the window edges.
+            chartCardContent(pair)
+                .padding(.horizontal, Theme.Spacing.md)
+                .padding(.top, Theme.Spacing.md)
+                .padding(.bottom, Theme.Spacing.md)
+        } else {
+            Card {
+                chartCardContent(pair)
+            }
+        }
+    }
+
+    private func chartCardContent(_ pair: TradingPair) -> some View {
+        VStack(spacing: Theme.Spacing.lg) {
+            autoTraderStatusBanner(pair: pair)
+            HStack(spacing: Theme.Spacing.md) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Price chart")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Theme.Color.textPrimary)
+                        HStack(spacing: 6) {
+                            if !candles.isEmpty {
+                                Text("\(candles.count) candles · \(timeframe.label)")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Theme.Color.textMuted)
+                            }
+                            TimeframeCountdown(timeframe: timeframe)
+                        }
+                    }
+                    Spacer()
+                    // Toolbar groups: actions · overlays/tools · format.
+                    // Zoom + reset + maximise moved out — they live on
+                    // the chart itself as a floating FAB now, freeing
+                    // the toolbar to be just selection + format.
+                    HStack(spacing: 6) {
+                        analyzeButton
+                        alertButton
+                        autoTraderPill
+                        toolbarDivider
+                        indicatorMenu
+                        layersButton
+                        drawingToolbar
+                        toolbarDivider
+                        ChartTypeToggle(
+                            selected: $userChartType,
+                            isDisabled: timeframe == .m1
+                        )
+                        TimeframeSelector(selected: $timeframe)
+                        toolbarDivider
+                        debugButton
+                    }
+                }
+
+                ChartView(
+                    candles: candles,
+                    chartType: effectiveChartType,
+                    accent: pair.color,
+                    xDomain: $xDomain,
+                    indicators: visibleIndicators,
+                    indicatorConfig: oscillatorConfig,
+                    srLevels: srVisible ? srLevels : .init(support: [], resistance: []),
+                    fvgZones: fvgVisible ? fvgZones : [],
+                    supplyDemandZones: supplyDemandVisible ? supplyDemandZones : [],
+                    taScenario: scenarioVisible ? taScenario : nil,
+                    taAltScenario: altScenarioVisible ? taAltScenario : nil,
+                    drawings: drawingStore.drawings(for: pair.id),
+                    activeTool: activeDrawingTool,
+                    onCommitDrawing: { drawing in
+                        drawingStore.add(drawing, for: pair.id)
+                        // TradingView-style: after a successful draw,
+                        // drop back to cursor so the next click doesn't
+                        // accidentally start another shape. The user
+                        // can re-arm the same tool from the toolbar if
+                        // they want a string of drawings.
+                        activeDrawingTool = .none
+                        // Auto-select the freshly drawn shape so the
+                        // user can immediately tweak its color / line
+                        // width without hunting for it.
+                        selectedDrawingID = drawing.id
+                    },
+                    onMoveDrawing: { drawing in
+                        // Same id ⇒ in-place replacement, no
+                        // duplication and no churn in the Layers
+                        // popover ordering.
+                        drawingStore.update(drawing, for: pair.id)
+                    },
+                    selectedDrawingID: selectedDrawingID,
+                    onSelectDrawing: { id in
+                        selectedDrawingID = id
+                    },
+                    // Open trades render as entry/TP/SL rules with a
+                    // fill marker. Closed trades stay in the store
+                    // (Layers popover history) but the chart drops
+                    // them — keeps active runs uncluttered.
+                    trades: tradeStore.openVisibleTrades(for: pair.id),
+                    livePrice: pair.usesLiveStream ? yahoo.latestPrices[pair.id] : pair.price
+                )
+                // Chart expands to consume any vertical space the
+                // siblings below (volume / oscillators / stats) don't
+                // claim — `minHeight` guards against the chart being
+                // crushed when the window is short.
+                .frame(minHeight: 220, maxHeight: .infinity)
+                .padding(.trailing, Theme.Spacing.sm) // breathing room on the right
+                // Mouse-wheel / two-finger trackpad scroll zooms the
+                // chart, anchored on the cursor's X position. Attached
+                // before `.clipped()` so the modifier's GeometryReader
+                // sees the chart's actual frame in global coords.
+                .scrollZoom(xDomain: $xDomain, totalCandles: candles.count)
+                // Belt-and-braces clip at the layout container so any
+                // mark Apple Charts renders past the chart frame still
+                // can't leak past the card content. The price tag now
+                // sits inside the plot area (overlay-position annotation)
+                // so it's safe to clip here.
+                .clipped()
+                // Floating chart controls — zoom in/out, reset zoom,
+                // maximise. Lives ON the chart (bottom-right) rather
+                // than in the top toolbar so the toolbar stays tight
+                // and these controls feel contextual to the chart they
+                // act on. Applied AFTER `.clipped()` so the fan-out
+                // children animate freely without being chopped.
+                .overlay(alignment: .bottomTrailing) {
+                    ChartControlsFAB(
+                        isFullscreen: $app.isChartFullscreen,
+                        onZoomIn: { zoom(by: 0.7) },
+                        onZoomOut: { zoom(by: 1.4) },
+                        onReset: { xDomain = nil }
+                    )
+                    .padding(.trailing, Theme.Spacing.md)
+                    .padding(.bottom, Theme.Spacing.md)
+                }
+                // Inspector for the currently-selected drawing. Floats
+                // at the top-trailing of the chart so it doesn't fight
+                // with the bottom-right FAB or the candles themselves.
+                // Driven entirely by `selectedDrawingID` + the per-pair
+                // store; clicking elsewhere or hitting "✕" closes it.
+                .overlay(alignment: .topTrailing) {
+                    drawingInspector(pair: pair)
+                        .padding(.trailing, Theme.Spacing.md)
+                        .padding(.top, Theme.Spacing.md)
+                }
+
+                volumeStrip(pair)
+
+                oscillatorPanels
+
+                if !isChartFull {
+                    statsRow(pair)
+                }
+            }
+            // The card's inner VStack needs to fill its container
+            // vertically so the chart's `maxHeight: .infinity` actually
+            // has somewhere to grow into. Without this the VStack sizes
+            // to its intrinsic content and the chart pins at minHeight.
+            .frame(maxHeight: .infinity)
+    }
+
+    /// Stack of enabled oscillator sub-charts (RSI / MACD / Stoch). Each
+    /// is hidden when not toggled on or when temporarily hidden via the
+    /// Layers popover; rendered in declaration order so the layout
+    /// stays stable as the user flips them.
+    @ViewBuilder
+    private var oscillatorPanels: some View {
+        ForEach(OscillatorKind.allCases) { kind in
+            if visibleOscillators.contains(kind) {
+                OscillatorPanel(
+                    kind: kind,
+                    candles: candles,
+                    config: oscillatorConfig,
+                    xDomain: xDomain
+                )
+                .padding(.trailing, Theme.Spacing.sm)
+            }
+        }
+    }
+
+    /// Dropdown listing all available indicators with a Toggle for each.
+    /// The button shows a count when something is active so you can tell
+    /// at a glance whether the chart has overlays.
+    private var indicatorMenu: some View {
+        Menu {
+            Section("Overlays") {
+                Toggle(isOn: $showVolume) {
+                    Label("Volume", systemImage: showVolume
+                          ? "checkmark.circle.fill" : "circle")
+                }
+                ForEach(IndicatorKind.allCases) { kind in
+                    Toggle(isOn: indicatorBinding(kind)) {
+                        Label(kind.label, systemImage: enabledIndicators.contains(kind)
+                              ? "checkmark.circle.fill" : "circle")
+                    }
+                }
+            }
+            Section("Panels") {
+                ForEach(OscillatorKind.allCases) { kind in
+                    Toggle(isOn: oscillatorBinding(kind)) {
+                        Label(kind.displayName(config: oscillatorConfig),
+                              systemImage: enabledOscillators.contains(kind)
+                              ? "checkmark.circle.fill" : "circle")
+                    }
+                }
+            }
+            Divider()
+            Button {
+                showIndicatorSettings = true
+            } label: {
+                Label("Settings…", systemImage: "slider.horizontal.3")
+            }
+            if !srLevels.isEmpty {
+                Divider()
+                Button("Clear S/R lines") {
+                    srLevels = .init(support: [], resistance: [])
+                }
+            }
+            if !fvgZones.isEmpty {
+                Divider()
+                Button("Clear FVG zones") { fvgZones = [] }
+            }
+            if taScenario != nil {
+                Divider()
+                Button("Clear scenario") { taScenario = nil }
+            }
+            if taAltScenario != nil {
+                Divider()
+                Button("Clear alt scenario") { taAltScenario = nil }
+            }
+            if !enabledIndicators.isEmpty || !enabledOscillators.isEmpty {
+                Divider()
+                Button("Clear all") {
+                    indicatorsRaw = ""
+                    oscillatorsRaw = ""
+                }
+            }
+        } label: {
+            // Icon-only — the count is communicated by a small dot
+            // badge in the upper-right corner so the toolbar stays
+            // compact. The `f(x)` glyph is universally read as
+            // "indicators / functions" in trading UIs.
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "function")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .frame(width: 26, height: 26)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface)
+                    )
+                let activeCount = enabledIndicators.count + enabledOscillators.count
+                if activeCount > 0 {
+                    Circle()
+                        .fill(Theme.accentGradient)
+                        .frame(width: 9, height: 9)
+                        .overlay(
+                            Circle()
+                                .strokeBorder(Theme.Color.surfaceHi, lineWidth: 1)
+                        )
+                        .offset(x: 3, y: -3)
+                }
+            }
+            .help(activeCount(label: enabledIndicators.count + enabledOscillators.count))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    /// Tooltip text for the `f(x)` button — surfaces the active count
+    /// on hover so the dot badge isn't the only feedback.
+    private func activeCount(label n: Int) -> String {
+        n == 0 ? "Indicators" : "Indicators · \(n) active"
+    }
+
+    /// Two-way binding into the oscillator set. Same pattern as
+    /// `indicatorBinding` — keeps each Toggle in the menu wired without
+    /// adding a Bool per kind.
+    private func oscillatorBinding(_ kind: OscillatorKind) -> Binding<Bool> {
+        Binding(
+            get: { enabledOscillators.contains(kind) },
+            set: { setOscillator(kind, enabled: $0) }
+        )
+    }
+
+    /// Two-way binding into the indicator set for one specific kind. Lets
+    /// each Toggle in the menu drive its own Bool without us hand-rolling
+    /// a separate state property per indicator.
+    private func indicatorBinding(_ kind: IndicatorKind) -> Binding<Bool> {
+        Binding(
+            get: { enabledIndicators.contains(kind) },
+            set: { setIndicator(kind, enabled: $0) }
+        )
+    }
+
+    /// Compact "stack" button that opens the Layers popover. Counts
+    /// the currently-active drawable layers so the user can see at a
+    /// glance whether there's anything to manage.
+    /// Bug-icon button that opens the network debug sheet. Tints
+    /// amber when capture is on (so it's visually obvious the app is
+    /// recording every request), grey when capture is off. Mirrors
+    /// the icon-only chip style of the indicator / layers buttons.
+    private var debugButton: some View {
+        Button {
+            showDebugLogSheet = true
+        } label: {
+            Image(systemName: "ladybug.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(NetworkLog.shared.isEnabled
+                                 ? Theme.Color.warn
+                                 : Theme.Color.textSecondary)
+                .frame(width: 26, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(NetworkLog.shared.isEnabled
+              ? "Network debug · capturing"
+              : "Network debug")
+        .sheet(isPresented: $showDebugLogSheet) {
+            DebugLogSheet()
+        }
+    }
+
+    /// Thin vertical separator between toolbar groups. 1pt wide,
+    /// muted color, capped to a height that matches the buttons so
+    /// it doesn't crowd them. Kept here (rather than in `UI/`)
+    /// because it's a private styling detail of this toolbar.
+    private var toolbarDivider: some View {
+        Rectangle()
+            .fill(Theme.Color.border)
+            .frame(width: 1, height: 16)
+            .padding(.horizontal, 2)
+    }
+
+    private var layersButton: some View {
+        let count = activeLayerCount
+        return Button {
+            showLayersPopover.toggle()
+        } label: {
+            // Icon-only with a dot badge — matches the `f(x)`
+            // indicators button so the toolbar reads as a row of
+            // consistent square chips.
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "square.3.layers.3d")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .frame(width: 26, height: 26)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface)
+                    )
+                if count > 0 {
+                    Circle()
+                        .fill(Theme.accentGradient)
+                        .frame(width: 9, height: 9)
+                        .overlay(
+                            Circle()
+                                .strokeBorder(Theme.Color.surfaceHi, lineWidth: 1)
+                        )
+                        .offset(x: 3, y: -3)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .help(count == 0
+              ? "Layers"
+              : "Layers · \(count) on chart")
+        .popover(isPresented: $showLayersPopover, arrowEdge: .top) {
+            layersPopoverContent
+                .padding(Theme.Spacing.lg)
+                .frame(minWidth: 320, idealWidth: 360)
+        }
+    }
+
+    /// Total drawable layers — used to badge the button. Counts each
+    /// indicator/oscillator individually, plus volume / S/R / FVG /
+    /// scenario as a single layer each. User drawings count one per
+    /// shape so the badge accurately reflects what's on the chart.
+    private var activeLayerCount: Int {
+        var n = 0
+        if showVolume { n += 1 }
+        n += enabledIndicators.count
+        n += enabledOscillators.count
+        if !srLevels.isEmpty { n += 1 }
+        if !fvgZones.isEmpty { n += 1 }
+        if !supplyDemandZones.isEmpty { n += 1 }
+        if taScenario != nil { n += 1 }
+        n += drawingStore.drawings(for: app.selectedPairID ?? "").count
+        return n
+    }
+
+    /// Body of the Layers popover. Lists every currently-drawable
+    /// layer with two affordances:
+    ///   • Eye toggle → flips hide/show (state preserved, chart skips
+    ///     rendering).
+    ///   • Trash icon → removes the layer entirely (clears underlying
+    ///     state). Some layers (Volume) have no trash because they
+    ///     aren't user-added — only toggleable.
+    @ViewBuilder
+    private var layersPopoverContent: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            Text("LAYERS")
+                .font(.system(size: 9, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+
+            if activeLayerCount == 0 {
+                Text("Nothing on the chart yet. Add indicators or run an AI analysis to see layers here.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .padding(.vertical, Theme.Spacing.md)
+            } else {
+                // Volume — always near the top since it's a chart-wide
+                // toggle the user reaches for often.
+                layerRow(
+                    title: "Volume",
+                    swatch: Theme.Color.success,
+                    visible: showVolume,
+                    onToggle: { showVolume.toggle() },
+                    onDelete: nil      // no trash — built-in option
+                )
+
+                // Indicator overlays (SMA/EMA/Bollinger/UT Bot).
+                ForEach(IndicatorKind.allCases) { kind in
+                    if enabledIndicators.contains(kind) {
+                        layerRow(
+                            title: kind.label,
+                            swatch: kind.color,
+                            visible: !hiddenIndicators.contains(kind),
+                            onToggle: {
+                                setIndicatorHidden(kind, hidden: !hiddenIndicators.contains(kind))
+                            },
+                            onDelete: { setIndicator(kind, enabled: false) }
+                        )
+                    }
+                }
+
+                // Panel oscillators (RSI/MACD/Stoch).
+                ForEach(OscillatorKind.allCases) { kind in
+                    if enabledOscillators.contains(kind) {
+                        layerRow(
+                            title: kind.displayName(config: oscillatorConfig),
+                            swatch: Theme.Color.info,
+                            visible: !hiddenOscillators.contains(kind),
+                            onToggle: {
+                                setOscillatorHidden(kind, hidden: !hiddenOscillators.contains(kind))
+                            },
+                            onDelete: { setOscillator(kind, enabled: false) }
+                        )
+                    }
+                }
+
+                // AI overlays.
+                if !srLevels.isEmpty {
+                    layerRow(
+                        title: "S/R lines · \(srLevels.support.count + srLevels.resistance.count)",
+                        swatch: Theme.Color.success,
+                        visible: srVisible,
+                        onToggle: { srVisible.toggle() },
+                        onDelete: { srLevels = .init(support: [], resistance: []) }
+                    )
+                }
+                if !fvgZones.isEmpty {
+                    layerRow(
+                        title: "FVG zones · \(fvgZones.count)",
+                        swatch: Theme.Color.warn,
+                        visible: fvgVisible,
+                        onToggle: { fvgVisible.toggle() },
+                        onDelete: { fvgZones = [] }
+                    )
+                }
+                if !supplyDemandZones.isEmpty {
+                    let demand = supplyDemandZones.filter(\.isDemand).count
+                    let supply = supplyDemandZones.count - demand
+                    layerRow(
+                        title: "S&D zones · \(demand)D / \(supply)S",
+                        // Mixed-colour layer — pick the more
+                        // prominent side for the swatch, which
+                        // already reads as the dominant bias.
+                        swatch: demand >= supply ? Theme.Color.success : Theme.Color.danger,
+                        visible: supplyDemandVisible,
+                        onToggle: { supplyDemandVisible.toggle() },
+                        onDelete: { supplyDemandZones = [] }
+                    )
+                }
+                if let main = taScenario {
+                    layerRow(
+                        title: "TA scenario · \(scenarioValidityLabel(main))",
+                        swatch: Theme.Color.warn,
+                        visible: scenarioVisible,
+                        onToggle: { scenarioVisible.toggle() },
+                        onDelete: { taScenario = nil }
+                    )
+                }
+                if let alt = taAltScenario {
+                    layerRow(
+                        title: "Alt scenario · \(scenarioValidityLabel(alt))",
+                        // Distinct (cooler) swatch so the row reads
+                        // as "the other plan" rather than a duplicate.
+                        swatch: Theme.Color.info,
+                        visible: altScenarioVisible,
+                        onToggle: { altScenarioVisible.toggle() },
+                        onDelete: { taAltScenario = nil }
+                    )
+                }
+
+                // User drawings — one row per shape so each can be
+                // toggled or deleted individually. The store is keyed
+                // by pair, so we only list drawings for the currently
+                // selected pair.
+                if let pairID = app.selectedPairID {
+                    let pairDrawings = drawingStore.drawings(for: pairID)
+                    ForEach(pairDrawings) { d in
+                        layerRow(
+                            title: drawingLayerTitle(d),
+                            swatch: DrawingPalette.stroke,
+                            visible: d.visible,
+                            onToggle: {
+                                drawingStore.setVisible(!d.visible, id: d.id, for: pairID)
+                            },
+                            onDelete: { drawingStore.remove(id: d.id, for: pairID) }
+                        )
+                    }
+                }
+
+                // Price alerts for this pair. Manual + scenario-
+                // derived alerts share the same list; the row title
+                // signals which is which via the kind icon.
+                if let pairID = app.selectedPairID {
+                    let pairAlerts = alertStore.alerts(for: pairID)
+                    ForEach(pairAlerts) { alert in
+                        alertLayerRow(alert)
+                    }
+                }
+
+                // Paper trades — one row per trade with status +
+                // live P/L (or frozen P/L for closed). Newest first
+                // by reversing so the freshly-activated trade shows
+                // up at the top of the section.
+                if let pairID = app.selectedPairID {
+                    let pairTrades = tradeStore.trades(for: pairID).reversed()
+                    ForEach(Array(pairTrades), id: \.id) { t in
+                        layerRow(
+                            title: tradeLayerTitle(t, pairID: pairID),
+                            swatch: t.colorSwatch,
+                            visible: t.visible,
+                            onToggle: {
+                                tradeStore.setVisible(!t.visible, id: t.id, for: pairID)
+                            },
+                            onDelete: { tradeStore.remove(id: t.id, for: pairID) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// One row in the Layers popover representing a price alert.
+    /// Eye toggle re-arms a fired alert; trash deletes it. The
+    /// title encodes the kind (cross direction / scenario entry /
+    /// SL) so the user can tell at a glance whether a row is a
+    /// manual alert vs one auto-installed by a scenario.
+    private func alertLayerRow(_ alert: PriceAlert) -> some View {
+        let title: String = {
+            let prefix: String
+            switch alert.kind {
+            case .crossUp:        prefix = "Cross UP"
+            case .crossDown:      prefix = "Cross DOWN"
+            case .scenarioEntry:  prefix = "Scenario entry"
+            case .scenarioSL:     prefix = "Scenario SL"
+            case .rsiCrossAbove:  prefix = "RSI ↑"
+            case .rsiCrossBelow:  prefix = "RSI ↓"
+            }
+            let status = alert.isArmed ? "armed" : (alert.enabled ? "fired" : "disabled")
+            // RSI alerts show the threshold as an integer, not a
+            // monetary value — `priceExact` would format 70 as
+            // "70.0000" which reads weirdly.
+            let levelStr = alert.isIndicatorAlert
+                ? String(format: "%.0f", alert.level)
+                : ChartView.priceExact(alert.level)
+            return "\(prefix) @ \(levelStr) · \(status)"
+        }()
+        let swatch: Color = alert.isArmed ? Theme.Color.warn : Theme.Color.textMuted
+        return layerRow(
+            title: title,
+            swatch: swatch,
+            visible: alert.isArmed,
+            onToggle: {
+                if !alert.isArmed { alertStore.reArm(id: alert.id) }
+                // Disarming an armed alert without deleting it
+                // isn't a meaningful operation — the user can just
+                // delete it. So the toggle only "re-arms" fired
+                // alerts; toggling an armed alert is a no-op.
+            },
+            onDelete: { alertStore.remove(id: alert.id) }
+        )
+    }
+
+    /// Compose the Layers row title for a trade. Always includes
+    /// side / lots / status; appends a live P/L number for active
+    /// trades and a frozen P/L for closed ones. Pending trades
+    /// don't show P/L (there's nothing to compute yet).
+    private func tradeLayerTitle(_ t: Trade, pairID: String) -> String {
+        // Live-stream pairs (metal + crypto) read from the scheduler's
+        // map; Iran pairs read from the snapshot-derived TradingPair.
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        let livePrice: Double = pair?.usesLiveStream == true
+            ? (yahoo.latestPrices[pairID] ?? t.entry)
+            : (pair?.price ?? t.entry)
+        // Special-case the "TP hit before fill" reason — it's a
+        // distinct outcome (scenario invalidated, not user-cancelled)
+        // and reads more clearly as "Invalidated (TP first)".
+        let statusText: String = (t.status == .cancelled && t.closeReason == .invalidatedNoFill)
+            ? "Invalidated (TP first)"
+            : t.statusLabel
+        let head = "\(t.side == .short ? "Short" : "Long") \(String(format: "%.2f", t.lots)) · \(statusText)"
+        switch t.status {
+        case .pending, .cancelled:
+            return head
+        case .active:
+            let pl = t.currentPL(at: livePrice)
+            return head + "  \(formatPL(pl))"
+        case .closedHitTP, .closedHitSL, .closedManually:
+            let pl = t.currentPL(at: livePrice)
+            return head + "  \(formatPL(pl))"
+        }
+    }
+
+    /// Tight P/L formatter — preserves sign, two decimals, $ prefix.
+    private func formatPL(_ pl: Double) -> String {
+        let sign = pl >= 0 ? "+" : "−"
+        return "\(sign)$\(String(format: "%.2f", abs(pl)))"
+    }
+
+    /// Inspector floating panel — shown only when a drawing is
+    /// selected. Lets the user retune the colour/alpha, the line
+    /// width, and delete the drawing. Built as a `@ViewBuilder` so
+    /// the empty case (no selection) compiles to nothing.
+    @ViewBuilder
+    private func drawingInspector(pair: TradingPair) -> some View {
+        if let id = selectedDrawingID,
+           let drawing = drawingStore.drawings(for: pair.id).first(where: { $0.id == id })
+        {
+            DrawingInspector(
+                drawing: drawing,
+                onChange: { updated in
+                    drawingStore.update(updated, for: pair.id)
+                },
+                onDelete: {
+                    drawingStore.remove(id: id, for: pair.id)
+                    selectedDrawingID = nil
+                },
+                onDismiss: {
+                    selectedDrawingID = nil
+                }
+            )
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        }
+    }
+
+    /// Pretty label for a user drawing in the Layers popover. Includes
+    /// the price for horizontal lines so the user can tell them apart
+    /// without hovering on the chart.
+    private func drawingLayerTitle(_ d: ChartDrawing) -> String {
+        switch d.kind {
+        case .horizontalLine:
+            return "Horizontal · \(ChartView.priceShort(d.start.price))"
+        case .trendLine:
+            return "Trend line"
+        case .rectangle:
+            return "Rectangle"
+        }
+    }
+
+    /// One row in the Layers popover. Eye + name + swatch + (optional)
+    /// trash. Hidden rows fade their label to signal the state.
+    private func layerRow(
+        title: String,
+        swatch: Color,
+        visible: Bool,
+        onToggle: @escaping () -> Void,
+        onDelete: (() -> Void)?
+    ) -> some View {
+        HStack(spacing: 10) {
+            Button(action: onToggle) {
+                Image(systemName: visible ? "eye.fill" : "eye.slash")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(visible ? Theme.Color.textSecondary : Theme.Color.textMuted)
+                    .frame(width: 20)
+            }
+            .buttonStyle(.plain)
+            .help(visible ? "Hide" : "Show")
+
+            RoundedRectangle(cornerRadius: 2)
+                .fill(swatch)
+                .frame(width: 8, height: 14)
+                .opacity(visible ? 1 : 0.35)
+
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(visible ? Theme.Color.textPrimary : Theme.Color.textMuted)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer()
+
+            if let onDelete = onDelete {
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.Color.textMuted)
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .help("Remove from chart")
+            }
+        }
+        .padding(.horizontal, Theme.Spacing.sm)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                .fill(Theme.Color.surface)
+        )
+    }
+
+    /// Flips into the full-window AnalysisPage overlay. The page renders
+    /// as a ZStack overlay on top of the dashboard (see `body`), so
+    /// chart state (pan/zoom, drawings, selected tool) survives the
+    /// transition and the user lands back on the same chart on dismiss.
+    /// Build the AUTO-enable strategy-profile picker. Snaps the
+    /// per-pair config to the picked profile and enables the
+    /// auto-trader on confirm.
+    @ViewBuilder
+    private func strategyProfileSheet(for mode: ProfileSheetMode) -> some View {
+        let pairID = mode.pairID
+        let cfg = autoTraderConfig.config(for: pairID)
+        StrategyProfileSheet(
+            title: "Enable auto-trader",
+            subtitle: "Pick the strategy this pair will trade. You can switch profile any time in Settings.",
+            currentProfile: cfg.strategyProfile,
+            confirmLabel: "Enable",
+            onPick: { profile in
+                var c = cfg
+                c.applyProfile(profile)
+                c.enabled = true
+                autoTraderConfig.update(c, for: pairID)
+                profileSheet = nil
+                autoTrader.kickstart(for: pairID)
+            },
+            onCancel: { profileSheet = nil }
+        )
+    }
+
+    private var analyzeButton: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                app.showAnalysisFullPage = true
+            }
+        } label: {
+            Image(systemName: "sparkles")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .frame(width: 28, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface)
+                )
+        }
+        .buttonStyle(.plain)
+        .help("AI analysis")
+    }
+
+    /// Opens the manual alert sheet for the current pair. Badge in
+    /// the corner shows the number of armed alerts; tapping with
+    /// no alerts opens the create-alert flow. Scenario alerts are
+    /// added/removed automatically by the dashboard's onChange
+    /// observers — this button only handles the manual flow.
+    private var alertButton: some View {
+        let armed = (app.selectedPairID.map { alertStore.armedAlerts(for: $0).count }) ?? 0
+        let tint: Color = armed > 0 ? Theme.Color.warn : Theme.Color.textSecondary
+        return Button {
+            showAlertSheet = true
+        } label: {
+            Image(systemName: armed > 0 ? "bell.badge.fill" : "bell")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 28, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface)
+                )
+                .overlay(alignment: .topTrailing) {
+                    if armed > 0 {
+                        // Count chip stacked top-right corner.
+                        // `.offset` pulls it slightly outside the
+                        // tile so it reads as a badge, not part of
+                        // the button face.
+                        Text("\(armed)")
+                            .font(.system(size: 8, weight: .heavy).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Theme.Color.warn))
+                            .offset(x: 4, y: -4)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .help(armed > 0
+              ? "\(armed) armed alert\(armed == 1 ? "" : "s") on this pair — click to add another"
+              : "Create a price alert")
+    }
+
+    /// Inline status strip rendered above the chart header when
+    /// auto-trader is enabled for the current pair. Shows the
+    /// engine's live state in plain English so the user knows
+    /// what the bot is doing without opening Settings:
+    ///   • ANALYZING — Confluence Trade Scanner streaming in the background
+    ///   • PENDING ORDER @ X — a pending limit is staged
+    ///   • LIVE POSITION — a fill is open with running P/L
+    ///   • IDLE — waiting for next opportunity (countdown to
+    ///     re-analysis if known)
+    ///   • COOLDOWN — paused after consecutive losses
+    ///   • KILL SWITCH — daily loss limit, news pause, etc.
+    @ViewBuilder
+    private func autoTraderStatusBanner(pair: TradingPair) -> some View {
+        let cfg = autoTraderConfig.config(for: pair.id)
+        if cfg.enabled {
+            let status = autoTrader.continuousStatus(for: pair.id)
+            HStack(spacing: Theme.Spacing.md) {
+                Circle()
+                    .fill(status.color)
+                    .frame(width: 8, height: 8)
+                Text(status.label)
+                    .font(.system(size: 11, weight: .heavy))
+                    .tracking(0.6)
+                    .foregroundStyle(status.color)
+                Divider().background(Theme.Color.border).frame(height: 14)
+                Text(status.detail.isEmpty
+                     ? autoTraderDetailLine(pair: pair, cfg: cfg)
+                     : status.detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer()
+                if !cfg.paperMode {
+                    Text("LIVE")
+                        .font(.system(size: 9, weight: .heavy))
+                        .tracking(0.5)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Theme.Color.danger))
+                }
+                Text("Settings →")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.Color.accentStart)
+                    .onTapGesture { app.selectedSidebarItem = .settings }
+            }
+            .padding(.horizontal, Theme.Spacing.md)
+            .padding(.vertical, Theme.Spacing.sm)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                    .fill(status.color.opacity(0.10))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                    .strokeBorder(status.color.opacity(0.35), lineWidth: 1)
+            )
+        }
+    }
+
+    /// Compose the detail line for the status banner. Reads the
+    /// engine's per-pair state + the open trades to summarise
+    /// what's actually happening in human terms.
+    private func autoTraderDetailLine(pair: TradingPair, cfg: AutoTraderConfig) -> String {
+        let session = analysisStore.session(kind: .confluenceScanner, pairID: pair.id)
+        if session.phase == .running {
+            return "Confluence Trade Scanner is analyzing — streaming the next setup…"
+        }
+        let openTrades = tradeStore.trades(for: pair.id).filter { !$0.isClosed }
+        if let active = openTrades.first(where: { $0.status == .active }) {
+            let live = yahoo.latestPrices[pair.id] ?? active.entry
+            let pl = active.currentPL(at: live)
+            let plStr = String(format: "%+.2f", pl)
+            return "\(active.side.rawValue.uppercased()) \(String(format: "%.2f", active.lots)) lot · entry \(fmtPx(active.entry)) · live P/L $\(plStr)"
+        }
+        if let pending = openTrades.first(where: { $0.status == .pending }) {
+            return "Pending \(pending.side.rawValue.uppercased()) order @ \(fmtPx(pending.entry)) · SL \(fmtPx(pending.stopLoss)) · TP \(fmtPx(pending.takeProfit))"
+        }
+        // No open trades — show last outcome + balance.
+        let bal = paperBalance.currentBalance
+        let plTotal = paperBalance.realisedPL
+        let plStr = String(format: "%+.2f", plTotal)
+        return cfg.paperMode
+            ? "Waiting for next setup · paper balance $\(String(format: "%.0f", bal)) (\(plStr))"
+            : "Waiting for next setup · risk \(String(format: "%.1f", cfg.riskPercent))% per trade"
+    }
+
+    private func fmtPx(_ v: Double) -> String {
+        if v >= 10_000 { return String(format: "%.0f", v) }
+        if v >= 100    { return String(format: "%.2f", v) }
+        return String(format: "%.4f", v)
+    }
+
+    /// Auto-trader control pair: a toggle pill (click to flip
+    /// enabled) + a small gear button that jumps to Settings.
+    /// Always rendered when a pair is selected — when disabled,
+    /// the pill reads "AUTO OFF" in muted gray so the user can
+    /// see at a glance there's a per-pair switch available.
+    @ViewBuilder
+    private var autoTraderPill: some View {
+        if let pairID = app.selectedPairID {
+            let cfg = autoTraderConfig.config(for: pairID)
+            HStack(spacing: 4) {
+                autoTraderToggleButton(pairID: pairID, cfg: cfg)
+                autoTraderGearButton
+            }
+        }
+    }
+
+    private func autoTraderToggleButton(pairID: String, cfg: AutoTraderConfig) -> some View {
+        let enabled = cfg.enabled
+        let state = autoTrader.displayState(for: pairID)
+        let tint: Color = !enabled ? Theme.Color.textMuted
+                          : (cfg.paperMode ? Theme.Color.warn : Theme.Color.danger)
+        return Button {
+            // Disable is one-click; enabling opens the profile
+            // picker so the user can pick Position / Swing / Scalp
+            // before the engine kicks off its first analysis.
+            if cfg.enabled {
+                var c = cfg
+                c.enabled = false
+                autoTraderConfig.update(c, for: pairID)
+            } else {
+                profileSheet = ProfileSheetMode(pairID: pairID)
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: enabled ? "wand.and.rays" : "wand.and.rays.inverse")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("AUTO")
+                    .font(.system(size: 11, weight: .heavy))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                if enabled {
+                    Text(state.label)
+                        .font(.system(size: 9, weight: .heavy).monospacedDigit())
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(state.color))
+                } else {
+                    Text("OFF")
+                        .font(.system(size: 9, weight: .heavy))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .foregroundStyle(Theme.Color.textMuted)
+                }
+            }
+            .foregroundStyle(tint)
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .fixedSize(horizontal: true, vertical: false)
+            .background(
+                RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(tint.opacity(enabled ? 0.6 : 0.25), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .help(enabled
+              ? (cfg.paperMode
+                 ? "Auto-trader ON (paper) — click to disable."
+                 : "Auto-trader ON (LIVE) — click to disable.")
+              : "Auto-trader OFF for this pair — click to enable.")
+    }
+
+    private var autoTraderGearButton: some View {
+        Button {
+            // Deep-link: jump to Settings → Auto-trader with
+            // this pair's inspector pre-expanded so the user
+            // edits the relevant config without hunting.
+            if let pairID = app.selectedPairID {
+                app.autoTraderInspectorPairID = pairID
+            }
+            app.settingsCategory = .autoTrader
+            app.selectedSidebarItem = .settings
+        } label: {
+            Image(systemName: "gearshape.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.Color.textMuted)
+                .frame(width: 26, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface)
+                )
+        }
+        .buttonStyle(.plain)
+        .help("Open auto-trader settings for this pair.")
+    }
+
+    private func statsRow(_ pair: TradingPair) -> some View {
+        HStack(spacing: Theme.Spacing.xxl) {
+            stat(label: "24H HIGH", value: pair.high24h, color: Theme.Color.success)
+            Divider().background(Theme.Color.border).frame(height: 24)
+            stat(label: "24H LOW", value: pair.low24h, color: Theme.Color.danger)
+            Divider().background(Theme.Color.border).frame(height: 24)
+            stat(label: "CHANGE", value: pair.change, color: pair.change >= 0 ? Theme.Color.success : Theme.Color.danger)
+            if let vol = totalVolume {
+                Divider().background(Theme.Color.border).frame(height: 24)
+                volumeStat(vol)
+            }
+            Spacer()
+        }
+    }
+
+    /// Sum of `volume` across all visible candles. Returns nil when no
+    /// candle has volume data — keeps the "VOLUME" stat hidden for pairs
+    /// that don't report volume (everything except ounce, currently).
+    private var totalVolume: Double? {
+        let vols = candles.compactMap { $0.volume }
+        guard !vols.isEmpty else { return nil }
+        let sum = vols.reduce(0, +)
+        return sum > 0 ? sum : nil
+    }
+
+    /// Volume strip rendered just under the main price chart. Hidden when
+    /// the visible series doesn't have volume — keeps the layout clean for
+    /// non-ounce pairs.
+    @ViewBuilder
+    private func volumeStrip(_ pair: TradingPair) -> some View {
+        // `showVolume` is the user-facing toggle (lives in the indicator
+        // menu and the Layers popover). `hasVolume` is the data-presence
+        // check — hide the strip anyway when the visible series has no
+        // volume data, even if the toggle is on, so non-ounce pairs
+        // don't show an empty bar.
+        let bars = VolumeBarsView(candles: candles, accent: pair.color, xDomain: xDomain)
+        if showVolume && bars.hasVolume {
+            bars
+                .frame(height: 70)
+                .padding(.trailing, Theme.Spacing.sm)
+                .clipped()
+        }
+    }
+
+    /// Drawing-tools dropdown. Used to be a row of four buttons taking
+    /// up >120pt; now collapsed into one Menu that shows the active
+    /// tool's glyph (highlighted when something other than `.none` is
+    /// armed). Clicking opens the picker; selecting an item arms that
+    /// tool. Drawings are committed via the ChartView callback and
+    /// rendered as Chart marks alongside the AI overlays.
+    private var drawingToolbar: some View {
+        let isArmed = activeDrawingTool != .none
+        return Menu {
+            ForEach(DrawingTool.allCases) { tool in
+                Button {
+                    activeDrawingTool = tool
+                } label: {
+                    Label(tool.label,
+                          systemImage: activeDrawingTool == tool
+                                       ? "checkmark.circle.fill"
+                                       : tool.systemImage)
+                }
+            }
+        } label: {
+            Image(systemName: activeDrawingTool.systemImage)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(isArmed ? Color.white : Theme.Color.textSecondary)
+                .frame(width: 26, height: 26)
+                .background(
+                    Group {
+                        if isArmed {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Theme.accentGradient)
+                        } else {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Theme.Color.surface)
+                        }
+                    }
+                )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Drawing tool · \(activeDrawingTool.label)")
+    }
+
+    /// Multiply the current window's half-span by `factor` while keeping
+    /// its centre fixed. <1 ⇒ zoom in, >1 ⇒ zoom out. Mirrors the maths
+    /// in ChartView's magnification gesture so the buttons and the pinch
+    /// behave the same.
+    private func zoom(by factor: Double) {
+        // Resolve the current window the same way ChartView does so the
+        // first zoom click after "Reset" behaves predictably.
+        let current: ClosedRange<Double>
+        if let d = xDomain {
+            current = d
+        } else {
+            let n = candles.count
+            guard n > 0 else { return }
+            current = n == 1 ? -0.5 ... 0.5 : -0.5 ... Double(n - 1) + 0.5
+        }
+        let center = (current.lowerBound + current.upperBound) / 2
+        let halfSpan = (current.upperBound - current.lowerBound) / 2
+        let clamped = max(0.05, min(50, factor))
+        let newHalf = halfSpan * clamped
+        xDomain = (center - newHalf) ... (center + newHalf)
+    }
+
+    /// Specialized stat tile for volume — wider precision, compact K/M/B
+    /// formatter rather than the price formatter.
+    private func volumeStat(_ v: Double) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("VOLUME")
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+            Text(Self.compactVolume(v))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.Color.textPrimary)
+                .monospacedDigit()
+        }
+    }
+
+    private static func compactVolume(_ v: Double) -> String {
+        switch Swift.abs(v) {
+        case 1_000_000_000...:
+            return "\((v / 1_000_000_000).formatted(.number.precision(.fractionLength(2))))B"
+        case 1_000_000...:
+            return "\((v / 1_000_000).formatted(.number.precision(.fractionLength(2))))M"
+        case 1_000...:
+            return "\((v / 1_000).formatted(.number.precision(.fractionLength(1))))K"
+        default:
+            return v.formatted(.number.precision(.fractionLength(0)))
+        }
+    }
+
+    private func stat(label: String, value: Double, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+            Text(value.formatted(.number.precision(.fractionLength(value >= 100 ? 0 : 2))))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(color)
+                .monospacedDigit()
+        }
+    }
+
+    // ── Empty state ────────────────────────────────────────────────
+    private var emptyState: some View {
+        VStack(spacing: Theme.Spacing.md) {
+            Spacer()
+            Image(systemName: "chart.line.downtrend.xyaxis.circle")
+                .font(.system(size: 56))
+                .foregroundStyle(Theme.Color.textMuted)
+            Text("No pair selected")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Theme.Color.textSecondary)
+            Text("Pick a market in the sidebar — Yahoo/cTrader live data will start streaming once a pair is selected.")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.Color.textMuted)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, Theme.Spacing.xxl)
+            PrimaryButton("Re-run setup wizard", systemImage: "wand.and.stars") {
+                app.showWizard = true
+            }
+            .padding(.top, Theme.Spacing.md)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────
+    private func formatChange(_ pair: TradingPair) -> String {
+        let sign = pair.changePercent >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", pair.changePercent))%"
+    }
+
+    /// Header-line price text. Reads the live-stream value
+    /// published by `YahooScheduler` for whichever pair is
+    /// selected; falls back to "—" before the first tick lands.
+    private func displayedPrice(_ pair: TradingPair) -> String {
+        if let p = yahoo.latestPrices[pair.id] {
+            return p.formatted(.number.precision(.fractionLength(2)))
+        }
+        return "—"
+    }
+
+    private func reloadCandles() async {
+        guard app.database != nil, let pairID = app.selectedPairID else {
+            candles = []
+            return
+        }
+        isLoading = true
+        let result = candles(for: timeframe)
+        let priorCount = candles.count
+        await MainActor.run {
+            self.candles = result
+            self.isLoading = false
+            self.followLatestIfPinned(priorCount: priorCount, newCount: result.count)
+            // Recompute RSI on the freshly-loaded candles + feed
+            // the alert evaluator. RSI alerts only fire on a
+            // genuine cross between samples, so it's safe to
+            // call this on every reload — the evaluator's prior-
+            // sample memory gates duplicate fires.
+            if let r = Oscillators.rsi(result, period: oscillatorConfig.rsiPeriod).last?.value {
+                let livePeek = yahoo.latestPrices[pairID]
+                alertStore.evaluateRSI(r, pricePeek: livePeek, for: pairID)
+            }
+        }
+    }
+
+    /// Pure candle fetch for an arbitrary timeframe. All pairs go
+    /// through the OHLC table now (no Iran snapshot fallback) —
+    /// `respectsWeekend` is on for the metal pair so COMEX-closed
+    /// days drop out, off for 24/7 crypto.
+    private func candles(for tf: Timeframe) -> [Candle] {
+        guard let pairID = app.selectedPairID else { return [] }
+        return candles(for: pairID, tf: tf)
+    }
+
+    /// Pair-agnostic version — used both by the dashboard (via the
+    /// selected-pair convenience above) and by the AutoTraderEngine
+    /// when it needs to bundle 15m/1h/4h for a headless Confluence Trade Scanner
+    /// re-run on any pair.
+    private func candles(for pairID: String, tf: Timeframe) -> [Candle] {
+        guard let db = app.database else { return [] }
+        let until = Date()
+        let since = until.addingTimeInterval(-tf.historySeconds)
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        // Forex + indices respect weekends (COMEX, NYSE all close);
+        // crypto is 24/7 so we never drop closed days for those.
+        let respectsWeekend = pair?.category != .crypto
+        return loadOHLCCandles(
+            repo: db.ohlcRepo,
+            pairID: pairID,
+            tf: tf, since: since, until: until,
+            dropClosedDays: respectsWeekend
+        )
+    }
+
+    /// "Follow latest" auto-pan: when the user has pinned `xDomain` (by
+    /// dragging or pinching) AND the right edge of their visible window
+    /// is on the last bar that *was* available, slide the window forward
+    /// by however many new bars arrived. This is how trading apps avoid
+    /// the "live data is hidden behind my zoom" trap.
+    ///
+    /// If the user's right edge isn't at the last bar (they've scrolled
+    /// back through history) we leave the view alone — they're looking
+    /// at something specific and shouldn't get yanked forward.
+    private func followLatestIfPinned(priorCount: Int, newCount: Int) {
+        guard let pinned = xDomain else { return }   // auto-fit handles itself
+        guard newCount > priorCount, priorCount > 0 else { return }
+        // Anchor: was the upper bound within half a bar of the last
+        // previously-available index? Use ≥ priorCount - 1 to account
+        // for the half-bar trailing padding the default domain uses.
+        let wasAtEdge = pinned.upperBound >= Double(priorCount - 1)
+        guard wasAtEdge else { return }
+        let shift = Double(newCount - priorCount)
+        xDomain = (pinned.lowerBound + shift) ... (pinned.upperBound + shift)
+    }
+
+    /// Resolve the stored OHLC timeframe to use as the *source* for a given
+    /// chart timeframe, and whether we need to aggregate up. We only store
+    /// 1m and 5m bars; everything coarser is rolled up from 5m.
+    /// `dropClosedDays` is on for COMEX-hours markets (gold) and off
+    /// for 24/7 markets (crypto).
+    private func loadOHLCCandles(
+        repo: OHLCRepo,
+        pairID: String,
+        tf: Timeframe,
+        since: Date,
+        until: Date,
+        dropClosedDays: Bool
+    ) -> [Candle] {
+        let sourceTF: String
+        let needsFold: Bool
+        switch tf {
+        case .m1:
+            sourceTF = "1m"; needsFold = false
+        case .m5:
+            sourceTF = "5m"; needsFold = false
+        case .m15, .m30, .h1, .h4, .d1:
+            sourceTF = "5m"; needsFold = true
+        }
+        do {
+            let bars = try repo.read(
+                pairID: pairID,
+                timeframe: sourceTF,
+                since: since,
+                until: until,
+                dropClosedDays: dropClosedDays
+            )
+            if needsFold {
+                return OHLCAggregator.fold(bars: bars, into: tf)
+            }
+            return bars.map { $0.toCandle() }
+        } catch {
+            return []
+        }
+    }
+}

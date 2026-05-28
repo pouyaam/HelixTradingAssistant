@@ -1,0 +1,42 @@
+# ── macOS ───────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# ── Xcode / Swift ───────────────────────────────────────────────────
+# project.yml is the source of truth; the .xcodeproj is regenerated
+# by `xcodegen generate` (see run.sh). Never commit it.
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+*.xcuserstate
+*.xcscheme
+DerivedData/
+.swiftpm/
+Package.resolved
+*.swp
+*.swo
+
+# ── Local build output (run.sh writes here) ─────────────────────────
+build/
+
+# ── Editor / IDE ────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.iml
+.cursor/
+
+# ── Claude Code / Codex local state ─────────────────────────────────
+# The app spawns these CLIs under Application Support, but if anyone
+# ever drops a workspace into the repo root, don't commit it.
+.claude/
+.codex/
+
+# ── Misc ────────────────────────────────────────────────────────────
+*.log
+*.tmp
+node_modules/
