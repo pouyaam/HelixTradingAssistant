@@ -25,7 +25,10 @@ struct ForexFactoryEvent: Identifiable, Hashable {
     let date: String        // "YYYY-MM-DD" in feed timezone (US/Eastern)
     let time: String        // "10:30am" / "All Day" / "Tentative"
     let eventAt: Date?
-    let actual: String
+    /// `var` (not `let`) so post-release enrichment from the
+    /// Investing.com actuals source can overlay a value here via
+    /// `withActual(_:)`. All other fields stay immutable.
+    var actual: String
     let forecast: String
     let previous: String
     let url: String
@@ -68,6 +71,52 @@ struct ForexFactoryEvent: Identifiable, Hashable {
         self.forecast = forecast.trimmingCharacters(in: .whitespaces)
         self.previous = previous.trimmingCharacters(in: .whitespaces)
         self.url = u
+    }
+
+    // MARK: - Enrichment
+
+    /// Return a copy with `actual` overwritten. Used by `NewsStore`
+    /// when the Investing.com scraper hands back a post-release value
+    /// for an event that the FF XML feed listed as empty. All other
+    /// fields (including the stable `id`) are preserved so SwiftUI's
+    /// ForEach diff treats it as the same row — only the actual cell
+    /// re-renders.
+    func withActual(_ value: String) -> ForexFactoryEvent {
+        var copy = self
+        copy.actual = value.trimmingCharacters(in: .whitespaces)
+        return copy
+    }
+
+    /// Stable identity key for cross-source matching. Used to overlay
+    /// actuals scraped from Investing.com onto FF events.
+    ///
+    /// Normalisation bridges the two upstreams' naming conventions:
+    ///   • FF: "Core CPI m/m"    Investing: "Core CPI (MoM)"
+    ///   • FF: "GDP q/q"          Investing: "GDP (QoQ)"
+    ///   • FF: "Employment Change" Investing: "Employment Change (Apr)"
+    ///
+    /// Steps:
+    ///   1. Uppercase + trim currency.
+    ///   2. Lowercase title; collapse internal whitespace.
+    ///   3. Strip parenthetical suffixes like `(MoM)`, `(Q1)`, `(May)` —
+    ///      Investing.com appends these; FF doesn't.
+    ///   4. Drop FF's slashed period codes `m/m`, `y/y`, `q/q` — these
+    ///      mean the same as Investing's `(MoM)/(YoY)/(QoQ)` which
+    ///      we just stripped, so the surviving titles should match.
+    ///   5. Squeeze whitespace one more time after the stripping.
+    static func normalisedTitleKey(currency: String, title: String) -> String {
+        let cur = currency.uppercased().trimmingCharacters(in: .whitespaces)
+        var t = title.lowercased().trimmingCharacters(in: .whitespaces)
+        // Strip parenthetical suffixes anywhere in the string.
+        t = t.replacingOccurrences(of: #"\s*\([^)]*\)"#, with: "", options: .regularExpression)
+        // Strip the FF-style period codes (with optional surrounding spaces).
+        t = t.replacingOccurrences(of: #"\s*[myq]/[myq]\s*"#, with: " ", options: .regularExpression)
+        // Strip punctuation that varies between sources.
+        t = t.replacingOccurrences(of: #"[.,]"#, with: "", options: .regularExpression)
+        // Collapse runs of whitespace.
+        t = t.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        t = t.trimmingCharacters(in: .whitespaces)
+        return "\(cur)|\(t)"
     }
 
     // MARK: - Classification helpers
