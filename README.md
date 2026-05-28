@@ -1,5 +1,9 @@
 # Helix Trading Assistant
 
+<p align="center">
+  <img src="screenshots/architecture.svg" width="900" alt="Helix Trading Assistant — AI co-pilot completes its analysis, then applies S/R, FVG, and trade markers onto the chart." />
+</p>
+
 A native macOS app for monitoring gold and crypto markets, charting them with
 technical indicators, and running AI-driven analyses against live data — built
 in SwiftUI on top of Apple Charts, GRDB, and the local `claude` / `codex` CLIs.
