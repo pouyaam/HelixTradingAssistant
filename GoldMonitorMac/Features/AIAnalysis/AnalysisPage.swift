@@ -136,15 +136,39 @@ struct AnalysisPage: View {
     /// one tab doesn't hide it in another.
     @State private var confluenceExpandDismissedFor: Set<UUID> = []
 
-    /// Single source of truth for every parsed structured
-    /// payload (SR levels, FVG zones, S&D zones, scored
-    /// scenarios, TA scenario + alt). Refreshed once per
-    /// `session.report` change in `refreshParsedPayloads()` — the
-    /// per-property accessors below read this cache instead of
-    /// re-parsing on every render. Six brace-walking parsers
-    /// running 3× each per body invocation was the dominant
+    /// Per-tab cache of every parsed structured payload (SR levels,
+    /// FVG zones, S&D zones, scored scenarios, TA scenario + alt),
+    /// keyed by tab id. Refreshed in `refreshParsedPayloads()` — the
+    /// per-property accessors below read the *current tab's* slot
+    /// instead of re-parsing on every render. Six brace-walking
+    /// parsers running 3× each per body invocation was the dominant
     /// cause of the page lag.
-    @State private var parsedPayloads = ParsedPayloads()
+    ///
+    /// Keying by tab id (rather than a single slot) is what makes
+    /// tab switching cheap: revisiting a previously-parsed tab is an
+    /// instant dictionary lookup — no re-parse of its (potentially
+    /// long) report. (Tab-switch Fix.)
+    @State private var parsedPayloadsByTab: [UUID: ParsedPayloads] = [:]
+
+    /// Signature of the last successful parse per tab. Lets a tab
+    /// switch short-circuit the parse entirely when nothing the
+    /// parsers care about has changed since we last visited that
+    /// tab — collapsing the 4× `onChange` storm (tab id / kind /
+    /// report / phase all flip on a switch) down to at most one
+    /// real parse, and skipping it outright on revisit. (Tab-switch Fix.)
+    @State private var parseSignatureByTab: [UUID: ParseSignature] = [:]
+
+    private struct ParseSignature: Equatable {
+        let kind: AnalysisKind
+        let reportCount: Int
+        let phase: AnalysisStore.Phase
+    }
+
+    /// The current tab's parsed payloads, or an empty set before
+    /// its first parse completes.
+    private var parsedPayloads: ParsedPayloads {
+        parsedPayloadsByTab[currentTab.id] ?? ParsedPayloads()
+    }
 
     private struct ParsedPayloads: Equatable {
         var srLevels: PromptBuilder.SRLevels = .init(support: [], resistance: [])
@@ -160,10 +184,16 @@ struct AnalysisPage: View {
     /// stay on a fast no-popup path.
     @State private var profilePickerVisible: Bool = false
 
-    /// Parsed CLARIFY_JSON from the combined run (the model asking
-    /// the user to narrow scope). Refreshed alongside the other
-    /// payloads; nil for normal runs.
-    @State private var parsedClarify: PromptBuilder.ClarifyRequest? = nil
+    /// Parsed CLARIFY_JSON per tab (the model asking the user to
+    /// narrow scope). Refreshed alongside the other payloads; absent
+    /// for normal runs. Per-tab so switching tabs restores the right
+    /// clarify card without a re-parse.
+    @State private var parsedClarifyByTab: [UUID: PromptBuilder.ClarifyRequest] = [:]
+
+    /// The current tab's clarify request, if any.
+    private var parsedClarify: PromptBuilder.ClarifyRequest? {
+        parsedClarifyByTab[currentTab.id]
+    }
 
     /// Binding bridge between the current tab's aspect CSV and the
     /// card's `Set<AnalysisAspect>`. Also updates the @AppStorage
@@ -881,7 +911,7 @@ struct AnalysisPage: View {
         // Nothing to do if neither aspects nor free text are present.
         let trimmedText = (freeText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !aspects.isEmpty || !trimmedText.isEmpty else { return }
-        parsedClarify = nil
+        parsedClarifyByTab[tab.id] = nil
         let needsMTF = aspects.contains { $0.needsMultiTF }
         let tfs: [Timeframe] = needsMTF
             ? (aspects.contains(.scenarios) ? tab.profile.meta.timeframes : [.m15, .h1, .h4])
@@ -938,7 +968,7 @@ struct AnalysisPage: View {
     /// with a do-not-ask nudge; a specific aspect id narrows to just
     /// that one and re-runs.
     private func onClarifyPick(_ id: String) {
-        parsedClarify = nil
+        parsedClarifyByTab[currentTab.id] = nil
         if id == "all" {
             runCombinedAction(freeText: "Produce all requested aspects in full now — do not ask to narrow.")
             return
@@ -1230,43 +1260,59 @@ struct AnalysisPage: View {
     /// (`.done` / `.error`) so the final guaranteed parse always
     /// fires regardless of throttle state.
     private func refreshParsedPayloads() {
+        let tabID = currentTab.id
+        let kind  = currentTab.kind
         let report = session.report
+        let signature = ParseSignature(
+            kind: kind,
+            reportCount: report.count,
+            phase: session.phase
+        )
+
         if session.phase == .running {
             guard report.contains("_JSON") else { return }
             let now = Date()
             guard now.timeIntervalSince(lastParseAt) >= 0.5 else { return }
             lastParseAt = now
         } else {
+            // Not streaming: nothing the parsers read has changed
+            // since we last parsed this tab ⇒ skip. This is what
+            // makes a tab switch cheap — the 4× `onChange` storm
+            // (tab id / kind / report / phase) collapses to one
+            // parse, and revisiting an already-parsed tab does zero
+            // work (its payloads are already cached).
+            guard parseSignatureByTab[tabID] != signature else { return }
             lastParseAt = Date()
         }
+        parseSignatureByTab[tabID] = signature
 
         // `.custom`, `.combined`, `.topDownSniper` are permissive
         // (they can emit any of the structured blocks).
-        let permissive = (selectedKind == .custom || selectedKind == .combined || selectedKind == .topDownSniper)
+        let permissive = (kind == .custom || kind == .combined || kind == .topDownSniper)
         var p = ParsedPayloads()
-        if selectedKind == .supportResistance || selectedKind == .full || permissive {
+        if kind == .supportResistance || kind == .full || permissive {
             p.srLevels = PromptBuilder.parseSRLevels(report)
         }
-        if selectedKind == .fvg || permissive {
+        if kind == .fvg || permissive {
             p.fvgZones = PromptBuilder.parseFVGZones(report)
         }
-        if selectedKind == .confluenceScanner || permissive {
+        if kind == .confluenceScanner || permissive {
             p.supplyDemand = PromptBuilder.parseSupplyDemandZones(report)
         }
-        if selectedKind == .confluenceScanner {
+        if kind == .confluenceScanner {
             p.scored = PromptBuilder.parseScoredScenarios(report)
         }
-        if selectedKind == .full || selectedKind == .confluenceScanner || permissive {
+        if kind == .full || kind == .confluenceScanner || permissive {
             p.taScenario    = PromptBuilder.parseTAScenario(report)
             p.taAltScenario = PromptBuilder.parseTAAltScenario(report)
         }
-        if p != parsedPayloads { parsedPayloads = p }
+        if parsedPayloadsByTab[tabID] != p { parsedPayloadsByTab[tabID] = p }
 
         // Clarify is combined-only and lives outside the cached
         // payloads struct (it's an ephemeral question, not chart data).
-        let clarify = selectedKind == .combined
+        let clarify = kind == .combined
             ? PromptBuilder.parseClarify(report)
             : nil
-        if parsedClarify != clarify { parsedClarify = clarify }
+        if parsedClarifyByTab[tabID] != clarify { parsedClarifyByTab[tabID] = clarify }
     }
 }

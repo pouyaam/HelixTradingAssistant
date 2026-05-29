@@ -73,7 +73,9 @@ final class AnalysisStore: ObservableObject {
     /// to streaming text (the report column) bind via
     /// `@ObservedObject` to the session directly.
     final class Session: ObservableObject {
-        @Published var report: String = ""
+        @Published var report: String = "" {
+            didSet { renderCacheValid = false }
+        }
         /// Internal reasoning trace emitted by extended-thinking
         /// models (Claude Opus / Sonnet 4.x with thinking on). The
         /// report column renders this in a collapsible section above
@@ -113,6 +115,81 @@ final class AnalysisStore: ObservableObject {
         fileprivate var task: Task<Void, Never>? = nil
 
         init() {}
+
+        // ── Report render cache ────────────────────────────────────
+        // The report column renders `report` with the structured
+        // JSON blocks stripped, split into chunks at H3 boundaries
+        // (so MarkdownUI only builds view trees for sections near the
+        // viewport). Recomputing `stripStructuredBlocks` + the chunk
+        // split on every body render — including scroll events and
+        // every tab switch — was a primary source of scroll + tab lag.
+        //
+        // Caching the result *on the session* (not the view) means a
+        // tab switch is a pure read: the report column asks
+        // `renderChunks()` and gets a memoised value back without
+        // re-parsing the (potentially long) report. `report.didSet`
+        // invalidates the cache, so streaming still recomputes once
+        // per flush. (Tab-switch Fix.)
+        struct RenderChunks: Equatable {
+            var clean: String = ""
+            var stage1: [String] = []
+            var stage2: [String] = []
+            var hasStage2: Bool = false
+        }
+
+        private var renderCacheValid = false
+        private var renderCacheValue = RenderChunks()
+
+        /// Memoised, structured-block-stripped + H3-chunked view of
+        /// `report`. O(1) when the report hasn't changed since the
+        /// last call; recomputes only after a `report` mutation.
+        func renderChunks() -> RenderChunks {
+            if renderCacheValid { return renderCacheValue }
+            renderCacheValue = Self.computeRenderChunks(report)
+            renderCacheValid = true
+            return renderCacheValue
+        }
+
+        private static func computeRenderChunks(_ report: String) -> RenderChunks {
+            let cleaned = PromptBuilder.stripStructuredBlocks(report)
+            var out = RenderChunks(clean: cleaned)
+            if let range = cleaned.range(of: AnalysisStore.expandMarker) {
+                let pre  = String(cleaned[..<range.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let post = String(cleaned[range.upperBound...])
+                    // Strip the leading "\n\n---\n\n" separator that
+                    // immediately follows the marker so stage 2 starts
+                    // cleanly at the first heading.
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                out.stage1 = chunkAtH3(pre)
+                out.stage2 = chunkAtH3(post)
+                out.hasStage2 = true
+            } else {
+                out.stage1 = chunkAtH3(cleaned)
+            }
+            return out
+        }
+
+        /// Split a markdown report into self-contained chunks at H3
+        /// (`### `) boundaries. Reports without any H3 fall through
+        /// as a single chunk.
+        private static func chunkAtH3(_ markdown: String) -> [String] {
+            guard !markdown.isEmpty else { return [] }
+            var chunks: [String] = []
+            var current: [String] = []
+            for line in markdown.components(separatedBy: "\n") {
+                if line.hasPrefix("### ") && !current.isEmpty {
+                    chunks.append(current.joined(separator: "\n"))
+                    current = [line]
+                } else {
+                    current.append(line)
+                }
+            }
+            if !current.isEmpty {
+                chunks.append(current.joined(separator: "\n"))
+            }
+            return chunks
+        }
     }
 
     /// HTML-comment marker injected at the stage 2 boundary in

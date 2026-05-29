@@ -70,28 +70,15 @@ struct AnalysisReportColumn: View {
     /// streaming, closed once done) — `userToggled` flips to true on
     /// the first manual click so we stop overriding the user's
     /// preference mid-run.
-    /// Memoised version of the structured-block-stripped report.
-    /// Recomputing `stripStructuredBlocks` on every body render
-    /// (which SwiftUI calls liberally — including in response to
-    /// scroll events on long reports) was the main source of
-    /// scroll lag. We refresh this cache only when
-    /// `session.report` actually changes.
-    @State private var cleanReportCache: String = ""
-    /// Stage 1 (Confluence Scanner — S&D) chunks of
-    /// `cleanReportCache`, split at H3 boundaries. Rendered
-    /// through a `LazyVStack` so MarkdownUI only builds view
-    /// trees for sections near the viewport.
-    @State private var stage1Chunks: [ReportChunk] = []
-    /// Stage 2 (Expand) chunks. Empty until the user clicks
-    /// Continue and the engine appends past the expand marker.
-    @State private var stage2Chunks: [ReportChunk] = []
-    /// True once the expand marker is detected in the report —
-    /// drives the second inline thinking disclosure.
-    @State private var hasStage2: Bool = false
-
-    private struct ReportChunk: Identifiable, Equatable {
-        let id: Int
-        let text: String
+    /// Structured-block-stripped + H3-chunked view of the report.
+    /// The heavy work (`stripStructuredBlocks` + chunk split) is
+    /// memoised *on the session* (see `Session.renderChunks()`), so
+    /// this is a cheap read — it recomputes only after the report
+    /// actually mutates, not on every body render (scroll events)
+    /// nor on every tab switch. Switching tabs hands this view a
+    /// different session whose cache is already warm. (Tab-switch Fix.)
+    private var renderChunks: AnalysisStore.Session.RenderChunks {
+        session.renderChunks()
     }
 
     var body: some View {
@@ -262,33 +249,36 @@ struct AnalysisReportColumn: View {
     // ── Running / done ─────────────────────────────────────────────
 
     private var reportScroll: some View {
-        ScrollViewReader { scroll in
+        let chunks = renderChunks
+        let showThinking = !stage1Thinking.isEmpty
+            || (session.phase == .running && !chunks.hasStage2)
+        return ScrollViewReader { scroll in
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                     // Stage 1 — first session: thinking on top,
                     // then the markdown chunks below it.
                     if showThinking {
                         ThinkingDisclosure(
-                            stageLabel: hasStage2 ? "Thought (Stage 1)" : "Thought",
-                            streamingLabel: hasStage2 ? "Thinking (Stage 1)…" : "Thinking…",
+                            stageLabel: chunks.hasStage2 ? "Thought (Stage 1)" : "Thought",
+                            streamingLabel: chunks.hasStage2 ? "Thinking (Stage 1)…" : "Thinking…",
                             text: stage1Thinking,
-                            isRunning: session.phase == .running && !hasStage2,
-                            hasFollowingContent: !stage1Chunks.isEmpty,
-                            initiallyExpanded: session.phase == .running && !hasStage2
+                            isRunning: session.phase == .running && !chunks.hasStage2,
+                            hasFollowingContent: !chunks.stage1.isEmpty,
+                            initiallyExpanded: session.phase == .running && !chunks.hasStage2
                         )
                     }
-                    if !stage1Chunks.isEmpty {
+                    if !chunks.stage1.isEmpty {
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(Array(stage1Chunks.enumerated()), id: \.element.id) { idx, chunk in
+                            ForEach(Array(chunks.stage1.enumerated()), id: \.offset) { idx, chunk in
                                 chunkView(
                                     chunk,
-                                    isStreamingTail: idx == stage1Chunks.count - 1
-                                        && !hasStage2
+                                    isStreamingTail: idx == chunks.stage1.count - 1
+                                        && !chunks.hasStage2
                                         && session.phase == .running
                                 )
                             }
                         }
-                    } else if cleanReportCache.isEmpty {
+                    } else if chunks.clean.isEmpty {
                         // Pre-content placeholder while Claude warms up.
                         if session.phase == .running && !showThinking {
                             workingPlaceholder
@@ -302,7 +292,7 @@ struct AnalysisReportColumn: View {
                     // Stage 2 — opt-in Expand session: its own
                     // thinking disclosure right above its report
                     // chunks, mirroring the stage 1 layout.
-                    if hasStage2 {
+                    if chunks.hasStage2 {
                         Divider()
                             .background(Theme.Color.border)
                             .padding(.vertical, Theme.Spacing.sm)
@@ -311,15 +301,15 @@ struct AnalysisReportColumn: View {
                             streamingLabel: "Thinking (Stage 2 · Expand)…",
                             text: stage2Thinking,
                             isRunning: session.phase == .running,
-                            hasFollowingContent: !stage2Chunks.isEmpty,
+                            hasFollowingContent: !chunks.stage2.isEmpty,
                             initiallyExpanded: session.phase == .running
                         )
-                        if !stage2Chunks.isEmpty {
+                        if !chunks.stage2.isEmpty {
                             LazyVStack(alignment: .leading, spacing: 0) {
-                                ForEach(Array(stage2Chunks.enumerated()), id: \.element.id) { idx, chunk in
+                                ForEach(Array(chunks.stage2.enumerated()), id: \.offset) { idx, chunk in
                                     chunkView(
                                         chunk,
-                                        isStreamingTail: idx == stage2Chunks.count - 1
+                                        isStreamingTail: idx == chunks.stage2.count - 1
                                             && session.phase == .running
                                     )
                                 }
@@ -364,14 +354,12 @@ struct AnalysisReportColumn: View {
             // the flush interval, so animations stacked / cancelled
             // into jitter. Unanimated `scrollTo` keeps up cleanly
             // and is essentially free. (Performance Fix 2.)
-            .onChange(of: session.report) { newValue in
-                refreshReportCache(from: newValue)
+            .onChange(of: session.report) { _ in
                 scroll.scrollTo("report-end", anchor: .bottom)
             }
             .onChange(of: session.thinking) { _ in
                 scroll.scrollTo("report-end", anchor: .bottom)
             }
-            .onAppear { refreshReportCache(from: session.report) }
         }
     }
 
@@ -385,48 +373,19 @@ struct AnalysisReportColumn: View {
     /// tint slightly muted while still streaming so it reads as
     /// "in-flight" content. (Performance Fix 5.)
     @ViewBuilder
-    private func chunkView(_ chunk: ReportChunk, isStreamingTail: Bool) -> some View {
+    private func chunkView(_ chunk: String, isStreamingTail: Bool) -> some View {
         if isStreamingTail {
-            Text(chunk.text)
+            Text(chunk)
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.Color.textSecondary)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
-            Markdown(chunk.text)
+            Markdown(chunk)
                 .markdownTheme(Theme.goldMarkdown)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    /// Rebuild the cleaned report + chunk lists. Called only when
-    /// `session.report` actually changes (or on first appear), not
-    /// on every body render — which is what made scrolling laggy
-    /// on long CTS reports. Also splits at the engine-injected
-    /// expand marker so the column can render two inline thinking
-    /// disclosures (one per stage).
-    private func refreshReportCache(from report: String) {
-        let cleaned = PromptBuilder.stripStructuredBlocks(report)
-        guard cleaned != cleanReportCache else { return }
-        cleanReportCache = cleaned
-
-        let marker = AnalysisStore.expandMarker
-        if let range = cleaned.range(of: marker) {
-            let pre  = String(cleaned[..<range.lowerBound])
-            let post = String(cleaned[range.upperBound...])
-                // Strip the leading "\n\n---\n\n" separator that
-                // immediately follows the marker so the stage 2
-                // chunks start cleanly at the first heading.
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            stage1Chunks = Self.chunk(pre.trimmingCharacters(in: .whitespacesAndNewlines))
-            stage2Chunks = Self.chunk(post)
-            hasStage2 = true
-        } else {
-            stage1Chunks = Self.chunk(cleaned)
-            stage2Chunks = []
-            hasStage2 = false
         }
     }
 
@@ -443,38 +402,6 @@ struct AnalysisReportColumn: View {
               session.thinking.count > offset
         else { return "" }
         return String(session.thinking.dropFirst(offset))
-    }
-
-    /// Split a long markdown report into self-contained chunks at
-    /// H3 (`### `) boundaries. Each chunk renders as its own
-    /// MarkdownUI subview inside a `LazyVStack` so SwiftUI can
-    /// skip building view trees for sections outside the
-    /// viewport. Reports without any H3 headers fall through as a
-    /// single chunk (the lazy split is a no-op for short content).
-    private static func chunk(_ markdown: String) -> [ReportChunk] {
-        guard !markdown.isEmpty else { return [] }
-        var chunks: [String] = []
-        var current: [String] = []
-        for line in markdown.components(separatedBy: "\n") {
-            if line.hasPrefix("### ") && !current.isEmpty {
-                chunks.append(current.joined(separator: "\n"))
-                current = [line]
-            } else {
-                current.append(line)
-            }
-        }
-        if !current.isEmpty {
-            chunks.append(current.joined(separator: "\n"))
-        }
-        return chunks.enumerated().map { ReportChunk(id: $0.offset, text: $0.element) }
-    }
-
-    /// Whether to render the stage-1 thinking disclosure at all.
-    /// We show it any time there's any thinking content OR while
-    /// stage 1 is still in flight (so the "Thinking…" header
-    /// appears immediately, before the first delta lands).
-    private var showThinking: Bool {
-        !stage1Thinking.isEmpty || (session.phase == .running && !hasStage2)
     }
 
     /// Inline thinking disclosure used for both Stage 1 and
