@@ -118,7 +118,27 @@ struct ChartView: View {
     /// false-negative on cold start.
     var livePrice: Double? = nil
 
+    /// Replay mode is active (the chart is showing history up to a
+    /// cursor). Draws a marker at the last (cursor) bar so the user
+    /// always knows where "now" sits in the replay.
+    var replayActive: Bool = false
+
+    /// The chart is waiting for the user to click a start bar for
+    /// Replay. While true, a plain click (no drag) anchors the replay
+    /// instead of deselecting drawings; panning still works.
+    var isPickingReplayAnchor: Bool = false
+
+    /// Called with the clicked bar's index (into `candles`) when the
+    /// user picks a replay start bar. DashboardView maps it to that
+    /// candle's date and sets the cursor.
+    var onPickReplayAnchor: ((Int) -> Void)? = nil
+
     @State private var hovered: HoverState?
+    /// Memoizes the data-derived arrays (HA candles, indicators, UT Bot)
+    /// so pan/zoom — which only changes `xDomain` — doesn't recompute
+    /// them over the full history every frame. @State so it survives the
+    /// struct being re-created each render. See `ChartDerivedCache`.
+    @State private var derived = ChartDerivedCache()
     @State private var dragStartDomain: ClosedRange<Double>?
     @State private var magnifyStartDomain: ClosedRange<Double>?
 
@@ -195,27 +215,15 @@ struct ChartView: View {
     /// Bollinger, oscillators) still read the raw input — that matches
     /// TradingView's convention.
     private var displayCandles: [Candle] {
-        let base = chartType == .heikinAshi ? HeikinAshi.transform(candles) : candles
-        // Patch the in-progress (last) candle with the live price so
-        // the visible close + price tag track the header in real
-        // time, not at the throttled reloadCandles cadence (1 Hz).
-        // The DB-rolled bar still backfills via reloadCandles; this
-        // just shaves the perceived lag between header and chart.
-        // Guard against bogus live values >10% off the stored close.
-        guard let live = livePrice,
-              let last = base.last,
-              abs(live - last.close) / last.close < 0.10
-        else { return base }
-        var patched = base
-        patched[patched.count - 1] = Candle(
-            id: last.id,
-            open: last.open,
-            high: max(last.high, live),
-            low: min(last.low, live),
-            close: live,
-            volume: last.volume
+        // Delegates to the memoizing cache: HA transform + live-price
+        // patch on the last bar. Cached against the candle data + live
+        // price so a pan (xDomain-only change) reuses the prior result
+        // instead of rebuilding the whole array every frame.
+        derived.displayCandles(
+            candles: candles,
+            heikinAshi: chartType == .heikinAshi,
+            livePrice: livePrice
         )
-        return patched
     }
 
     /// UT Bot output, lazily computed when the indicator is toggled on.
@@ -224,8 +232,8 @@ struct ChartView: View {
     /// two different builders.
     private var utBotOutput: UTBot.Output? {
         guard indicators.contains(.utBot) else { return nil }
-        return UTBot.compute(
-            candles,
+        return derived.utBot(
+            candles: candles,
             keyValue: indicatorConfig.utKeyValue,
             atrPeriod: indicatorConfig.utATRPeriod,
             useHeikinAshi: indicatorConfig.utUseHeikinAshi
@@ -255,6 +263,22 @@ struct ChartView: View {
                             .background(
                                 Capsule().fill(accent)
                             )
+                    }
+            }
+
+            // Replay cursor — a dashed vertical at the last revealed bar
+            // marks where "now" sits while stepping through history.
+            if replayActive, !displayCandles.isEmpty {
+                RuleMark(x: .value("Replay", Double(displayCandles.count - 1)))
+                    .foregroundStyle(Theme.Color.warn.opacity(0.55))
+                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [2, 3]))
+                    .annotation(position: .top, alignment: .trailing, spacing: 0) {
+                        Text("REPLAY")
+                            .font(.system(size: 8, weight: .heavy))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Theme.Color.warn))
                     }
             }
 
@@ -472,6 +496,21 @@ struct ChartView: View {
             .onEnded { value in
                 let hadMovement = dragHadMovement
                 dragHadMovement = false
+
+                // Replay anchor pick takes priority: a click (no drag)
+                // while picking sets the start bar. A drag is still a
+                // pan — leave the panned domain in place and bail.
+                if isPickingReplayAnchor {
+                    if !hadMovement {
+                        let xInPlot = value.location.x - plotOrigin.x
+                        if let xVal: Double = proxy.value(atX: xInPlot) {
+                            let idx = max(0, min(candles.count - 1, Int(xVal.rounded())))
+                            onPickReplayAnchor?(idx)
+                        }
+                    }
+                    dragStartDomain = nil
+                    return
+                }
 
                 if activeTool != .none {
                     handleDrawEnd(value, plotOrigin: plotOrigin, proxy: proxy)
@@ -831,19 +870,42 @@ struct ChartView: View {
     /// the plot's vertical borders.
     private var effectiveXDomain: ClosedRange<Double> {
         if let d = xDomain { return d }
-        let n = candles.count
-        guard n > 0 else { return 0 ... 1 }
-        if n == 1 {
-            return -0.5 ... 0.5
-        }
-        return -0.5 ... Double(n - 1) + 0.5
+        // No pinned window → open on the most recent N bars (trading-app
+        // convention) rather than dumping the entire (possibly multi-year)
+        // series on screen. Pan left for history.
+        return ChartWindow.defaultDomain(count: candles.count)
+    }
+
+    /// Bar indices to actually emit marks for this frame. Swift Charts
+    /// draws every mark you hand it and clips afterward, so without this
+    /// a deep series pins the main thread on pan/zoom. We render only the
+    /// visible window (+margin), stride-decimated when zoomed way out.
+    /// Marks still plot at the *global* bar index, so overlays/hover/
+    /// replay keep working unchanged.
+    private var renderIndices: [Int] {
+        // Use the raw `candles.count` (a stored property, O(1)) rather
+        // than `displayCandles.count` — the Heikin-Ashi transform /
+        // live-price patch preserve length, so the counts are identical
+        // and we avoid triggering that whole O(n) rebuild just to size
+        // the window.
+        ChartWindow.renderIndices(domain: effectiveXDomain, count: candles.count)
+    }
+
+    private var renderIndexSet: Set<Int> {
+        Set(renderIndices)
     }
 
     // MARK: - Mark variants
 
     @ChartContentBuilder
     private var lineMarks: some ChartContent {
-        ForEach(Array(displayCandles.enumerated()), id: \.offset) { i, c in
+        // Evaluate `displayCandles` ONCE here. It's a computed property
+        // that rebuilds (HA transform + live-price array copy) on every
+        // access, so indexing it inside the ForEach closure would re-run
+        // that O(n) work per visible bar — quadratic on deep history.
+        let cs = displayCandles
+        ForEach(renderIndices, id: \.self) { i in
+            let c = cs[i]
             AreaMark(
                 x: .value("Bar", Double(i)),
                 y: .value("Close", c.close)
@@ -863,7 +925,7 @@ struct ChartView: View {
             .interpolationMethod(.monotone)
         }
         // Single-point series can't draw a line — drop a visible marker.
-        if displayCandles.count == 1, let only = displayCandles.first {
+        if cs.count == 1, let only = cs.first {
             PointMark(
                 x: .value("Bar", 0.0),
                 y: .value("Close", only.close)
@@ -1522,12 +1584,13 @@ struct ChartView: View {
     @ChartContentBuilder
     private var utBotMarks: some ChartContent {
         if let out = utBotOutput {
+            let visible = renderIndexSet
             // Trailing stop: amber stepped line across all bars where
             // the stop is defined. Toggled by the user via the UT Bot
             // settings — when off, only the buy/sell labels remain.
             if indicatorConfig.utShowTrailingStop {
-                ForEach(Array(out.trailingStop.enumerated()), id: \.offset) { i, v in
-                    if let v = v {
+                ForEach(renderIndices, id: \.self) { i in
+                    if i < out.trailingStop.count, let v = out.trailingStop[i] {
                         LineMark(
                             x: .value("Bar", Double(i)),
                             y: .value("UT Stop", v),
@@ -1542,8 +1605,9 @@ struct ChartView: View {
             // Buy/Sell labels — positioned just below (buy) or above
             // (sell) the candle's actual extreme so the marker doesn't
             // sit on top of the wick.
-            ForEach(out.signals) { sig in
-                let c = displayCandles[sig.index]
+            let cs = displayCandles
+            ForEach(out.signals.filter { visible.contains($0.index) }) { sig in
+                let c = cs[sig.index]
                 PointMark(
                     x: .value("Bar", Double(sig.index)),
                     y: .value("Signal", sig.isBuy ? c.low : c.high)
@@ -1576,9 +1640,10 @@ struct ChartView: View {
     /// segment).
     @ChartContentBuilder
     private var indicatorMarks: some ChartContent {
-        let computed = Indicators.compute(indicators, candles: candles)
+        let computed = derived.indicators(enabled: indicators, candles: candles)
+        let visible = renderIndexSet
         ForEach(computed, id: \.kind) { entry in
-            ForEach(entry.points) { p in
+            ForEach(entry.points.filter { visible.contains($0.index) }) { p in
                 LineMark(
                     x: .value("Bar", Double(p.index)),
                     y: .value("Indicator", p.value),
@@ -1611,7 +1676,11 @@ struct ChartView: View {
 
     @ChartContentBuilder
     private var candleMarks: some ChartContent {
-        ForEach(Array(displayCandles.enumerated()), id: \.offset) { i, c in
+        // See `lineMarks`: bind `displayCandles` once to avoid the
+        // quadratic per-bar rebuild on deep history.
+        let cs = displayCandles
+        ForEach(renderIndices, id: \.self) { i in
+            let c = cs[i]
             // Wick — full high-to-low range.
             RuleMark(
                 x: .value("Bar", Double(i)),
@@ -1760,16 +1829,25 @@ struct ChartView: View {
     // MARK: - Empty state
 
     private var emptyState: some View {
-        VStack(spacing: Theme.Spacing.sm) {
-            Image(systemName: "chart.xyaxis.line")
+        // During replay an empty chart almost always means the cursor
+        // predates the stored history for this timeframe (1m only goes
+        // back ~8 days, 5m ~1 month). Point the user at the fix instead
+        // of the generic "wait for the next fetch" message.
+        let replaying = replayActive
+        return VStack(spacing: Theme.Spacing.sm) {
+            Image(systemName: replaying ? "clock.badge.exclamationmark" : "chart.xyaxis.line")
                 .font(.system(size: 40))
-                .foregroundStyle(Theme.Color.textMuted)
-            Text("No data for this timeframe")
+                .foregroundStyle(replaying ? Theme.Color.warn.opacity(0.8) : Theme.Color.textMuted)
+            Text(replaying ? "No stored bars this far back" : "No data for this timeframe")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Theme.Color.textSecondary)
-            Text("Wait for the next fetch cycle, or import older history.")
+            Text(replaying
+                 ? "This timeframe's history doesn't reach the replay point. Switch to a higher timeframe (5m+) or pick a more recent start."
+                 : "Wait for the next fetch cycle, or import older history.")
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.Color.textMuted)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 320)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -1782,17 +1860,30 @@ struct ChartView: View {
     /// folds in indicator extremes so e.g. the upper Bollinger band
     /// doesn't get clipped off the top.
     private var yDomain: ClosedRange<Double> {
-        // Use the candles actually drawn — HA values can exceed raw OHLC
-        // at the edges, so we need to fit to whatever's visible.
-        let visibleCandles = displayCandles
+        // Fit Y to only the *visible* bar window — otherwise the axis
+        // hugs the entire (possibly multi-year) range and the recent
+        // price action gets squashed into a few pixels. HA values can
+        // exceed raw OHLC at the edges, so fit to displayCandles.
+        let bounds = ChartWindow.visibleBounds(
+            domain: effectiveXDomain, count: displayCandles.count
+        )
+        let visibleCandles: ArraySlice<Candle>
+        if let b = bounds {
+            visibleCandles = displayCandles[b.lo ... b.hi]
+        } else {
+            visibleCandles = displayCandles[...]
+        }
         var lo = visibleCandles.map(\.low).min()  ?? 0
         var hi = visibleCandles.map(\.high).max() ?? 1
         // Pull in any indicator values that exceed the candle range so
-        // SMA/EMA/Bollinger lines never get clipped off-screen.
-        for entry in Indicators.compute(indicators, candles: candles) {
-            for p in entry.points {
-                if p.value < lo { lo = p.value }
-                if p.value > hi { hi = p.value }
+        // SMA/EMA/Bollinger lines never get clipped off-screen. Restrict
+        // to the visible index window to match the rendered marks.
+        if let b = bounds {
+            for entry in derived.indicators(enabled: indicators, candles: candles) {
+                for p in entry.points where p.index >= b.lo && p.index <= b.hi {
+                    if p.value < lo { lo = p.value }
+                    if p.value > hi { hi = p.value }
+                }
             }
         }
         // UT Bot trailing stop can sit well outside the candle range,
@@ -1800,10 +1891,11 @@ struct ChartView: View {
         // when the user has the visual stop line enabled — otherwise
         // we'd be reserving Y space for an invisible mark.
         if indicatorConfig.utShowTrailingStop,
+           let b = bounds,
            let stops = utBotOutput?.trailingStop
         {
-            for v in stops {
-                guard let v = v else { continue }
+            for i in b.lo ... b.hi where i < stops.count {
+                guard let v = stops[i] else { continue }
                 if v < lo { lo = v }
                 if v > hi { hi = v }
             }

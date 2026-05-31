@@ -3,13 +3,21 @@
 #
 # Usage:
 #   ./run.sh                # debug build, install deps + regen + build + launch
+#   ./run.sh --debug        # debug configuration (the default, stated explicitly)
 #   ./run.sh --release      # release configuration
+#   ./run.sh --dmg          # package a distributable .dmg (implies --release, no launch)
+#   ./run.sh --sign         # ad-hoc code-sign the .app before packaging (implies --dmg)
+#   ./run.sh --sign=<id>    # sign with a named identity, e.g. "Developer ID Application: …"
 #   ./run.sh --clean        # wipe ./build before building (forces SPM re-resolve)
 #   ./run.sh --no-launch    # build only, don't open the .app
 #   ./run.sh --quiet        # suppress xcodebuild noise
 #   ./run.sh --skip-deps    # don't try to install brew/npm tooling
 #
 # Combine freely: ./run.sh --clean --release
+# DMG output lands in ./dist/HelixTradingApp-<version>.dmg
+# Tip: an *unsigned* DMG is flagged "damaged" by Gatekeeper on other
+# Macs — pass --sign so the bundle launches cleanly (ad-hoc is enough
+# for personal use; a Developer ID identity is needed for wide sharing).
 #
 # What it does, in order:
 #   1) Sanity-check toolchain (xcodebuild present — Xcode is the only
@@ -41,18 +49,30 @@ LAUNCH=true
 CLEAN=false
 QUIET=false
 SKIP_DEPS=false
+DMG=false
+SIGN=""   # empty = don't sign; "-" = ad-hoc; otherwise a named identity
 
 # ── Args ───────────────────────────────────────────────────────────
 for arg in "$@"; do
   case "$arg" in
     --release)    CONFIG="Release" ;;
     --debug)      CONFIG="Debug" ;;
+    # Packaging a DMG is inherently a release artifact, and we don't
+    # want to pop the app open mid-package — so --dmg forces Release
+    # and suppresses launch (either can't sensibly be overridden here).
+    --dmg)        DMG=true; CONFIG="Release"; LAUNCH=false ;;
+    # Signing only makes sense for a packaged build, so --sign implies
+    # the full --dmg pipeline. Bare --sign = ad-hoc ("-"); --sign=<id>
+    # uses a named identity (Developer ID for shareable, notarisable
+    # builds).
+    --sign)       SIGN="-";            DMG=true; CONFIG="Release"; LAUNCH=false ;;
+    --sign=*)     SIGN="${arg#*=}";    DMG=true; CONFIG="Release"; LAUNCH=false ;;
     --clean)      CLEAN=true ;;
     --no-launch)  LAUNCH=false ;;
     --quiet)      QUIET=true ;;
     --skip-deps)  SKIP_DEPS=true ;;
     -h|--help)
-      sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *)
       echo "❌ Unknown option: $arg (use --help)" >&2
@@ -219,6 +239,68 @@ fi
 
 [ -d "$APP_PATH" ] || die "Build reported success but $APP_PATH is missing."
 ok "Built: $APP_PATH"
+
+# ── Step 5a: Code-sign (optional) ──────────────────────────────────
+# An unsigned .app inside a DMG trips Gatekeeper on other Macs ("app
+# is damaged and can't be opened"). Signing fixes that. We sign the
+# bundle in place, deep (so the embedded SwiftPM frameworks are covered
+# too) — but deliberately WITHOUT --options runtime: hardened runtime
+# blocks the unsandboxed `claude`/`codex` process spawning this app
+# depends on. Ad-hoc ("-") is enough for personal use; pass a Developer
+# ID identity via --sign=<id> for a build you intend to notarise/share.
+if [ -n "$SIGN" ]; then
+  if [ "$SIGN" = "-" ]; then
+    log "Code-signing app (ad-hoc)"
+  else
+    log "Code-signing app ($SIGN)"
+  fi
+  codesign --force --deep --timestamp=none --sign "$SIGN" "$APP_PATH" \
+    || die "codesign failed — check the identity name (security find-identity -v -p codesigning)."
+  codesign --verify --deep --strict "$APP_PATH" \
+    || die "codesign verification failed for $APP_PATH."
+  ok "Signed: $APP_PATH"
+fi
+
+# ── Step 5b: Package DMG ───────────────────────────────────────────
+# A compressed (UDZO) disk image with the .app plus an /Applications
+# symlink so the user can drag-to-install. Notarisation is still a
+# separate step (needs a Developer ID + `xcrun notarytool`); this just
+# produces a shareable artifact. Uses only hdiutil (ships with macOS),
+# so there's no extra dependency to install.
+if [ "$DMG" = true ]; then
+  log "Packaging DMG"
+
+  # Pull the version straight from the built app so the filename always
+  # matches what's inside, rather than re-reading project.yml.
+  VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+            "$APP_PATH/Contents/Info.plist" 2>/dev/null || echo "0.0.0")
+
+  DIST="$SCRIPT_DIR/dist"
+  mkdir -p "$DIST"
+  DMG_PATH="$DIST/$SCHEME-$VERSION.dmg"
+
+  # Stage the contents in a temp dir: the .app + a symlink to
+  # /Applications. hdiutil snapshots this folder into the image.
+  STAGING="$(mktemp -d)"
+  trap 'rm -rf "$STAGING"' EXIT
+  cp -R "$APP_PATH" "$STAGING/"
+  ln -s /Applications "$STAGING/Applications"
+
+  # Overwrite any prior image at this path (-ov). UDZO = compressed.
+  rm -f "$DMG_PATH"
+  if [ "$QUIET" = true ]; then
+    hdiutil create -volname "$SCHEME" -srcfolder "$STAGING" \
+      -ov -format UDZO "$DMG_PATH" >/dev/null
+  else
+    hdiutil create -volname "$SCHEME" -srcfolder "$STAGING" \
+      -ov -format UDZO "$DMG_PATH"
+  fi
+
+  rm -rf "$STAGING"
+  trap - EXIT
+  [ -f "$DMG_PATH" ] || die "hdiutil reported success but $DMG_PATH is missing."
+  ok "DMG: $DMG_PATH"
+fi
 
 # ── Step 6: Launch ─────────────────────────────────────────────────
 if [ "$LAUNCH" = true ]; then

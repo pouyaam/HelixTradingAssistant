@@ -247,7 +247,11 @@ final class CTraderScheduler: ObservableObject {
             close: b.c,
             volume: b.v
         )
-        try? repo.upsertMany([bar])
+        // Off-main upsert: cBot bar pushes arrive on the WS callback at
+        // the bridge's cadence; doing the SQLite write inline here would
+        // block the main actor. The async repo overload dispatches it
+        // onto GRDB's writer queue instead.
+        Task { try? await repo.upsertMany([bar]) }
     }
 
     private static func timeframeLabel(_ raw: String) -> String? {

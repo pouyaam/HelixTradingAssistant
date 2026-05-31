@@ -2,7 +2,7 @@ import Foundation
 import Combine
 
 /// Lightweight debug log of every HTTP request/response the app makes
-/// to a known source (Yahoo, gold-api, Digikala, etc.). When the
+/// to a known source (Yahoo, Twelve Data, etc.). When the
 /// "Debug logging" toggle is on, fetch sites call `record(...)` after
 /// every round-trip; the bug-icon popup in the dashboard renders the
 /// entries newest-first with status, duration, and a body preview so
@@ -25,7 +25,7 @@ final class NetworkLog: ObservableObject {
     struct Entry: Identifiable, Codable, Equatable {
         let id: UUID
         let date: Date
-        /// Origin tag — "yahoo" / "gold-api" / "digikala" / etc. Used
+        /// Origin tag — "yahoo" / "twelve-data" / etc. Used
         /// for grouping and colouring in the debug view.
         let source: String
         /// HTTP method ("GET", "POST"). String rather than enum so
@@ -67,7 +67,17 @@ final class NetworkLog: ObservableObject {
     private static let bodyCap = 4096
 
     private init() {
-        self.isEnabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
+        // Default capture ON when the user has never set it. Without
+        // this, the launch-time Yahoo backfill (which fires once at
+        // startup, before the debug popup is ever opened) is never
+        // captured, making it look like Yahoo isn't being called. The
+        // user can still flip it off from the popup; that choice
+        // persists.
+        if UserDefaults.standard.object(forKey: Self.enabledKey) == nil {
+            self.isEnabled = true
+        } else {
+            self.isEnabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
+        }
         loadEntries()
     }
 

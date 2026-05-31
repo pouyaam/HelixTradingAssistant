@@ -7,8 +7,8 @@ import Foundation
 /// internal `pairID` to tag the resulting `OHLCBar`s with.
 ///
 /// We deliberately bypass ProxyTransport here: Yahoo's CDN is reachable
-/// from Iran without VPN, while HD/TGJU/GoldAPI need SOCKS5. Using
-/// URLSession.shared also keeps Yahoo traffic out of the proxy budget.
+/// directly without a VPN. Using URLSession.shared also keeps Yahoo
+/// traffic out of the proxy budget.
 enum YahooGoldSource {
     /// Static map for resolving a TradingPair id → Yahoo's chart
     /// symbol. Kept here (rather than on the pair definition) because

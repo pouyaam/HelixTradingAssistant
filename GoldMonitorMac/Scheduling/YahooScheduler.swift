@@ -44,6 +44,47 @@ final class YahooScheduler: ObservableObject {
     /// Surfaced in the debug pane.
     @Published private(set) var activeLiveSource: String = "(none)"
 
+    /// Source series currently being deep-backfilled, keyed
+    /// `"pairID|sourceTF"` (e.g. `"ounce|1h"`). The dashboard watches
+    /// this to show a loading skeleton over the chart while the
+    /// historical candles for the selected timeframe are still
+    /// arriving from Yahoo.
+    @Published private(set) var backfilling: Set<String> = []
+
+    /// Source series we've already pulled to full depth this session,
+    /// so toggling back to a timeframe doesn't re-download years of
+    /// bars. Populated by both the bootstrap and on-demand backfills.
+    private var deepBackfilled: Set<String> = []
+
+    /// Source series currently fetching an *older* page from Twelve Data
+    /// (the pan-left "load more history" path), keyed `"pairID|sourceTF"`.
+    /// The dashboard watches this to show a "loading older bars" hint at
+    /// the left edge without blocking the rest of the chart.
+    @Published private(set) var loadingOlder: Set<String> = []
+
+    /// Series we've paged all the way back on — Twelve Data returned
+    /// nothing older than what we already had. Stops the pan-left
+    /// trigger from re-requesting (and burning the daily request quota)
+    /// once we've hit the bottom of available history.
+    private var exhaustedOlder: Set<String> = []
+
+    private func backfillKey(_ pairID: String, _ sourceTF: String) -> String {
+        "\(pairID)|\(sourceTF)"
+    }
+
+    /// Deepest `(range, interval)` Yahoo will serve for each native
+    /// source series. These are the per-interval ceilings — asking for
+    /// more just returns the same window.
+    private func deepFetchSpec(forSourceTF tf: String) -> (range: String, interval: String)? {
+        switch tf {
+        case "1m": return ("8d",  "1m")
+        case "5m": return ("60d", "5m")
+        case "1h": return ("2y",  "1h")
+        case "1d": return ("10y", "1d")
+        default:   return nil
+        }
+    }
+
     /// 10s tick — for the gold-api fallback path. Twelve Data ticks
     /// arrive on their own clock independent of this.
     let tickIntervalSeconds: Int = 10
@@ -125,7 +166,109 @@ final class YahooScheduler: ObservableObject {
     /// No-op until `start(database:)` has populated `cachedRepo`.
     func applyExternalTick(price: Double, pairID: String, source: String) {
         guard let repo = cachedRepo else { return }
-        applyLiveTick(price: price, pairID: pairID, source: source, repo: repo)
+        // applyLiveTick is async (DB bar-roll runs off-main). Hop onto a
+        // task so this synchronous entry point stays non-blocking for its
+        // caller (the cTrader flush loop).
+        Task { await self.applyLiveTick(price: price, pairID: pairID, source: source, repo: repo) }
+    }
+
+    // ── On-demand deep backfill ───────────────────────────────────────
+
+    /// Pull + store the full Yahoo depth for one pair's source series
+    /// (1m / 5m / 1h / 1d). Idempotent within a session — a series
+    /// already filled (by the bootstrap or a prior call) returns
+    /// immediately. Publishes `backfilling` around the network round
+    /// trip so the dashboard can show a skeleton while history loads.
+    /// No-op until `start(database:)` has cached the repo.
+    func ensureDeepHistory(pairID: String, sourceTF: String) async {
+        guard let repo = cachedRepo else { return }
+        let key = backfillKey(pairID, sourceTF)
+        if deepBackfilled.contains(key) || backfilling.contains(key) { return }
+        guard let spec = deepFetchSpec(forSourceTF: sourceTF),
+              let cfg = pairs.first(where: { $0.pairID == pairID }) else { return }
+
+        backfilling.insert(key)
+        defer { backfilling.remove(key) }
+        do {
+            let bars = try await YahooGoldSource.fetchHistory(
+                pairID: pairID, symbol: cfg.yahooSymbol,
+                skipWeekends: cfg.respectsWeekend,
+                range: spec.range, interval: spec.interval
+            )
+            try await repo.upsertMany(bars)
+            deepBackfilled.insert(key)
+            self.lastUpdateAt = Date()
+        } catch {
+            self.lastError = "yahoo backfill \(pairID)/\(sourceTF): \(error.localizedDescription)"
+        }
+    }
+
+    /// Warm every native series for one pair at once (1m/5m/1h/1d),
+    /// fetched in parallel. Used to pre-fill all timeframes rather than
+    /// lazily per selection.
+    func backfillAll(pairID: String) async {
+        await withTaskGroup(of: Void.self) { group in
+            for tf in ["1m", "5m", "1h", "1d"] {
+                group.addTask { [self] in
+                    await ensureDeepHistory(pairID: pairID, sourceTF: tf)
+                }
+            }
+        }
+    }
+
+    // ── Pan-left "load older history" (Twelve Data REST) ─────────────
+
+    /// Fetch one older page of intraday bars for a source series and
+    /// prepend it to the stored history. Yahoo caps 1m at ~8d and 5m at
+    /// ~60d, so once the user pans past that the chart hits a wall;
+    /// Twelve Data's `time_series` REST endpoint reaches years further
+    /// back for the same symbols. Anchors the (backward-counting) request
+    /// on the oldest bar we currently have and upserts whatever's older.
+    ///
+    /// Returns the number of genuinely-older bars added (0 = nothing new,
+    /// either because we've hit the bottom of available data or the fetch
+    /// failed). Idempotent against concurrent calls + a per-series
+    /// "exhausted" latch so a user pinned at the left edge can't spin the
+    /// request quota. No-op for coarse TFs (1h/1d already reach years via
+    /// Yahoo) and until `start(database:)` has cached the repo.
+    @discardableResult
+    func loadOlderHistory(pairID: String, sourceTF: String) async -> Int {
+        guard let repo = cachedRepo else { return 0 }
+        // Only the intraday series are Yahoo-capped; 1h/1d go back years
+        // already, so there's nothing for Twelve Data to extend there.
+        guard sourceTF == "1m" || sourceTF == "5m" else { return 0 }
+        let key = backfillKey(pairID, sourceTF)
+        if loadingOlder.contains(key) || exhaustedOlder.contains(key) { return 0 }
+        let apiKey = TwelveDataSpotStream.apiKey
+        guard !apiKey.isEmpty else { return 0 }
+        guard let cfg = pairs.first(where: { $0.pairID == pairID }),
+              let symbol = cfg.twelveDataSymbol,
+              let earliest = try? await repo.earliestBucket(pairID: pairID, timeframe: sourceTF)
+        else { return 0 }
+
+        loadingOlder.insert(key)
+        defer { loadingOlder.remove(key) }
+        do {
+            // End the window one second before our oldest bar so the page
+            // is strictly older (the boundary bar would just dedupe).
+            let bars = try await TwelveDataHistorySource.fetchHistory(
+                pairID: pairID, symbol: symbol, tfTag: sourceTF,
+                end: earliest.addingTimeInterval(-1),
+                apiKey: apiKey,
+                skipWeekends: cfg.respectsWeekend
+            )
+            let older = bars.filter { $0.bucketStart < earliest }
+            guard !older.isEmpty else {
+                exhaustedOlder.insert(key)
+                return 0
+            }
+            try await repo.upsertMany(older)
+            self.lastUpdateAt = Date()
+            return older.count
+        } catch {
+            self.lastError = "twelve-data history \(pairID)/\(sourceTF): \(error.localizedDescription)"
+            return 0
+        }
     }
 
     /// Start every loop. Idempotent — repeated calls from AppState's
@@ -147,7 +290,7 @@ final class YahooScheduler: ObservableObject {
             if id == "ounce", self.cTraderProvider?.isFreshForXAUUSD() == true {
                 return
             }
-            self.applyLiveTick(price: price, pairID: id, source: "twelve-data", repo: repo)
+            Task { await self.applyLiveTick(price: price, pairID: id, source: "twelve-data", repo: repo) }
         }
         s.start()
         stream = s
@@ -179,52 +322,33 @@ final class YahooScheduler: ObservableObject {
     private func bootstrapAndGapFill(repo: OHLCRepo) async {
         isFetching = true
         defer { isFetching = false }
-        let now = Date()
         for cfg in pairs {
             // Weekend cleanup only matters for markets that have
             // weekends; crypto never has closed-day rows.
             if cfg.respectsWeekend {
-                _ = try? repo.deleteClosedDayBars(pairID: cfg.pairID)
+                _ = try? await repo.deleteClosedDayBars(pairID: cfg.pairID)
             }
-            do {
-                // 5-minute history (1 month deep).
-                let last5m = try repo.latestBucket(pairID: cfg.pairID, timeframe: "5m")
-                if last5m == nil || now.timeIntervalSince(last5m!) > 5 * 60 {
-                    let bars = try await YahooGoldSource.fetchHistory(
-                        pairID: cfg.pairID,
-                        symbol: cfg.yahooSymbol,
-                        skipWeekends: cfg.respectsWeekend,
-                        range: "1mo",
-                        interval: "5m"
-                    )
-                    try repo.upsertMany(bars)
-                }
-                // 1-minute history (8 days deep).
-                let last1m = try repo.latestBucket(pairID: cfg.pairID, timeframe: "1m")
-                if last1m == nil || now.timeIntervalSince(last1m!) > 60 {
-                    let bars = try await YahooGoldSource.fetchHistory(
-                        pairID: cfg.pairID,
-                        symbol: cfg.yahooSymbol,
-                        skipWeekends: cfg.respectsWeekend,
-                        range: "8d",
-                        interval: "1m"
-                    )
-                    try repo.upsertMany(bars)
-                }
-                // Seed the published price from the last stored bar.
-                if let last1m = try repo.latestBucket(pairID: cfg.pairID, timeframe: "1m"),
-                   let recent = try repo.read(
-                    pairID: cfg.pairID, timeframe: "1m",
-                    since: last1m.addingTimeInterval(-60),
-                    until: last1m
-                   ).last {
-                    latestPrices[cfg.pairID] = recent.close
-                }
-                self.hasBootstrapped = true
-                self.lastError = nil
-            } catch {
-                self.lastError = "yahoo \(cfg.pairID): \(error.localizedDescription)"
+            // Pull every native series to full depth through the shared
+            // `ensureDeepHistory` path — same code (and `backfilling`
+            // skeleton signalling) the dashboard's on-demand backfill
+            // uses, so the two can't double-fetch the same series.
+            // Depth per interval (Yahoo's per-interval ceiling):
+            //   5m → 60d · 1m → 8d · 1h → 2y · 1d → 10y.
+            await ensureDeepHistory(pairID: cfg.pairID, sourceTF: "5m")
+            await ensureDeepHistory(pairID: cfg.pairID, sourceTF: "1m")
+            await ensureDeepHistory(pairID: cfg.pairID, sourceTF: "1h")
+            await ensureDeepHistory(pairID: cfg.pairID, sourceTF: "1d")
+
+            // Seed the published price from the last stored 1m bar.
+            if let last1m = try? await repo.latestBucket(pairID: cfg.pairID, timeframe: "1m"),
+               let recent = try? await repo.read(
+                pairID: cfg.pairID, timeframe: "1m",
+                since: last1m.addingTimeInterval(-60),
+                until: last1m
+               ).last {
+                latestPrices[cfg.pairID] = recent.close
             }
+            self.hasBootstrapped = true
         }
         self.lastUpdateAt = Date()
     }
@@ -257,6 +381,11 @@ final class YahooScheduler: ObservableObject {
     /// shouldn't stop the others.
     private func syncYahoo(cfg: PairConfig, repo: OHLCRepo) async {
         do {
+            // Periodic sync only needs to refresh the *trailing* bars —
+            // the deep 1h/1d tails were filled at bootstrap and never
+            // change once closed. So we use short ranges here (cheap
+            // payloads, kinder to Yahoo's rate limits) and let
+            // upsertMany merge the freshest few bars of each series.
             async let oneMinT = YahooGoldSource.fetchHistory(
                 pairID: cfg.pairID, symbol: cfg.yahooSymbol,
                 skipWeekends: cfg.respectsWeekend,
@@ -267,10 +396,24 @@ final class YahooScheduler: ObservableObject {
                 skipWeekends: cfg.respectsWeekend,
                 range: "1mo", interval: "5m"
             )
+            async let oneHourT = YahooGoldSource.fetchHistory(
+                pairID: cfg.pairID, symbol: cfg.yahooSymbol,
+                skipWeekends: cfg.respectsWeekend,
+                range: "5d", interval: "1h"
+            )
+            async let oneDayT = YahooGoldSource.fetchHistory(
+                pairID: cfg.pairID, symbol: cfg.yahooSymbol,
+                skipWeekends: cfg.respectsWeekend,
+                range: "1mo", interval: "1d"
+            )
             let oneMin = try await oneMinT
             let fiveMin = try await fiveMinT
-            try repo.upsertMany(oneMin)
-            try repo.upsertMany(fiveMin)
+            let oneHour = try await oneHourT
+            let oneDay = try await oneDayT
+            try await repo.upsertMany(oneMin)
+            try await repo.upsertMany(fiveMin)
+            try await repo.upsertMany(oneHour)
+            try await repo.upsertMany(oneDay)
         } catch {
             self.lastError = "yahoo \(cfg.pairID): \(error.localizedDescription)"
         }
@@ -285,15 +428,18 @@ final class YahooScheduler: ObservableObject {
         pairID: String,
         source: String,
         repo: OHLCRepo
-    ) {
+    ) async {
+        // Publish the price immediately (cheap @Published mutation on the
+        // main actor) so the UI updates the instant a tick arrives — the
+        // bar-rolling DB work below runs off-main and never blocks it.
         latestPrices[pairID] = price
         activeLiveSource = "\(source)/\(pairID)"
         let cfg = pairs.first { $0.pairID == pairID }
         let respectsWeekend = cfg?.respectsWeekend ?? false
-        try? rollLiveBar(pairID: pairID, timeframe: "1m", bucketSize: 60,
-                         respectsWeekend: respectsWeekend, price: price, repo: repo)
-        try? rollLiveBar(pairID: pairID, timeframe: "5m", bucketSize: 300,
-                         respectsWeekend: respectsWeekend, price: price, repo: repo)
+        try? await rollLiveBar(pairID: pairID, timeframe: "1m", bucketSize: 60,
+                               respectsWeekend: respectsWeekend, price: price, repo: repo)
+        try? await rollLiveBar(pairID: pairID, timeframe: "5m", bucketSize: 300,
+                               respectsWeekend: respectsWeekend, price: price, repo: repo)
         // Throttle lastUpdateAt writes — it's @Published and feeds
         // several heavy observers (chart reload trigger, header
         // FetchTimerView re-render, status bar). At cTrader's 2+ Hz
@@ -326,6 +472,11 @@ final class YahooScheduler: ObservableObject {
     /// high/low expand monotonically; close always reflects the
     /// latest tick. For markets with a weekly close (gold), skips
     /// weekend buckets to keep stale Friday quotes out of the chart.
+    ///
+    /// The read-modify-write is done atomically inside the repo's SQL
+    /// `ON CONFLICT` merge (`upsertLiveTickBar`) and runs off the main
+    /// thread, so a burst of ticks for the same bucket can't race a
+    /// stale read — and the main actor never blocks on SQLite here.
     private func rollLiveBar(
         pairID: String,
         timeframe: String,
@@ -333,43 +484,17 @@ final class YahooScheduler: ObservableObject {
         respectsWeekend: Bool,
         price: Double,
         repo: OHLCRepo
-    ) throws {
+    ) async throws {
         let nowSecs = Date().timeIntervalSince1970
         let bucketSecs = floor(nowSecs / bucketSize) * bucketSize
         let bucketStart = Date(timeIntervalSince1970: bucketSecs)
         if respectsWeekend && MarketCalendar.isClosedDay(bucketStart) { return }
 
-        let existing = (try? repo.read(
+        try await repo.upsertLiveTickBar(
             pairID: pairID,
             timeframe: timeframe,
-            since: bucketStart,
-            until: bucketStart
-        ))?.first
-
-        let bar: OHLCBar
-        if let existing = existing {
-            bar = OHLCBar(
-                pairID: pairID,
-                timeframe: timeframe,
-                bucketStart: bucketStart,
-                open:  existing.open,
-                high:  max(existing.high, price),
-                low:   min(existing.low,  price),
-                close: price,
-                volume: existing.volume
-            )
-        } else {
-            bar = OHLCBar(
-                pairID: pairID,
-                timeframe: timeframe,
-                bucketStart: bucketStart,
-                open:  price,
-                high:  price,
-                low:   price,
-                close: price,
-                volume: nil
-            )
-        }
-        try repo.upsertMany([bar])
+            bucketStart: bucketStart,
+            price: price
+        )
     }
 }

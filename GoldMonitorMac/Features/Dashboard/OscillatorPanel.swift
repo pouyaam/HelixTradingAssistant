@@ -16,6 +16,11 @@ struct OscillatorPanel: View {
     /// price chart move this panel in lock-step.
     let xDomain: ClosedRange<Double>?
 
+    /// Memoizes this panel's oscillator computation so a pan/zoom (which
+    /// only changes `xDomain`) doesn't re-run RSI/MACD/Stoch over the
+    /// full history every frame. See `ChartDerivedCache`.
+    @State private var derived = ChartDerivedCache()
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
@@ -53,7 +58,7 @@ struct OscillatorPanel: View {
 
     @ChartContentBuilder
     private var marks: some ChartContent {
-        let pts = computedPoints
+        let pts = visiblePoints
         switch kind {
         case .rsi:
             ForEach(pts) { p in
@@ -174,36 +179,28 @@ struct OscillatorPanel: View {
 
     // MARK: - Compute
 
-    /// Cached per-render. Recomputing across all marks/readouts in the
-    /// same body call would be wasteful for large series.
+    /// Memoized oscillator series. Cached against the candle data +
+    /// config so repeated reads within a frame (marks, yDomain, readout)
+    /// and across pan/zoom frames reuse one computation instead of
+    /// re-running it over the full history each time.
     private var computedPoints: [IndicatorPoint] {
-        switch kind {
-        case .rsi:
-            return Oscillators.rsi(candles, period: config.rsiPeriod)
-        case .macd:
-            return Oscillators.macd(
-                candles,
-                fast: config.macdFast,
-                slow: config.macdSlow,
-                signal: config.macdSignal
-            )
-        case .stochastic:
-            return Oscillators.stochastic(
-                candles,
-                kPeriod: config.stochK,
-                dPeriod: config.stochD
-            )
-        }
+        derived.oscillatorPoints(kind: kind, candles: candles, config: config)
+    }
+
+    /// computedPoints restricted to the bar indices actually rendered
+    /// this frame — keeps mark count bounded on deep history, matching
+    /// the price chart's windowing. Latest-value readouts still read the
+    /// full series so they never go stale when zoomed in.
+    private var visiblePoints: [IndicatorPoint] {
+        let set = Set(ChartWindow.renderIndices(domain: effectiveDomain, count: candles.count))
+        return computedPoints.filter { set.contains($0.index) }
     }
 
     // MARK: - Scales
 
     private var effectiveDomain: ClosedRange<Double> {
         if let d = xDomain { return d }
-        let n = candles.count
-        guard n > 0 else { return 0 ... 1 }
-        if n == 1 { return -0.5 ... 0.5 }
-        return -0.5 ... Double(n - 1) + 0.5
+        return ChartWindow.defaultDomain(count: candles.count)
     }
 
     private var yDomain: ClosedRange<Double> {
@@ -213,7 +210,7 @@ struct OscillatorPanel: View {
         case .macd:
             // Pad ±5% around the visible MACD range so the histogram
             // bars don't sit flush against the top/bottom edges.
-            let pts = computedPoints
+            let pts = visiblePoints
             let values = pts.map(\.value)
             let lo = values.min() ?? -1
             let hi = values.max() ?? 1

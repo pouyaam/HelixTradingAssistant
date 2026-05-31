@@ -111,6 +111,17 @@ struct DashboardView: View {
     /// Drives the "set price alert" sheet from the chart header.
     @State private var showAlertSheet: Bool = false
 
+    /// TradingView-style Replay. Holds a single shared cursor `Date`
+    /// the candle loader clips to, plus playback state. Ephemeral — see
+    /// `ReplayController`.
+    @StateObject private var replay = ReplayController()
+
+    /// Working value for the replay date-jump picker. Lets the user
+    /// anchor deep into history (years, on h1/h4/d1) without scrolling
+    /// the chart back bar-by-bar. Synced to the cursor whenever the
+    /// picking phase opens.
+    @State private var replayPickerDate: Date = Date()
+
     /// Strategy-profile picker sheet — fires from the AUTO toggle
     /// when the user enables auto-trading for a pair. The CTS
     /// Analyze button in the analysis page has its own
@@ -362,6 +373,7 @@ struct DashboardView: View {
         }
         .background(Theme.Color.canvas)
         .task(id: app.selectedPairID) {
+            replay.exit()   // a replay anchored on the old pair's bars makes no sense here
             xDomain = nil   // new pair ⇒ drop any pinned window
             srLevels = .init(support: [], resistance: [])  // overlays are per-pair
             fvgZones = []
@@ -370,6 +382,7 @@ struct DashboardView: View {
             taAltScenario = nil
             selectedDrawingID = nil   // drawing belonged to the prior pair
             await reloadCandles()
+            warmHistory()   // backfill deep history for this pair (skeleton while it loads)
         }
         // Wire the AutoTraderEngine's headless candle loader once
         // the dashboard mounts. The engine needs this to fire
@@ -378,7 +391,9 @@ struct DashboardView: View {
         .task {
             autoTrader.candleLoader = { [weak app = self.app] pairID, tf in
                 guard app != nil else { return [] }
-                return await MainActor.run { candles(for: pairID, tf: tf) }
+                // Always live — the live trading engine must never see
+                // the foreground replay cursor's clipped history.
+                return await MainActor.run { candles(for: pairID, tf: tf, ignoreReplay: true) }
             }
             // Continuous-mode validation needs a fresh live price
             // to compare against the staged scenario's entry / TP /
@@ -391,6 +406,32 @@ struct DashboardView: View {
         .onChange(of: timeframe) { _ in
             xDomain = nil   // different bucket size ⇒ refit to data
             Task { await reloadCandles() }
+            warmHistory()   // ensure this timeframe's deep series is filled
+        }
+        // Infinite scroll: when the user pans within a few bars of the
+        // oldest stored candle, pull an older page from Twelve Data
+        // (Yahoo caps 1m/5m at ~8d/~60d) and splice it onto the front.
+        // Prepended bars shift every existing index up, so we slide
+        // `xDomain` by the same amount to keep the view visually still.
+        .onChange(of: xDomain) { newValue in
+            guard let dom = newValue, dom.lowerBound < 8 else { return }
+            guard let pairID = app.selectedPairID,
+                  let cur = app.pairs.first(where: { $0.id == pairID }),
+                  cur.usesLiveStream,            // only Twelve Data pairs have a REST history feed
+                  !replay.isActive               // don't yank a frozen replay view
+            else { return }
+            let srcTF = sourceTimeframeTag(for: timeframe)
+            guard srcTF == "1m" || srcTF == "5m" else { return }
+            Task {
+                let added = await yahoo.loadOlderHistory(pairID: pairID, sourceTF: srcTF)
+                guard added > 0 else { return }
+                let prior = candles.count
+                await reloadCandles()
+                let shift = Double(candles.count - prior)
+                if shift > 0, let pinned = xDomain {
+                    xDomain = (pinned.lowerBound + shift) ... (pinned.upperBound + shift)
+                }
+            }
         }
         .sheet(isPresented: $showAlertSheet) {
             if let cur = pair {
@@ -420,24 +461,23 @@ struct DashboardView: View {
         }
         .onReceive(
             // Throttle: cTrader's bridge can drive `lastUpdateAt` at
-            // 5 Hz (or whatever the scheduler's flush rate is), and a
-            // full `reloadCandles()` rebuilds the chart's scene
-            // graph + re-runs every indicator's O(n) sweep over the
-            // visible candle window. At 5 Hz on a moderately busy
-            // chart that was pinning the main thread at 99% CPU.
-            // 1 Hz is the visual ceiling for noticeable candle
-            // wiggle anyway — the live price tag in the header
-            // updates separately at the scheduler's full cadence
-            // because it reads `yahoo.latestPrices[…]`, which isn't
-            // gated by this throttle.
+            // 5 Hz (or whatever the scheduler's flush rate is). Each
+            // tick splices the trailing window onto `candles` and
+            // rebuilds the chart's scene graph for the visible window.
+            // At 5 Hz that was pinning the main thread; 1 Hz is the
+            // visual ceiling for noticeable candle wiggle anyway — the
+            // live price tag in the header updates separately at the
+            // scheduler's full cadence because it reads
+            // `yahoo.latestPrices[…]`, which isn't gated by this throttle.
             yahoo.$lastUpdateAt
                 .compactMap { $0 }
                 .throttle(for: .seconds(1), scheduler: DispatchQueue.main, latest: true)
         ) { _ in
             if let cur = app.pairs.first(where: { $0.id == app.selectedPairID }),
-               cur.usesLiveStream
+               cur.usesLiveStream,
+               !replay.isActive   // live ticks must not disturb a frozen replay view
             {
-                Task { await reloadCandles() }
+                refreshTrailingCandles()
             }
         }
         // Paper-trade evaluator: any live-stream pair's price tick
@@ -639,6 +679,7 @@ struct DashboardView: View {
                     // the toolbar to be just selection + format.
                     HStack(spacing: 6) {
                         analyzeButton
+                        replayButton
                         alertButton
                         autoTraderPill
                         toolbarDivider
@@ -698,7 +739,19 @@ struct DashboardView: View {
                     // (Layers popover history) but the chart drops
                     // them — keeps active runs uncluttered.
                     trades: tradeStore.openVisibleTrades(for: pair.id),
-                    livePrice: pair.usesLiveStream ? yahoo.latestPrices[pair.id] : pair.price
+                    // Suppress the live-price patch during replay — the
+                    // last revealed bar is historical, not "now".
+                    livePrice: replay.isActive
+                               ? nil
+                               : (pair.usesLiveStream ? yahoo.latestPrices[pair.id] : pair.price),
+                    replayActive: replay.isActive && replay.cursor != nil,
+                    isPickingReplayAnchor: replay.isActive && replay.isPickingAnchor,
+                    onPickReplayAnchor: { idx in
+                        guard idx >= 0, idx < candles.count else { return }
+                        replay.setAnchor(candles[idx].bucketStart)
+                        xDomain = nil   // refit to the revealed window
+                        Task { await reloadCandles() }
+                    }
                 )
                 // Chart expands to consume any vertical space the
                 // siblings below (volume / oscillators / stats) don't
@@ -732,6 +785,94 @@ struct DashboardView: View {
                     )
                     .padding(.trailing, Theme.Spacing.md)
                     .padding(.bottom, Theme.Spacing.md)
+                }
+                // MetaTrader-style "scroll to latest" puck. Surfaces in
+                // the bottom-left only when the user has panned/zoomed
+                // back off the newest bar; tapping slides the window
+                // forward to the latest candle keeping the zoom level.
+                // Bottom-left keeps it clear of the controls FAB
+                // (bottom-right) and the replay transport (bottom-center).
+                .overlay(alignment: .bottomLeading) {
+                    if !isViewingLatest {
+                        Button { scrollToLatest() } label: {
+                            Image(systemName: "forward.end.fill")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 36, height: 36)
+                                .background(Circle().fill(Theme.accentGradient))
+                                .overlay(Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 1))
+                                .shadow(color: .black.opacity(0.4), radius: 8, y: 3)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Scroll to latest")
+                        .padding(.leading, Theme.Spacing.md)
+                        .padding(.bottom, Theme.Spacing.md)
+                        .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                .animation(.spring(response: 0.3, dampingFraction: 0.75), value: isViewingLatest)
+                // Replay transport — floats bottom-center while replay
+                // is active. Picking phase shows a hint; once anchored
+                // it's play/pause/step/speed + the cursor clock.
+                .overlay(alignment: .bottom) {
+                    replayControlBar
+                        .padding(.bottom, Theme.Spacing.md)
+                }
+                // History backfill feedback. With no candles yet (e.g.
+                // switching to d1 before its native series has landed),
+                // cover the plot with a skeleton; once some bars are
+                // showing, drop to an unobtrusive top pill so the
+                // partial chart stays readable while deeper history
+                // fills in behind it.
+                .overlay {
+                    if isBackfillingCurrentTF && candles.isEmpty {
+                        ChartSkeleton()
+                            .padding(Theme.Spacing.sm)
+                            .transition(.opacity)
+                    }
+                }
+                .overlay(alignment: .top) {
+                    if isBackfillingCurrentTF && !candles.isEmpty {
+                        HStack(spacing: 7) {
+                            ProgressView().controlSize(.small)
+                            Text("Loading full history…")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Theme.Color.textSecondary)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Theme.Color.surface))
+                        .padding(.top, Theme.Spacing.sm)
+                        .transition(.opacity)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: isBackfillingCurrentTF)
+                // When a backfill (bootstrap or on-demand) finishes for
+                // any series, refresh so the freshly-stored history shows
+                // up immediately rather than at the next periodic tick.
+                .onChange(of: yahoo.backfilling) { _ in
+                    Task { await reloadCandles() }
+                }
+                // Drive auto-play: the controller's timer bumps `tick`;
+                // each increment advances the cursor one bar. Stop at
+                // the end of stored data.
+                .onChange(of: replay.tick) { _ in
+                    if !advanceReplay() { replay.pause() }
+                }
+                // Keep the AI store's back-test anchor in lockstep with
+                // the cursor so analyses launched in replay carry the
+                // "treat this as now" preamble.
+                .onChange(of: replay.cursor) { newValue in
+                    analysisStore.replayAsOf = replay.isActive ? newValue : nil
+                }
+                .onChange(of: replay.isActive) { active in
+                    analysisStore.replayAsOf = active ? replay.cursor : nil
+                }
+                // Seed the date-jump picker with the current cursor (or
+                // now) each time the picking phase opens, so it starts
+                // somewhere sensible.
+                .onChange(of: replay.isPickingAnchor) { picking in
+                    if picking { replayPickerDate = replay.cursor ?? Date() }
                 }
                 // Inspector for the currently-selected drawing. Floats
                 // at the top-trailing of the chart so it doesn't fight
@@ -1370,6 +1511,152 @@ struct DashboardView: View {
         .help("AI analysis")
     }
 
+    /// Toggles Replay mode. Off → arms the anchor-picking phase (next
+    /// chart click sets the start bar). On → exits back to live data.
+    private var replayButton: some View {
+        let active = replay.isActive
+        return Button {
+            if active {
+                replay.exit()
+                xDomain = nil
+                Task { await reloadCandles() }
+            } else {
+                replay.arm()
+            }
+        } label: {
+            Image(systemName: "backward.end.alt.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(active ? Theme.Color.warn : Theme.Color.textSecondary)
+                .frame(width: 28, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(active ? Theme.Color.warn.opacity(0.16) : Theme.Color.surface)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(active
+              ? "Exit replay"
+              : "Replay — pick a start bar and step through history")
+    }
+
+    /// Selectable playback speeds. The interval is wall-clock seconds
+    /// per revealed bar; the label is the human-facing multiplier.
+    private static let replaySpeeds: [(label: String, interval: TimeInterval)] = [
+        ("4×", 0.25), ("2×", 0.5), ("1×", 1.0), ("0.5×", 2.0),
+    ]
+
+    /// Clock label for the replay cursor — date + time so the user can
+    /// see exactly where in history they are.
+    private static let replayClock: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d  HH:mm"
+        return f
+    }()
+
+    /// Floating transport shown while replay is active.
+    @ViewBuilder
+    private var replayControlBar: some View {
+        if replay.isActive {
+            HStack(spacing: 12) {
+                if replay.isPickingAnchor {
+                    Image(systemName: "cursorarrow.rays")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.Color.warn)
+                    Text("Click a bar, or jump to")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.Color.textPrimary)
+                    DatePicker(
+                        "",
+                        selection: $replayPickerDate,
+                        in: replayDateRange(),
+                        displayedComponents: [.date, .hourAndMinute]
+                    )
+                    .labelsHidden()
+                    .datePickerStyle(.field)
+                    .fixedSize()
+                    Button("Go") { jumpReplay(to: replayPickerDate) }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.Color.warn)
+                        .help("Jump the replay start to this date")
+                } else {
+                    Button { replay.beginRepick() } label: {
+                        Image(systemName: "calendar")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Jump to a different date")
+
+                    Button { stepReplayBack() } label: {
+                        Image(systemName: "backward.frame.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Step back one bar")
+
+                    Button { replay.togglePlay() } label: {
+                        Image(systemName: replay.isPlaying ? "pause.fill" : "play.fill")
+                            .frame(width: 16)
+                    }
+                    .buttonStyle(.plain)
+                    .help(replay.isPlaying ? "Pause" : "Play")
+
+                    Button { _ = advanceReplay() } label: {
+                        Image(systemName: "forward.frame.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Step forward one bar")
+
+                    replaySpeedMenu
+
+                    if let c = replay.cursor {
+                        Text(Self.replayClock.string(from: c))
+                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(Theme.Color.textSecondary)
+                    }
+                }
+
+                Divider().frame(height: 14)
+
+                Button {
+                    replay.exit()
+                    xDomain = nil
+                    Task { await reloadCandles() }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                }
+                .buttonStyle(.plain)
+                .help("Exit replay")
+            }
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(Theme.Color.textPrimary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(
+                Capsule().fill(Theme.Color.surfaceMax)
+                    .overlay(Capsule().stroke(Theme.Color.warn.opacity(0.35), lineWidth: 1))
+            )
+            .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
+        }
+    }
+
+    private var replaySpeedMenu: some View {
+        let current = Self.replaySpeeds.first(where: { $0.interval == replay.stepInterval })?.label ?? "1×"
+        return Menu {
+            ForEach(Self.replaySpeeds, id: \.label) { speed in
+                Button(speed.label) {
+                    replay.stepInterval = speed.interval
+                    replay.reschedule()
+                }
+            }
+        } label: {
+            Text(current)
+                .font(.system(size: 11, weight: .bold).monospacedDigit())
+                .foregroundStyle(Theme.Color.textSecondary)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Playback speed")
+    }
+
     /// Opens the manual alert sheet for the current pair. Badge in
     /// the corner shows the number of armed alerts; tapping with
     /// no alerts opens the create-alert flow. Scenario alerts are
@@ -1689,6 +1976,33 @@ struct DashboardView: View {
         .help("Drawing tool · \(activeDrawingTool.label)")
     }
 
+    /// True when the visible window's right edge already sits on the most
+    /// recent candle — i.e. there's nothing newer to scroll to, so the
+    /// "scroll to latest" button hides. A `nil` `xDomain` means auto-fit,
+    /// which always pins the latest bar. In replay mode `candles` is
+    /// cursor-clipped, so "latest" is the last revealed bar.
+    private var isViewingLatest: Bool {
+        guard candles.count > 0, let d = xDomain else { return true }
+        return d.upperBound >= Double(candles.count - 1)
+    }
+
+    /// MetaTrader-style "scroll to the end": slide the visible window so
+    /// its right edge lands on the newest candle, *preserving the current
+    /// zoom width* (unlike Reset, which refits the default window). Works
+    /// in replay too — `candles` is cursor-clipped there, so this jumps to
+    /// the last revealed bar.
+    private func scrollToLatest() {
+        let n = candles.count
+        guard n > 0, let d = xDomain else { return }   // nil ⇒ already at latest
+        // Match the default domain's trailing half-bar pad so the newest
+        // candle isn't flush against the right edge.
+        let upper = Double(n - 1) + 0.5
+        let span = max(d.upperBound - d.lowerBound, 1)
+        withAnimation(.easeInOut(duration: 0.25)) {
+            xDomain = (upper - span) ... upper
+        }
+    }
+
     /// Multiply the current window's half-span by `factor` while keeping
     /// its centre fixed. <1 ⇒ zoom in, >1 ⇒ zoom out. Mirrors the maths
     /// in ChartView's magnification gesture so the buttons and the pinch
@@ -1816,6 +2130,39 @@ struct DashboardView: View {
         }
     }
 
+    /// Cheap live-tick path. The full `reloadCandles()` now re-reads the
+    /// *entire* stored series (years of bars) and re-folds it — far too
+    /// heavy to run on the main thread at the 1 Hz live cadence. Instead
+    /// we read only a short trailing window, fold it, and splice it onto
+    /// the tail of the in-memory `candles`: the current (in-progress) bar
+    /// gets its latest OHLC, and any bar that just rolled over is
+    /// appended. The deep load stays reserved for pair / timeframe change
+    /// and explicit refresh.
+    private func refreshTrailingCandles() {
+        guard let db = app.database, let pairID = app.selectedPairID else { return }
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        let respectsWeekend = pair?.category != .crypto
+        let until = Date()
+        // Window wide enough to cover the current + prior fold bucket so
+        // re-folding the tail reproduces the last bars exactly.
+        let margin = Double(max(timeframe.seconds * 3, 6 * 3600))
+        let since = until.addingTimeInterval(-margin)
+        let recent = loadOHLCCandles(
+            repo: db.ohlcRepo, pairID: pairID, tf: timeframe,
+            since: since, until: until, dropClosedDays: respectsWeekend
+        )
+        guard let cutoff = recent.first?.bucketStart else { return }
+        let priorCount = candles.count
+        var merged = candles
+        while let last = merged.last, last.bucketStart >= cutoff { merged.removeLast() }
+        merged.append(contentsOf: recent)
+        candles = merged
+        followLatestIfPinned(priorCount: priorCount, newCount: merged.count)
+        if let r = Oscillators.rsi(merged, period: oscillatorConfig.rsiPeriod).last?.value {
+            alertStore.evaluateRSI(r, pricePeek: yahoo.latestPrices[pairID], for: pairID)
+        }
+    }
+
     /// Pure candle fetch for an arbitrary timeframe. All pairs go
     /// through the OHLC table now (no Iran snapshot fallback) —
     /// `respectsWeekend` is on for the metal pair so COMEX-closed
@@ -1829,10 +2176,26 @@ struct DashboardView: View {
     /// selected-pair convenience above) and by the AutoTraderEngine
     /// when it needs to bundle 15m/1h/4h for a headless Confluence Trade Scanner
     /// re-run on any pair.
-    private func candles(for pairID: String, tf: Timeframe) -> [Candle] {
+    private func candles(for pairID: String, tf: Timeframe, ignoreReplay: Bool = false) -> [Candle] {
         guard let db = app.database else { return [] }
-        let until = Date()
-        let since = until.addingTimeInterval(-tf.historySeconds)
+        // Replay clips the right edge to the cursor; the window of
+        // context (`historySeconds`) ends there instead of at the live
+        // moment. This single substitution is what makes both the chart
+        // AND every AI analysis (which load through this same function)
+        // see only the bars up to the replay cursor.
+        //
+        // `ignoreReplay` opts back into live data — the headless
+        // auto-trader uses it so a backtest in the foreground can't
+        // feed the live trading engine stale bars.
+        let until = (ignoreReplay ? nil : replay.cursor) ?? Date()
+        // Load the *entire* stored series up to `until` (the live moment,
+        // or the replay cursor). The chart renders only a bounded visible
+        // window via `ChartWindow`, and the AI / auto-trader callers
+        // suffix-cap the candles they actually send, so reading deep here
+        // is cheap-enough and safe. Previously this clipped to
+        // `tf.historySeconds` (~1–2 weeks), which hid the years of history
+        // already sitting in the DB.
+        let since = Date.distantPast
         let pair = app.pairs.first(where: { $0.id == pairID })
         // Forex + indices respect weekends (COMEX, NYSE all close);
         // crypto is 24/7 so we never drop closed days for those.
@@ -1871,6 +2234,45 @@ struct DashboardView: View {
     /// 1m and 5m bars; everything coarser is rolled up from 5m.
     /// `dropClosedDays` is on for COMEX-hours markets (gold) and off
     /// for 24/7 markets (crypto).
+    /// The stored OHLC series we read as the *source* for a chart
+    /// timeframe. We keep four native series (1m, 5m, 1h, 1d) at the
+    /// depths Yahoo allows and fold the in-between TFs up from the
+    /// nearest finer native one. Reading h1/h4/d1 from native 1h/1d
+    /// (rather than folding from 5m) is what lets Replay reach years
+    /// back instead of ~2 months.
+    private func sourceTimeframeTag(for tf: Timeframe) -> String {
+        switch tf {
+        case .m1:             return "1m"
+        case .m5, .m15, .m30: return "5m"
+        case .h1, .h4:        return "1h"
+        case .d1:             return "1d"
+        }
+    }
+
+    /// True while Yahoo is fetching the full history for the source
+    /// series the current timeframe reads from — drives the chart
+    /// skeleton / "loading history" pill.
+    private var isBackfillingCurrentTF: Bool {
+        guard let pairID = app.selectedPairID else { return false }
+        return yahoo.backfilling.contains("\(pairID)|\(sourceTimeframeTag(for: timeframe))")
+    }
+
+    /// Pull deep history for the selected pair: the current timeframe's
+    /// series first (so its skeleton resolves fastest), then warm the
+    /// remaining native series in the background. Each `ensureDeepHistory`
+    /// is idempotent, so this is cheap to call on every pair / timeframe
+    /// change — already-filled series return immediately.
+    private func warmHistory() {
+        guard let pairID = app.selectedPairID else { return }
+        let currentSrc = sourceTimeframeTag(for: timeframe)
+        Task {
+            await yahoo.ensureDeepHistory(pairID: pairID, sourceTF: currentSrc)
+            await reloadCandles()
+            await yahoo.backfillAll(pairID: pairID)
+            await reloadCandles()
+        }
+    }
+
     private func loadOHLCCandles(
         repo: OHLCRepo,
         pairID: String,
@@ -1879,16 +2281,8 @@ struct DashboardView: View {
         until: Date,
         dropClosedDays: Bool
     ) -> [Candle] {
-        let sourceTF: String
-        let needsFold: Bool
-        switch tf {
-        case .m1:
-            sourceTF = "1m"; needsFold = false
-        case .m5:
-            sourceTF = "5m"; needsFold = false
-        case .m15, .m30, .h1, .h4, .d1:
-            sourceTF = "5m"; needsFold = true
-        }
+        let sourceTF = sourceTimeframeTag(for: tf)
+        let needsFold = sourceTF != tf.rawValue
         do {
             let bars = try repo.read(
                 pairID: pairID,
@@ -1897,12 +2291,116 @@ struct DashboardView: View {
                 until: until,
                 dropClosedDays: dropClosedDays
             )
-            if needsFold {
-                return OHLCAggregator.fold(bars: bars, into: tf)
+            if !bars.isEmpty {
+                return needsFold ? OHLCAggregator.fold(bars: bars, into: tf)
+                                 : bars.map { $0.toCandle() }
             }
-            return bars.map { $0.toCandle() }
+            // Native 1h/1d series missing — older DB from before they
+            // were ingested, or the bootstrap pull hasn't landed yet.
+            // Fall back to folding from 5m so the chart never blanks
+            // out (just shallower history until the next bootstrap).
+            if sourceTF == "1h" || sourceTF == "1d" {
+                let fallback = try repo.read(
+                    pairID: pairID, timeframe: "5m",
+                    since: since, until: until, dropClosedDays: dropClosedDays
+                )
+                return OHLCAggregator.fold(bars: fallback, into: tf)
+            }
+            return []
         } catch {
             return []
         }
+    }
+
+    // ── Replay stepping ────────────────────────────────────────────
+
+    /// First stored bar strictly *after* `cursor` for `tf`, or nil at
+    /// the end of available data. Loads a small forward window (sized to
+    /// clear a weekend + holiday on any TF) rather than reusing the
+    /// cursor-clipped `candles(for:)`, which by definition can't see
+    /// past the cursor.
+    private func nextReplayBar(after cursor: Date, pairID: String, tf: Timeframe) -> Candle? {
+        guard let db = app.database else { return nil }
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        let respectsWeekend = pair?.category != .crypto
+        let lookahead = max(tf.seconds * 6, 5 * 24 * 3600)
+        let bars = loadOHLCCandles(
+            repo: db.ohlcRepo, pairID: pairID, tf: tf,
+            since: cursor,
+            until: min(cursor.addingTimeInterval(lookahead), Date()),
+            dropClosedDays: respectsWeekend
+        )
+        return bars.first(where: { $0.bucketStart > cursor })
+    }
+
+    /// Last stored bar strictly *before* `cursor` for `tf`, for the
+    /// step-back control. Same windowed approach as `nextReplayBar`.
+    private func prevReplayBar(before cursor: Date, pairID: String, tf: Timeframe) -> Candle? {
+        guard let db = app.database else { return nil }
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        let respectsWeekend = pair?.category != .crypto
+        let lookback = max(tf.seconds * 6, 5 * 24 * 3600)
+        let bars = loadOHLCCandles(
+            repo: db.ohlcRepo, pairID: pairID, tf: tf,
+            since: cursor.addingTimeInterval(-lookback),
+            until: cursor,
+            dropClosedDays: respectsWeekend
+        )
+        return bars.last(where: { $0.bucketStart < cursor })
+    }
+
+    /// Move the replay cursor forward one bar of the current timeframe.
+    /// Snapping to the next *stored* bar (rather than blindly adding
+    /// `tf.seconds`) skips COMEX weekend gaps cleanly. Returns false at
+    /// the end of data so auto-play can stop itself.
+    @discardableResult
+    private func advanceReplay() -> Bool {
+        guard replay.isActive, let cursor = replay.cursor,
+              let pairID = app.selectedPairID else { return false }
+        guard let next = nextReplayBar(after: cursor, pairID: pairID, tf: timeframe) else {
+            return false
+        }
+        replay.cursor = next.bucketStart
+        Task { await reloadCandles() }
+        return true
+    }
+
+    /// Selectable date range for the replay date-jump picker, bounded
+    /// to the data we actually hold for the current timeframe's source
+    /// series (so the picker can't land somewhere with no bars). Falls
+    /// back to a 10-year lower bound if the range can't be read.
+    private func replayDateRange() -> ClosedRange<Date> {
+        let upper = Date()
+        let fallbackLower = upper.addingTimeInterval(-10 * 365 * 24 * 3600)
+        guard let pairID = app.selectedPairID, let db = app.database,
+              let earliest = try? db.ohlcRepo.earliestBucket(
+                pairID: pairID, timeframe: sourceTimeframeTag(for: timeframe))
+        else { return fallbackLower...upper }
+        // Guard against a degenerate range (earliest >= now).
+        return earliest < upper ? earliest...upper : fallbackLower...upper
+    }
+
+    /// Commit the date-jump: snap the cursor to the nearest stored bar
+    /// at/just before the picked date so it lands on real data.
+    private func jumpReplay(to date: Date) {
+        guard let pairID = app.selectedPairID else { return }
+        // Re-use the backward finder (which returns the last bar < date)
+        // but include the picked instant itself via a 1s nudge forward.
+        let target = prevReplayBar(before: date.addingTimeInterval(1),
+                                   pairID: pairID, tf: timeframe)?.bucketStart
+                     ?? date
+        replay.setAnchor(target)
+        xDomain = nil
+        Task { await reloadCandles() }
+    }
+
+    /// Move the replay cursor back one bar of the current timeframe.
+    private func stepReplayBack() {
+        guard replay.isActive, let cursor = replay.cursor,
+              let pairID = app.selectedPairID,
+              let prev = prevReplayBar(before: cursor, pairID: pairID, tf: timeframe)
+        else { return }
+        replay.cursor = prev.bucketStart
+        Task { await reloadCandles() }
     }
 }

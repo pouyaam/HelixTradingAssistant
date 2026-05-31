@@ -23,7 +23,8 @@ struct VolumeBarsView: View {
 
     var body: some View {
         Chart {
-            ForEach(Array(candles.enumerated()), id: \.offset) { i, c in
+            ForEach(ChartWindow.renderIndices(domain: effectiveDomain, count: candles.count), id: \.self) { i in
+                let c = candles[i]
                 BarMark(
                     x: .value("Bar", Double(i)),
                     y: .value("Volume", c.volume ?? 0)
@@ -58,10 +59,7 @@ struct VolumeBarsView: View {
     /// back to the full bar span with half-bar padding on each side.
     private var effectiveDomain: ClosedRange<Double> {
         if let d = xDomain { return d }
-        let n = candles.count
-        guard n > 0 else { return 0 ... 1 }
-        if n == 1 { return -0.5 ... 0.5 }
-        return -0.5 ... Double(n - 1) + 0.5
+        return ChartWindow.defaultDomain(count: candles.count)
     }
 
     private func barColor(_ c: Candle) -> Color {

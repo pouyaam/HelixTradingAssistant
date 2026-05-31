@@ -340,6 +340,31 @@ final class AnalysisStore: ObservableObject {
     @Published var sessions: [SessionKey: Session] = [:]
     @Published private(set) var history: [HistoryEntry] = []
 
+    /// When the dashboard is in Replay mode this holds the replay
+    /// cursor. Every analysis launched while it's set gets a leading
+    /// "treat this instant as now" note prepended to the user prompt,
+    /// so the model back-tests against the revealed bars instead of
+    /// complaining that the data is stale. nil ⇒ live, no note. Set by
+    /// DashboardView; read once at `startSession`.
+    var replayAsOf: Date?
+
+    /// Leading note injected into the user prompt during Replay. Anchors
+    /// the model to the cursor as "now" so it analyses the revealed bars
+    /// as a live setup rather than a historical post-mortem.
+    private static func replayPreamble(_ asOf: Date?) -> String {
+        guard let asOf else { return "" }
+        let f = ISO8601DateFormatter()
+        return """
+        IMPORTANT — HISTORICAL REPLAY / BACK-TEST CONTEXT
+        Treat \(f.string(from: asOf)) as the current moment ("now"). The most \
+        recent candle in the data below is the latest bar available as of that \
+        instant — you have NO knowledge of any price action after it. Analyse \
+        the setup exactly as if you were standing at that point in time.
+
+
+        """
+    }
+
     /// Per-key chunk batching state. Claude streams text deltas
     /// at 30-100 Hz; appending to the session storage per-chunk
     /// re-publishes the dict and forces the entire report column
@@ -697,6 +722,9 @@ final class AnalysisStore: ObservableObject {
 
         let engine = AIEngineFactory.make(engineKind)
         let system = systemOverride ?? PromptBuilder.systemPrompt(for: key.kind)
+        // Prepend the replay "as-of" note when back-testing so the model
+        // anchors to the cursor instead of treating the data as stale.
+        let resolvedUser = Self.replayPreamble(replayAsOf) + user
 
         var session = Session()
         session.phase = .running
@@ -706,11 +734,11 @@ final class AnalysisStore: ObservableObject {
         session.timeframeLabel = timeframeLabel
         session.engineLabel = engine.label
         session.systemPromptUsed = system
-        session.userPromptUsed = user
+        session.userPromptUsed = resolvedUser
 
         let task = Task { @MainActor [weak self] in
             do {
-                for try await event in engine.run(system: system, user: user) {
+                for try await event in engine.run(system: system, user: resolvedUser) {
                     guard let self = self else { return }
                     switch event {
                     case .text(let chunk):

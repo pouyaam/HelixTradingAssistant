@@ -8,9 +8,9 @@ struct Candle: Identifiable, Hashable {
     let high: Double
     let low: Double
     let close: Double
-    /// Trading volume during the bucket. Optional because snapshot-derived
-    /// pairs (Digikala / Wallgold / etc.) have no notion of volume; only
-    /// Yahoo-sourced ounce bars populate this.
+    /// Trading volume during the bucket. Optional because some live-tick
+    /// sources have no notion of volume; only Yahoo-sourced bars populate
+    /// this.
     var volume: Double?
     var bucketStart: Date { id }
 

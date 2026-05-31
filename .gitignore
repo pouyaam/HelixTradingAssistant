@@ -23,6 +23,11 @@ Package.resolved
 
 # ── Local build output (run.sh writes here) ─────────────────────────
 build/
+dist/
+# Packaged disk images (`run.sh --dmg`) — release artifacts, never
+# checked in. dist/ already covers the default output path; this also
+# catches a .dmg built anywhere else in the tree.
+*.dmg
 
 # ── Editor / IDE ────────────────────────────────────────────────────
 .vscode/
