@@ -45,3 +45,11 @@ dist/
 *.log
 *.tmp
 node_modules/
+
+# ── Generated media / drafts / scripts (not part of the app) ────────
+# Architecture GIFs are large render artifacts — the tracked
+# screenshots/architecture.svg is the canonical hero. MediumDrafts holds
+# article WIP, and the only Python here is a one-off media-export tool.
+*.gif
+*.py
+MediumDrafts/
