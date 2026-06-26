@@ -1,6 +1,29 @@
 import Foundation
 import Combine
 
+/// Which upstream drives the price + history for the Faraz-capable pairs
+/// (gold XAU/USD plus the BTC/SOL/ETH majors). Indices stay on Yahoo
+/// regardless. Switching this in Settings wipes the stored bars for
+/// those pairs and refetches from the newly-selected source (see
+/// `YahooScheduler.switchGoldSource`). The name is kept for back-compat
+/// with the persisted blob even though it now governs more than gold.
+enum GoldDataSource: String, CaseIterable, Identifiable, Codable {
+    /// Default: Twelve Data WebSocket live ticks + Yahoo history bars.
+    case twelveData
+    /// Faraz customer TradingView-UDF feed (cookie-authenticated),
+    /// polled every 10s. See `FarazHistorySource`.
+    case faraz
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .twelveData: return "Twelve Data + Yahoo"
+        case .faraz:      return "Faraz"
+        }
+    }
+}
+
 /// User-configurable data-source endpoints + credentials captured by
 /// the setup wizard. Single source of truth for any URL / port / API
 /// key that used to be hardcoded in the source tree — the
@@ -38,6 +61,15 @@ final class DataSourceConfig: ObservableObject {
     /// override if needed.
     @Published var claudeBinaryPath: String
 
+    /// Active upstream for the gold ounce. Changing this triggers a
+    /// clear-and-refetch of the ounce series (the scheduler observes it).
+    @Published var goldSource: GoldDataSource
+
+    /// Faraz session cookie, copied from a logged-in browser. Sent as the
+    /// `Cookie` header on every Faraz request. Empty = Faraz can't fetch
+    /// (the scheduler surfaces a "set your cookie" hint).
+    @Published var farazCookie: String
+
     private static let storageKey = "dataSourceConfig.v1"
 
     /// Stable defaults — the FF feed URL is public, the rest
@@ -50,6 +82,10 @@ final class DataSourceConfig: ObservableObject {
         self.twelveDataAPIKey = saved.twelveDataAPIKey
         self.forexFactoryURL  = saved.forexFactoryURL
         self.claudeBinaryPath = saved.claudeBinaryPath
+        // New fields are optional in the persisted blob so older payloads
+        // (which predate them) still decode — fall back to sane defaults.
+        self.goldSource  = saved.goldSource.flatMap(GoldDataSource.init(rawValue:)) ?? .twelveData
+        self.farazCookie = saved.farazCookie ?? ""
     }
 
     /// Apply a freshly-configured snapshot and persist. Called by
@@ -61,19 +97,37 @@ final class DataSourceConfig: ObservableObject {
         save()
     }
 
+    /// Switch the active gold source + Faraz cookie and persist. The
+    /// scheduler observes `$goldSource` and, on a real change, clears the
+    /// stored ounce bars and refetches from the new upstream.
+    func updateGoldSource(_ source: GoldDataSource, farazCookie: String) {
+        self.farazCookie = farazCookie.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Set the source LAST: its `didSet`/publish is the trigger the
+        // scheduler keys off, and by then the cookie is already in place.
+        self.goldSource = source
+        save()
+    }
+
     // ── Persistence ────────────────────────────────────────────────
 
     private struct Stored: Codable {
         var twelveDataAPIKey: String
         var forexFactoryURL: String
         var claudeBinaryPath: String
+        // Optional so a pre-existing `dataSourceConfig.v1` blob (written
+        // before these fields existed) still decodes instead of resetting
+        // every field to its default.
+        var goldSource: String?
+        var farazCookie: String?
     }
 
     private func save() {
         let s = Stored(
             twelveDataAPIKey: twelveDataAPIKey,
             forexFactoryURL:  forexFactoryURL,
-            claudeBinaryPath: claudeBinaryPath
+            claudeBinaryPath: claudeBinaryPath,
+            goldSource:  goldSource.rawValue,
+            farazCookie: farazCookie
         )
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: Self.storageKey)
@@ -89,7 +143,9 @@ final class DataSourceConfig: ObservableObject {
         return Stored(
             twelveDataAPIKey: "",
             forexFactoryURL:  defaultForexFactoryURL,
-            claudeBinaryPath: ""
+            claudeBinaryPath: "",
+            goldSource:  GoldDataSource.twelveData.rawValue,
+            farazCookie: ""
         )
     }
 }

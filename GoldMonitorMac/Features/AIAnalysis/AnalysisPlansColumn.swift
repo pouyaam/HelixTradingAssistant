@@ -45,6 +45,9 @@ struct AnalysisPlansColumn: View {
     /// non-interactive so the user does pan/zoom on the dashboard
     /// chart instead.
     @State private var previewDomain: ClosedRange<Double>? = nil
+    /// Same story for the vertical scale — the preview always auto-fits
+    /// Y; manual price-axis scaling is a dashboard-only affordance.
+    @State private var previewYDomain: ClosedRange<Double>? = nil
 
     var body: some View {
         ScrollView {
@@ -70,6 +73,7 @@ struct AnalysisPlansColumn: View {
             chartType: .candle,
             accent: pair.color,
             xDomain: $previewDomain,
+            yDomain: $previewYDomain,
             indicators: [],
             indicatorConfig: OscillatorConfig.load(),
             srLevels: srLevels,

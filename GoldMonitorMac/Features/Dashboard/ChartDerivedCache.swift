@@ -137,6 +137,104 @@ final class ChartDerivedCache {
         return result
     }
 
+    // ── Order Blocks ────────────────────────────────────────────────
+
+    private struct OBSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let lastClose: Double
+        let periods: Int
+        let threshold: Double
+        let useWicks: Bool
+    }
+    private var obSig: OBSig?
+    private var obCache: [OrderBlocks.Zone] = []
+
+    func orderBlocks(candles: [Candle], periods: Int, threshold: Double, useWicks: Bool) -> [OrderBlocks.Zone] {
+        let sig = OBSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
+            lastClose: candles.last?.close ?? 0,
+            periods: periods,
+            threshold: threshold,
+            useWicks: useWicks
+        )
+        if sig == obSig { return obCache }
+        let result = OrderBlocks.compute(candles, periods: periods, threshold: threshold, useWicks: useWicks)
+        obSig = sig
+        obCache = result
+        return result
+    }
+
+    // ── Trading Sessions ──────────────────────────────────────────────
+
+    private struct SessionSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let lastClose: Double
+    }
+    private var sessionSig: SessionSig?
+    private var sessionCache: [TradingSessions.SessionRun] = []
+
+    /// Memoized session runs over the full catalog. Depends only on the
+    /// candle data — *which* presets are shown (and which lines draw) is
+    /// applied at render time, so toggling a session on/off never busts
+    /// this cache.
+    func tradingSessions(candles: [Candle]) -> [TradingSessions.SessionRun] {
+        let sig = SessionSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
+            lastClose: candles.last?.close ?? 0
+        )
+        if sig == sessionSig { return sessionCache }
+        let result = TradingSessions.compute(candles)
+        sessionSig = sig
+        sessionCache = result
+        return result
+    }
+
+    // ── NY Open Setup ─────────────────────────────────────────────────
+
+    private struct NYSetupSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let lastClose: Double
+        let lastHigh: Double
+        let lastLow: Double
+        let atrMult: Double
+        let amOnly: Bool
+    }
+    private var nySetupSig: NYSetupSig?
+    private var nySetupCache: [NYOpenSetup.Result] = []
+
+    /// Memoized NY Open Setup detection. Folds the last bar's high/low
+    /// into the signature (not just close) so the live in-progress bar
+    /// pushing through entry/SL/TP re-runs detection — the setup's stage
+    /// can change intrabar.
+    func nyOpenSetup(candles: [Candle], atrMult: Double, amOnly: Bool) -> [NYOpenSetup.Result] {
+        let last = candles.last
+        let sig = NYSetupSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: last?.id.timeIntervalSince1970 ?? 0,
+            lastClose: last?.close ?? 0,
+            lastHigh: last?.high ?? 0,
+            lastLow: last?.low ?? 0,
+            atrMult: atrMult,
+            amOnly: amOnly
+        )
+        if sig == nySetupSig { return nySetupCache }
+        let result = NYOpenSetup.compute(candles, atrMultiple: atrMult, amOnly: amOnly)
+        nySetupSig = sig
+        nySetupCache = result
+        return result
+    }
+
     // ── Oscillator points (RSI / MACD / Stochastic) ───────────────────
 
     private struct OscSig: Equatable {

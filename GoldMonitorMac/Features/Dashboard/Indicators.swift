@@ -16,18 +16,39 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable {
     /// Special-cased in the chart: the trailing stop renders as a
     /// stepped line and signals render as labels at the relevant bars.
     case utBot
+    /// Order Block Finder — institutional order-block zones. Like UT Bot
+    /// it doesn't fit the single-line `IndicatorPoint` shape: it renders
+    /// as translucent rectangles (see `OrderBlocks` + ChartView's
+    /// `orderBlockMarks`) and reads its run length / threshold / wick
+    /// options from the indicator config.
+    case orderBlock
+    /// Trading Sessions — shades the Tokyo / London / New York sessions as
+    /// per-day high-low boxes with open/close/average lines. Like the two
+    /// above it renders as zones, not a line series (see `TradingSessions`
+    /// + ChartView's `sessionMarks`); which sessions show and which lines
+    /// draw come from the indicator config.
+    case tradingSession
+    /// NY Open Setup — the 5-minute opening-range breakout + FVG-retest
+    /// strategy (see `NYOpenSetup` + ChartView's `setupMarks`). Renders
+    /// the opening-range box, the breakout FVG, and the entry/SL/TP plan;
+    /// on 1m and 5m charts. The dashboard also turns the live day's plan
+    /// into alerts + an activate-trade affordance.
+    case nyOpenSetup
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .sma20:     return "SMA 20"
-        case .sma50:     return "SMA 50"
-        case .sma200:    return "SMA 200"
-        case .ema9:      return "EMA 9"
-        case .ema21:     return "EMA 21"
-        case .bollinger: return "Bollinger (20, 2)"
-        case .utBot:     return "UT Bot Alerts"
+        case .sma20:          return "SMA 20"
+        case .sma50:          return "SMA 50"
+        case .sma200:         return "SMA 200"
+        case .ema9:           return "EMA 9"
+        case .ema21:          return "EMA 21"
+        case .bollinger:      return "Bollinger (20, 2)"
+        case .utBot:          return "UT Bot Alerts"
+        case .orderBlock:     return "Order Blocks"
+        case .tradingSession: return "Trading Sessions"
+        case .nyOpenSetup:    return "NY Open Setup"
         }
     }
 
@@ -43,6 +64,17 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable {
         case .ema21:     return Color(red: 0.45, green: 0.85, blue: 0.95) // teal
         case .bollinger: return Color(red: 0.55, green: 0.85, blue: 1.00) // cyan
         case .utBot:     return Color(red: 0.95, green: 0.62, blue: 0.18) // amber
+        // Order blocks colour their fill green/red per direction on the
+        // chart; this hue is only the Layers-popover swatch, so a neutral
+        // indigo reads as "the zones layer" without implying a bias.
+        case .orderBlock: return Color(red: 0.55, green: 0.50, blue: 0.95) // indigo
+        // Trading sessions each carry their own hue (blue/orange/green) on
+        // the chart; this single swatch is just the Layers-popover marker,
+        // so a muted steel-blue reads as "the sessions layer".
+        case .tradingSession: return Color(red: 0.40, green: 0.55, blue: 0.70) // steel
+        // NY Open Setup colours its plan green/red by direction; the
+        // Layers swatch is a neutral amber that reads as "the setup layer".
+        case .nyOpenSetup: return Color(red: 0.95, green: 0.75, blue: 0.30) // amber
         }
     }
 }
@@ -174,6 +206,16 @@ enum Indicators {
             // (key value, ATR period) that the generic compute doesn't
             // receive.
             case .utBot:     pts = []
+            // Order Blocks render as zones (rectangles) in ChartView's
+            // `orderBlockMarks`, not as a line series — same reason
+            // UT Bot is empty here.
+            case .orderBlock: pts = []
+            // Trading Sessions render as per-day boxes in ChartView's
+            // `sessionMarks` (see `TradingSessions`), not a line series.
+            case .tradingSession: pts = []
+            // NY Open Setup renders as an OR box + FVG + plan lines in
+            // ChartView's `setupMarks` (see `NYOpenSetup`), not a series.
+            case .nyOpenSetup: pts = []
             }
             return pts.isEmpty ? nil : (kind, pts)
         }

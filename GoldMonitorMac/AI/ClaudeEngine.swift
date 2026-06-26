@@ -32,16 +32,28 @@ struct ClaudeEngine: AIEngine {
             }
 
             // Pull user-tunable model + effort from the same
-            // @AppStorage keys the Settings page writes. Effort is
-            // prepended to the system prompt as a soft hint — the
-            // CLI doesn't expose a thinking-budget flag directly,
-            // but the model takes a "use {high} effort" line
-            // seriously when it's at the top of its system.
+            // @AppStorage keys the analysis page writes.
             let model = UserDefaults.standard.string(forKey: "ai.claude.model")
-                ?? "claude-opus-4-7"
+                ?? ClaudeModelCatalog.defaultModelID
             let effort = UserDefaults.standard.string(forKey: "ai.claude.effort")
-                ?? "medium"
-            let effortLine = "Use **\(effort)** reasoning effort on this task.\n\n"
+                ?? ClaudeModelCatalog.defaultEffortID
+
+            // Map the effort setting to Claude Code's actual
+            // thinking-trigger keywords. The old soft phrasing ("use
+            // {medium} reasoning effort") did NOT reliably engage
+            // extended thinking — Sonnet would emit a thinking trace
+            // but Opus/Haiku often wouldn't, so the user saw thinking
+            // only on some models. These keywords ("think" / "think
+            // hard" / "ultrathink") allocate a real thinking budget the
+            // same way across every model, so the reasoning trace
+            // streams consistently regardless of the selected model.
+            let thinkingDirective: String
+            switch effort {
+            case "low":  thinkingDirective = "Think about this task before answering."
+            case "high": thinkingDirective = "Ultrathink about this task before answering."
+            default:     thinkingDirective = "Think hard about this task before answering."
+            }
+            let effortLine = "\(thinkingDirective)\n\n"
 
             // Claude CLI doesn't have a separate `--system` flag for the
             // system prompt. Concatenate the two with a delimiter; the

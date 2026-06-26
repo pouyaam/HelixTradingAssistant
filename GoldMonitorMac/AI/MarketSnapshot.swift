@@ -2,7 +2,7 @@ import Foundation
 
 /// One-shot snapshot of the indicator readings the AI prompt should
 /// see. Computed locally from the candles array via the same
-/// `Indicators` / `Oscillators` / `UTBot` helpers the chart uses —
+/// `Indicators` / `Oscillators` / `OrderBlocks` helpers the chart uses —
 /// Claude is poor at running RSI / MACD math from raw closes, so we
 /// pre-compute and hand it the numbers instead of asking it to
 /// estimate. Same numbers the user sees on their chart, which keeps
@@ -29,16 +29,28 @@ struct MarketSnapshot {
     /// has to subtract.
     let priceVsEMA50: Double?
     let priceVsEMA200: Double?
-    /// UT Bot trailing stop value at the latest bar + its current
-    /// bias (`true` = long-side stop, `false` = short-side stop).
-    /// `nil` until the indicator has seeded.
-    let utBotStop: Double?
-    let utBotIsLong: Bool?
+    /// The most recent institutional order blocks (same zones the chart
+    /// draws), newest first. Surfaced so the model can frame entries /
+    /// limit orders against them — the Confluence Scanner explicitly
+    /// hunts for order-block confluence. Empty when none were detected
+    /// on the visible window.
+    let orderBlocks: [OrderBlockReading]
     /// Average volume across the last 20 bars (when available) and
     /// the latest bar's volume. Ratio surfaced in markdownBlock so
     /// Claude can call out volume confluence on breakouts.
     let avgVolume20: Double?
     let lastVolume: Double?
+
+    /// A detected order block surfaced to the model: direction, the
+    /// marked price range + equilibrium, and how many bars back the
+    /// originating candle sits (0 = the latest bar).
+    struct OrderBlockReading {
+        let isBullish: Bool
+        let high: Double
+        let low: Double
+        let avg: Double
+        let barsAgo: Int
+    }
 
     /// Compute every field from a fresh candle series. Safe on short
     /// series — any indicator that can't seed simply yields nil.
@@ -49,7 +61,7 @@ struct MarketSnapshot {
                 macdLine: nil, macdSignal: nil, macdHist: nil,
                 ema50: nil, ema200: nil, atr14: nil,
                 priceVsEMA50: nil, priceVsEMA200: nil,
-                utBotStop: nil, utBotIsLong: nil,
+                orderBlocks: [],
                 avgVolume20: nil, lastVolume: nil
             )
         }
@@ -74,21 +86,25 @@ struct MarketSnapshot {
 
         let atr = Self.atr(candles, period: 14)
 
-        // UT Bot: reuse the chart's compute() and pick off the
-        // trailing-stop + position at the latest bar. `positions`
-        // is -1 / 0 / +1 per bar; we read the last non-zero value to
-        // get the current bias even when the latest bar didn't flip.
-        let ut = UTBot.compute(
+        // Order blocks: reuse the chart's detection and surface the most
+        // recent few (newest first) with their bar distance, so the
+        // model can reason about OB confluence without re-deriving them
+        // from the raw OHLC table.
+        let obZones = OrderBlocks.compute(
             candles,
-            keyValue: config.utKeyValue,
-            atrPeriod: config.utATRPeriod,
-            useHeikinAshi: config.utUseHeikinAshi
+            periods: config.obPeriods,
+            threshold: config.obThreshold,
+            useWicks: config.obUseWicks
         )
-        let utStop = ut.trailingStop.last.flatMap { $0 }
-        var utLong: Bool? = nil
-        for pos in ut.positions.reversed() where pos != 0 {
-            utLong = pos > 0
-            break
+        let lastIdx = candles.count - 1
+        let orderBlocks = obZones.suffix(3).reversed().map { z in
+            OrderBlockReading(
+                isBullish: z.isBullish,
+                high: z.high,
+                low: z.low,
+                avg: z.avg,
+                barsAgo: lastIdx - z.index
+            )
         }
 
         // Candle.volume is optional and many Iran pairs report 0
@@ -109,8 +125,7 @@ struct MarketSnapshot {
             atr14: atr,
             priceVsEMA50:  ema50.map  { last.close - $0 },
             priceVsEMA200: ema200.map { last.close - $0 },
-            utBotStop: utStop,
-            utBotIsLong: utLong,
+            orderBlocks: Array(orderBlocks),
             avgVolume20: avgVol,
             lastVolume: last.volume.flatMap { $0 > 0 ? $0 : nil }
         )
@@ -146,8 +161,10 @@ struct MarketSnapshot {
         if let a = atr14 {
             lines.append("- **ATR(14):** \(fmt(a)) (volatility unit for SL sizing — typical stop = 1.0–1.5×ATR)")
         }
-        if let stop = utBotStop, let long = utBotIsLong {
-            lines.append("- **UT Bot:** \(long ? "LONG" : "SHORT") · trailing stop \(fmt(stop))")
+        for ob in orderBlocks {
+            let dir = ob.isBullish ? "bullish" : "bearish"
+            let age = ob.barsAgo == 0 ? "latest bar" : "\(ob.barsAgo) bars ago"
+            lines.append("- **Order block (\(dir)):** \(fmt(ob.low))–\(fmt(ob.high)), equilibrium \(fmt(ob.avg)) (\(age))")
         }
         if let avg = avgVolume20, let v = lastVolume, avg > 0 {
             let ratio = v / avg
@@ -178,8 +195,8 @@ struct MarketSnapshot {
         if let ema = ema50 { parts.append("EMA50 \(fmt(ema))") }
         if let rsi = rsi14 { parts.append("RSI \(String(format: "%.0f", rsi))") }
         if let atr = atr14 { parts.append("ATR \(fmt(atr))") }
-        if let stop = utBotStop, let long = utBotIsLong {
-            parts.append("UT Bot \(long ? "LONG" : "SHORT") @ \(fmt(stop))")
+        if let ob = orderBlocks.first {
+            parts.append("OB \(ob.isBullish ? "bull" : "bear") \(fmt(ob.low))–\(fmt(ob.high))")
         }
         return parts.joined(separator: " · ")
     }

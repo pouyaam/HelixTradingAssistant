@@ -34,6 +34,12 @@ struct DashboardView: View {
     /// persisted — user expectations are that relaunching shows fresh
     /// auto-fit, not a stale zoomed window.
     @State private var xDomain: ClosedRange<Double>? = nil
+    /// Manual vertical price scale (TradingView-style price-axis drag).
+    /// nil ⇒ the chart auto-fits Y to the visible data. Reset alongside
+    /// `xDomain` whenever the data underfoot changes (pair / timeframe)
+    /// so a pinned scale from one symbol doesn't strand the next one's
+    /// candles off-screen.
+    @State private var yDomain: ClosedRange<Double>? = nil
     /// User-tunable parameters for the oscillators (RSI period, MACD
     /// fast/slow/signal, etc.). Loaded from UserDefaults on init so
     /// settings stick across launches.
@@ -138,6 +144,13 @@ struct DashboardView: View {
     /// entry when it closes (drives the win-rate stat).
     @State private var pendingActivation: PendingActivation?
 
+    /// The live NY Open Setup's plan, as a scenario, or nil when there's
+    /// no actionable setup (indicator off, no breakout yet, or already
+    /// resolved). Drives the entry/SL alerts (via `syncScenarioAlerts`)
+    /// and the "Activate NY Open setup" menu action. Recomputed when a new
+    /// 1-minute bar closes — see `refreshNYSetupScenario`.
+    @State private var nyLiveScenario: PromptBuilder.TAScenario?
+
     /// Wraps a scenario + its source history entry ID for
     /// presentation via `.sheet(item:)`. Identifiable on the
     /// scenario's stable id (composed from bias + prices) so two
@@ -202,6 +215,40 @@ struct DashboardView: View {
             firedAt: nil,
             sourceScenarioID: fingerprint
         ))
+    }
+
+    /// The live NY Open Setup as a `TAScenario`, or nil when there's
+    /// nothing actionable. "Actionable" means a breakout has fired and we
+    /// either await the retest or are managing the position — the same
+    /// states the alerts + activate-trade flow care about. Computed from
+    /// the displayed candles; the detector supports 1m and 5m and returns
+    /// nothing on coarser timeframes.
+    private func currentNYSetupScenario() -> PromptBuilder.TAScenario? {
+        guard enabledIndicators.contains(.nyOpenSetup), !candles.isEmpty else { return nil }
+        let results = NYOpenSetup.compute(
+            candles,
+            atrMultiple: oscillatorConfig.nyAtrMult,
+            amOnly: oscillatorConfig.nyAMOnly
+        )
+        guard let r = results.last, r.isActionable,
+              let entry = r.entry, let tp = r.takeProfit, let sl = r.stopLoss,
+              let dir = r.direction
+        else { return nil }
+        return PromptBuilder.TAScenario(
+            bias: dir == .long ? .long : .short,
+            entry: entry,
+            takeProfit: tp,
+            stopLoss: sl
+        )
+    }
+
+    /// Refresh `nyLiveScenario`. Only mutating the @State when the plan
+    /// actually changes (TAScenario is Equatable) means the downstream
+    /// `.onChange` → `syncScenarioAlerts` won't re-arm an already-fired
+    /// alert on every bar — it re-syncs only when a new plan forms, the
+    /// plan clears, or it flips direction.
+    private func refreshNYSetupScenario() {
+        nyLiveScenario = currentNYSetupScenario()
     }
     /// Tool currently armed in the chart toolbar. `.none` ⇒ pointer
     /// (drag pans). Set via the drawing toolbar buttons; deliberately
@@ -292,10 +339,12 @@ struct DashboardView: View {
         hiddenOscillatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
     }
 
-    /// 1m forces line view because candlesticks at minute granularity look
-    /// like a wall of green/red toothpicks. Same rule as the web app.
+    /// The chart style to render. 1m used to be forced to line (candles at
+    /// minute granularity can read like a wall of toothpicks), but the user
+    /// can now pick candlesticks on every timeframe, 1m included — we just
+    /// honour their choice.
     private var effectiveChartType: ChartType {
-        timeframe == .m1 ? .line : userChartType
+        userChartType
     }
 
     var body: some View {
@@ -375,6 +424,7 @@ struct DashboardView: View {
         .task(id: app.selectedPairID) {
             replay.exit()   // a replay anchored on the old pair's bars makes no sense here
             xDomain = nil   // new pair ⇒ drop any pinned window
+            yDomain = nil   // …and any manual price scale
             srLevels = .init(support: [], resistance: [])  // overlays are per-pair
             fvgZones = []
             supplyDemandZones = []
@@ -405,6 +455,7 @@ struct DashboardView: View {
         }
         .onChange(of: timeframe) { _ in
             xDomain = nil   // different bucket size ⇒ refit to data
+            yDomain = nil   // drop the manual price scale too
             Task { await reloadCandles() }
             warmHistory()   // ensure this timeframe's deep series is filled
         }
@@ -491,6 +542,13 @@ struct DashboardView: View {
                 alertStore.evaluate(price: price, for: pairID)
             }
         }
+        // Gold data source changed in Settings: the scheduler has wiped
+        // the ounce bars and refetched from the new feed, then bumped this
+        // token. The cheap trailing splice can't represent a wholesale
+        // clear, so do a full reload to drop the old source's candles.
+        .onChange(of: yahoo.dataResetToken) { _ in
+            Task { await reloadCandles() }
+        }
         // Auto-create entry + SL alerts when a scenario lands on
         // the chart. Sync removes them when the scenario clears
         // (or replaces them when a new one comes in).
@@ -500,6 +558,20 @@ struct DashboardView: View {
         .onChange(of: taAltScenario) { scenario in
             syncScenarioAlerts(scenario, suffix: "(alt)")
         }
+        // NY Open Setup → entry/SL alerts, mirroring the AI-scenario
+        // alert sync. Only fires when the plan actually changes, so a
+        // fired entry alert isn't re-armed every bar.
+        .onChange(of: nyLiveScenario) { scenario in
+            syncScenarioAlerts(scenario, suffix: "(NY setup)")
+        }
+        // Re-detect the setup when a new 1-minute bar closes (count
+        // grows), the indicator is toggled, or its tuning changes. The
+        // intrabar last-bar updates (same count) don't re-detect — the
+        // already-registered alerts fire on price touch via the tick
+        // evaluator above.
+        .onChange(of: candles.count) { _ in refreshNYSetupScenario() }
+        .onChange(of: indicatorsRaw) { _ in refreshNYSetupScenario() }
+        .onChange(of: oscillatorConfig) { _ in refreshNYSetupScenario() }
         // Activation sheet — driven by `pendingActivation` so the
         // analysis sheet can dismiss first and this one presents on
         // the next render (SwiftUI is fussy about back-to-back modal
@@ -689,7 +761,7 @@ struct DashboardView: View {
                         toolbarDivider
                         ChartTypeToggle(
                             selected: $userChartType,
-                            isDisabled: timeframe == .m1
+                            isDisabled: false
                         )
                         TimeframeSelector(selected: $timeframe)
                         toolbarDivider
@@ -702,6 +774,7 @@ struct DashboardView: View {
                     chartType: effectiveChartType,
                     accent: pair.color,
                     xDomain: $xDomain,
+                    yDomain: $yDomain,
                     indicators: visibleIndicators,
                     indicatorConfig: oscillatorConfig,
                     srLevels: srVisible ? srLevels : .init(support: [], resistance: []),
@@ -781,7 +854,7 @@ struct DashboardView: View {
                         isFullscreen: $app.isChartFullscreen,
                         onZoomIn: { zoom(by: 0.7) },
                         onZoomOut: { zoom(by: 1.4) },
-                        onReset: { xDomain = nil }
+                        onReset: { xDomain = nil; yDomain = nil }
                     )
                     .padding(.trailing, Theme.Spacing.md)
                     .padding(.bottom, Theme.Spacing.md)
@@ -968,6 +1041,18 @@ struct DashboardView: View {
             if taAltScenario != nil {
                 Divider()
                 Button("Clear alt scenario") { taAltScenario = nil }
+            }
+            // Surfaces once the live NY Open Setup has a plan (breakout
+            // fired, awaiting/within the trade). One click into the same
+            // ActivateTradeSheet the AI scenarios use.
+            if let scenario = nyLiveScenario {
+                Divider()
+                Button("Activate NY Open setup…") {
+                    pendingActivation = PendingActivation(
+                        scenario: scenario,
+                        sourceHistoryEntryID: nil
+                    )
+                }
             }
             if !enabledIndicators.isEmpty || !enabledOscillators.isEmpty {
                 Divider()

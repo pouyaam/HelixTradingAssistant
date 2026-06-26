@@ -73,6 +73,10 @@ struct AnalysisPage: View {
 
     @State private var showHistory: Bool = false
 
+    /// Which engine's model/effort dropdown popover is currently open
+    /// (nil = none). Driven by clicking an engine icon in the header.
+    @State private var engineMenuOpen: AIEngineKind? = nil
+
     // ── Add-to-journal ─────────────────────────────────────────────
     /// Draft journal entry awaiting the editor sheet. Set by the
     /// "Add to journal" buttons; `.sheet(item:)` presents the form.
@@ -89,6 +93,15 @@ struct AnalysisPage: View {
     /// across tabs via @AppStorage). Per-tab overrides live on the
     /// tab itself.
     @AppStorage("analysis.aspects.v1") private var defaultAspectsCSV: String = "technical,levels,scenarios"
+
+    /// Claude model + reasoning effort the analysis pipeline runs with.
+    /// Edited from the engine dropdown in this page's header (moved out
+    /// of the Settings window). Same UserDefaults keys `ClaudeEngine`
+    /// reads when it spawns the CLI.
+    @AppStorage("ai.claude.model")  private var claudeModel: String = ClaudeModelCatalog.defaultModelID
+    @AppStorage("ai.claude.effort") private var claudeEffort: String = ClaudeModelCatalog.defaultEffortID
+    @AppStorage("ai.codex.model")   private var codexModel: String = CodexModelCatalog.defaultModelID
+    @AppStorage("ai.codex.effort")  private var codexEffort: String = CodexModelCatalog.defaultEffortID
 
     // ── Per-tab state proxies ──────────────────────────────────────
     // The source of truth is the current `AnalysisTab` in AppState,
@@ -626,6 +639,9 @@ struct AnalysisPage: View {
                 historyButton
             }
             HStack(spacing: Theme.Spacing.md) {
+                // Engine icons on the left — click one to pick its model
+                // + reasoning effort.
+                enginePicker
                 // Legacy chip picker only when viewing an old
                 // non-combined history entry (so its report still
                 // makes sense). New analysis uses the checklist card.
@@ -644,7 +660,6 @@ struct AnalysisPage: View {
                     .foregroundStyle(Theme.Color.accentStart)
                 }
                 Spacer()
-                enginePicker
             }
         }
         .padding(.horizontal, Theme.Spacing.xl)
@@ -695,16 +710,13 @@ struct AnalysisPage: View {
         .buttonStyle(.plain)
     }
 
-    /// Engine selector — brand glyphs only (no names). The selected
-    /// engine gets a brand-tinted fill + ring; a "coming soon" engine
-    /// shows a small badge and is disabled. The model name lives in the
-    /// tooltip for anyone who needs it spelled out.
+    /// Engine selector — brand glyph icons only (no names), exactly as
+    /// before. Clicking an available engine selects it AND opens a
+    /// dropdown popover to pick its model + reasoning effort. The
+    /// selected engine gets a brand-tinted fill + ring; a "coming soon"
+    /// engine shows a small badge and is disabled.
     private var enginePicker: some View {
         HStack(spacing: 6) {
-            Text("ENGINE")
-                .font(.system(size: 9, weight: .bold))
-                .tracking(0.8)
-                .foregroundStyle(Theme.Color.textMuted)
             ForEach(AIEngineKind.allCases) { kind in
                 let engine = AIEngineFactory.make(kind)
                 let isComingSoon: Bool = {
@@ -713,33 +725,168 @@ struct AnalysisPage: View {
                 }()
                 let selected = selectedEngine == kind && !isComingSoon
                 Button {
+                    // Coming-soon engines can't be made the active engine
+                    // yet, but the icon still opens its model dropdown so
+                    // the user can preview / pre-pick a model.
                     if !isComingSoon { selectedEngine = kind }
+                    engineMenuOpen = kind
                 } label: {
-                    EngineGlyph(kind: kind, size: 17)
-                        .opacity(isComingSoon ? 0.4 : 1)
-                        .frame(width: 36, height: 28)
-                        .background(
-                            RoundedRectangle(cornerRadius: 7)
-                                .fill(selected ? kind.brandColor.opacity(0.18) : Theme.Color.surface)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 7)
-                                .strokeBorder(selected ? kind.brandColor : Color.clear, lineWidth: 1.5)
-                        )
-                        .overlay(alignment: .topTrailing) {
-                            if isComingSoon {
-                                Circle()
-                                    .fill(Theme.Color.warn)
-                                    .frame(width: 5, height: 5)
-                                    .offset(x: 2, y: -2)
-                            }
-                        }
+                    engineGlyph(kind: kind, selected: selected, isComingSoon: isComingSoon)
+                        .opacity(isComingSoon ? 0.5 : 1)
                 }
                 .buttonStyle(.plain)
-                .disabled(session.phase == .running || isComingSoon)
-                .help(isComingSoon ? "\(kind.label) — coming soon" : kind.label)
+                .disabled(session.phase == .running)
+                .help(engineHelp(kind: kind, isComingSoon: isComingSoon))
+                .popover(
+                    isPresented: Binding(
+                        get: { engineMenuOpen == kind },
+                        set: { if !$0 { engineMenuOpen = nil } }
+                    ),
+                    arrowEdge: .bottom
+                ) {
+                    enginePopover(for: kind)
+                }
             }
         }
+    }
+
+    /// Tooltip for an engine icon — the active model + effort, or a
+    /// "coming soon" note.
+    private func engineHelp(kind: AIEngineKind, isComingSoon: Bool) -> String {
+        switch kind {
+        case .claude:
+            return "Claude · \(ClaudeModelCatalog.label(forModelID: claudeModel)) · \(claudeEffort) effort"
+        case .codex:
+            let base = "Codex · \(CodexModelCatalog.label(forModelID: codexModel)) · \(codexEffort) effort"
+            return isComingSoon ? "\(base) — coming soon" : base
+        }
+    }
+
+    /// The glyph chip for one engine — identical look to the original
+    /// (plain glyph + selected fill/ring + coming-soon badge).
+    private func engineGlyph(kind: AIEngineKind, selected: Bool, isComingSoon: Bool) -> some View {
+        EngineGlyph(kind: kind, size: 17)
+            .frame(width: 36, height: 28)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(selected ? kind.brandColor.opacity(0.18) : Theme.Color.surface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(selected ? kind.brandColor : Color.clear, lineWidth: 1.5)
+            )
+            .overlay(alignment: .topTrailing) {
+                if isComingSoon {
+                    Circle()
+                        .fill(Theme.Color.warn)
+                        .frame(width: 5, height: 5)
+                        .offset(x: 2, y: -2)
+                }
+            }
+    }
+
+    /// Dropdown content shown when an engine icon is clicked: pick its
+    /// model + reasoning effort. Each engine routes to the same renderer
+    /// with its own catalog + persisted bindings.
+    @ViewBuilder
+    private func enginePopover(for kind: AIEngineKind) -> some View {
+        switch kind {
+        case .claude:
+            modelEffortPopover(
+                title: "Claude",
+                models: ClaudeModelCatalog.models,
+                efforts: ClaudeModelCatalog.efforts,
+                model: $claudeModel,
+                effort: $claudeEffort
+            )
+        case .codex:
+            modelEffortPopover(
+                title: "Codex",
+                models: CodexModelCatalog.models,
+                efforts: CodexModelCatalog.efforts,
+                model: $codexModel,
+                effort: $codexEffort
+            )
+        }
+    }
+
+    /// Shared model + reasoning-effort picker body, parameterised by an
+    /// engine's catalog and its persisted selection bindings.
+    private func modelEffortPopover(
+        title: String,
+        models: [ClaudeModelCatalog.Model],
+        efforts: [ClaudeModelCatalog.Effort],
+        model: Binding<String>,
+        effort: Binding<String>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            Text("\(title.uppercased()) · MODEL")
+                .font(.system(size: 9, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+            VStack(spacing: 2) {
+                ForEach(models) { m in
+                    Button {
+                        model.wrappedValue = m.id
+                    } label: {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: model.wrappedValue == m.id ? "checkmark.circle.fill" : "circle")
+                                .font(.system(size: 12))
+                                .foregroundStyle(model.wrappedValue == m.id ? Theme.Color.accentStart : Theme.Color.textMuted)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(m.label)
+                                    .font(.system(size: 12, weight: model.wrappedValue == m.id ? .semibold : .regular))
+                                    .foregroundStyle(Theme.Color.textPrimary)
+                                Text(m.hint)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Theme.Color.textMuted)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(model.wrappedValue == m.id ? Theme.Color.surface : Color.clear)
+                        )
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Divider().background(Theme.Color.border)
+
+            Text("REASONING EFFORT")
+                .font(.system(size: 9, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+            HStack(spacing: 6) {
+                ForEach(efforts) { e in
+                    Button {
+                        effort.wrappedValue = e.id
+                    } label: {
+                        Text(e.label)
+                            .font(.system(size: 11, weight: effort.wrappedValue == e.id ? .bold : .medium))
+                            .foregroundStyle(effort.wrappedValue == e.id ? .white : Theme.Color.textSecondary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(effort.wrappedValue == e.id
+                                          ? AnyShapeStyle(Theme.accentGradient)
+                                          : AnyShapeStyle(Theme.Color.surface))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help(e.tooltip)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(Theme.Spacing.lg)
+        .frame(width: 340)
     }
 
     private var historyForKind: [AnalysisStore.HistoryEntry] {

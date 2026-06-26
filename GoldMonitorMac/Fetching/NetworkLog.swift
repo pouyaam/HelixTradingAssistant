@@ -22,7 +22,7 @@ final class NetworkLog: ObservableObject {
     /// One captured request/response pair. `responsePreview` is
     /// truncated to `Self.bodyCap` UTF-8 bytes so the persisted log
     /// stays under UserDefaults' size limit even after a long session.
-    struct Entry: Identifiable, Codable, Equatable {
+    struct Entry: Identifiable, Codable, Equatable, Sendable {
         let id: UUID
         let date: Date
         /// Origin tag — "yahoo" / "twelve-data" / etc. Used
@@ -55,6 +55,10 @@ final class NetworkLog: ObservableObject {
             UserDefaults.standard.set(isEnabled, forKey: Self.enabledKey)
         }
     }
+
+    /// Pending debounced persistence work, cancelled + rescheduled on
+    /// each new record so a burst collapses into a single write.
+    private var saveWorkItem: DispatchWorkItem?
 
     private static let enabledKey = "debug.networkLog.enabled"
     private static let entriesKey = "debug.networkLog.entries.v1"
@@ -109,14 +113,14 @@ final class NetworkLog: ObservableObject {
         if entries.count > Self.cap {
             entries = Array(entries.prefix(Self.cap))
         }
-        saveEntries()
+        scheduleSave()
     }
 
     /// Wipe the log without flipping the enabled flag. Used by the
     /// "Clear" button in the debug popup.
     func clear() {
         entries = []
-        saveEntries()
+        scheduleSave()
     }
 
     // ── Persistence ──────────────────────────────────────────────────
@@ -128,9 +132,26 @@ final class NetworkLog: ObservableObject {
         entries = decoded
     }
 
-    private func saveEntries() {
-        guard let data = try? JSONEncoder().encode(entries) else { return }
-        UserDefaults.standard.set(data, forKey: Self.entriesKey)
+    /// Coalesced, off-main persistence. The previous version encoded the
+    /// whole (up to 200-entry, ~800 KB) array and wrote it to
+    /// UserDefaults on the main actor on EVERY `record(...)` call — at
+    /// startup, with many requests firing back to back (×4 once Faraz
+    /// drives crypto too), that stalled the main thread badly. Now we
+    /// debounce the save and run the JSON encode off-main; only the
+    /// snapshot read happens on the main actor.
+    private func scheduleSave() {
+        saveWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.persistSnapshot() }
+        saveWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
+    }
+
+    private func persistSnapshot() {
+        let snapshot = entries   // main-actor read
+        Task.detached(priority: .utility) {
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            UserDefaults.standard.set(data, forKey: Self.entriesKey)
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────

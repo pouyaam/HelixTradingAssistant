@@ -1,5 +1,6 @@
 import SwiftUI
 import Charts
+import AppKit   // NSCursor for the price-axis resize affordance
 
 /// Trading-style chart built on Apple's Charts framework.
 ///
@@ -27,6 +28,15 @@ struct ChartView: View {
     /// gaps (weekends for COMEX, intraday silences for any source) don't
     /// open holes in the chart — consecutive candles are always adjacent.
     @Binding var xDomain: ClosedRange<Double>?
+
+    /// Manual vertical (price) scale, TradingView-style. nil ⇒ auto-fit
+    /// the Y axis to the visible data (the default). Once the user drags
+    /// the price axis to compress/expand the candles, this pins an
+    /// explicit price window and auto-fit is suspended until they
+    /// double-click the axis (or reset the chart) to clear it. Owned by
+    /// DashboardView so it resets on pair / timeframe change alongside
+    /// `xDomain`.
+    @Binding var yDomain: ClosedRange<Double>?
 
     /// Technical indicators the user has toggled on. Re-computed on every
     /// candle change; ChartView is stateless about them — DashboardView
@@ -140,7 +150,18 @@ struct ChartView: View {
     /// struct being re-created each render. See `ChartDerivedCache`.
     @State private var derived = ChartDerivedCache()
     @State private var dragStartDomain: ClosedRange<Double>?
+    /// Price window captured at the start of a chart pan, so vertical
+    /// drag shifts it against a stable reference. `panLockedY` flips true
+    /// once a pan develops a real vertical component — until then the Y
+    /// axis is left on auto-fit so purely horizontal pans don't pin it.
+    @State private var dragStartYDomain: ClosedRange<Double>?
+    @State private var panLockedY = false
     @State private var magnifyStartDomain: ClosedRange<Double>?
+    /// Price-axis vertical-scale gesture: the Y window captured at the
+    /// start of a drag on the price axis, held fixed so the scale factor
+    /// is applied against a stable reference (mirrors how
+    /// `magnifyStartDomain` anchors the X pinch).
+    @State private var yScaleStartDomain: ClosedRange<Double>?
 
     /// In-progress drawing endpoints — captured on drag start, updated
     /// each frame, cleared on drag end. Lets the chart render a live
@@ -199,6 +220,12 @@ struct ChartView: View {
                 // overlays the rule *inside* the plot area (see the
                 // `RuleMark` above) so no trailing slack is needed.
                 .clipped()
+                // TradingView-style price-axis drag column: a transparent
+                // strip over the trailing axis gutter that scales the Y
+                // (price) axis vertically. Layered after `.clipped()` so
+                // it stays interactive, and on the right so it doesn't
+                // steal pan/hover from the main canvas.
+                .overlay(alignment: .trailing) { priceAxisScaleStrip }
                 .overlay(alignment: .topLeading) { hoverTooltip }
                 .animation(.easeOut(duration: 0.15), value: hovered)
                 .animation(.easeInOut(duration: 0.4), value: candles.count)
@@ -239,6 +266,78 @@ struct ChartView: View {
             useHeikinAshi: indicatorConfig.utUseHeikinAshi
         )
     }
+
+    /// Order-block zones, lazily computed when the indicator is toggled
+    /// on. Capped to the most recent few so a deep history doesn't pile
+    /// dozens of overlapping rectangles on the chart — the latest blocks
+    /// are the actionable ones (older blocks have usually been revisited
+    /// or invalidated already).
+    private var orderBlockZones: [OrderBlocks.Zone] {
+        guard indicators.contains(.orderBlock) else { return [] }
+        return Array(derived.orderBlocks(
+            candles: candles,
+            periods: indicatorConfig.obPeriods,
+            threshold: indicatorConfig.obThreshold,
+            useWicks: indicatorConfig.obUseWicks
+        ).suffix(Self.maxOrderBlocks))
+    }
+    private static let maxOrderBlocks = 6
+
+    /// Session runs to draw: every *enabled* preset's runs that intersect
+    /// the visible window (+a margin), capped to the most recent so a deep
+    /// history doesn't pile hundreds of boxes into one frame. Swift Charts
+    /// draws every mark it's handed (clipping after), so we window here for
+    /// the same reason `renderIndices` windows the candles. The runs
+    /// themselves are memoized data-side in `ChartDerivedCache`.
+    private var sessionRuns: [TradingSessions.SessionRun] {
+        guard indicators.contains(.tradingSession) else { return [] }
+        let enabled = derived.tradingSessions(candles: candles)
+            .filter { indicatorConfig.showsSession($0.sessionID) }
+        guard !enabled.isEmpty,
+              let b = ChartWindow.visibleBounds(domain: effectiveXDomain, count: candles.count)
+        else { return [] }
+        let margin = max(8, (b.hi - b.lo) / 4)
+        let lo = b.lo - margin
+        let hi = b.hi + margin
+        // Keep runs whose [start, end] overlaps the padded window. The
+        // memoized list is grouped by session (Tokyo→London→NY), so sort
+        // by bar before the safety cap takes the *most recent* runs across
+        // all sessions rather than dropping a whole venue first.
+        let visible = enabled
+            .filter { $0.end >= lo && $0.start <= hi }
+            .sorted { $0.start < $1.start }
+        return Array(visible.suffix(Self.maxSessionRuns))
+    }
+    private static let maxSessionRuns = 90
+
+    /// NY Open Setup results to draw: the per-day setups whose footprint
+    /// (opening range → resolution / live edge) overlaps the visible
+    /// window. Detection is memoized data-side in `ChartDerivedCache`;
+    /// 1m/5m only (the detector returns nothing on coarser bars).
+    private var nySetupResults: [NYOpenSetup.Result] {
+        guard indicators.contains(.nyOpenSetup) else { return [] }
+        let all = derived.nyOpenSetup(
+            candles: candles,
+            atrMult: indicatorConfig.nyAtrMult,
+            amOnly: indicatorConfig.nyAMOnly
+        )
+        guard !all.isEmpty,
+              let b = ChartWindow.visibleBounds(domain: effectiveXDomain, count: candles.count)
+        else { return [] }
+        let lastIndex = candles.count - 1
+        let margin = max(8, (b.hi - b.lo) / 4)
+        let lo = b.lo - margin
+        let hi = b.hi + margin
+        // Keep only the most recent few days' setups on the chart — older
+        // history would pile up dozens of overlapping plans. The live /
+        // most-recent setup is always among them (it's the last element).
+        return all.suffix(Self.maxSetupsOnChart).filter { r in
+            let end = r.resolveIndex ?? lastIndex   // live plans run to the edge
+            return end >= lo && r.orStartIndex <= hi
+        }
+    }
+    /// Cap on how many NY Open setups draw at once (the N most recent days).
+    private static let maxSetupsOnChart = 3
 
     private var chart: some View {
         Chart {
@@ -282,12 +381,21 @@ struct ChartView: View {
                     }
             }
 
+            // Trading-session boxes — the backmost overlay so the day's
+            // price action and every other mark read on top of them.
+            sessionMarks
+
+            // NY Open Setup — opening-range box, breakout FVG, and the
+            // entry/SL/TP plan. Behind the price action like the zones.
+            setupMarks
+
             // S/R levels — horizontal rules at the prices the AI
             // analysis identified. Drawn behind the candles (before the
             // switch below) so the price action stays the visual focus.
             srLevelMarks
             fvgMarks
             supplyDemandMarks
+            orderBlockMarks
             scenarioMarks
             tradeMarks
             drawingMarks
@@ -358,7 +466,7 @@ struct ChartView: View {
                 .symbolSize(70)
             }
         }
-        .chartYScale(domain: yDomain)
+        .chartYScale(domain: effectiveYDomain)
         .chartXScale(domain: effectiveXDomain)
         .chartXAxis(content: xAxis)
         .chartYAxis(content: yAxis)
@@ -416,6 +524,7 @@ struct ChartView: View {
                     }
                     .gesture(dragGesture(
                         plotWidth: geo[proxy.plotAreaFrame].size.width,
+                        plotHeight: geo[proxy.plotAreaFrame].size.height,
                         plotOrigin: geo[proxy.plotAreaFrame].origin,
                         proxy: proxy
                     ))
@@ -435,6 +544,7 @@ struct ChartView: View {
     /// fine (translation = 0 ⇒ no-op).
     private func dragGesture(
         plotWidth: CGFloat,
+        plotHeight: CGFloat,
         plotOrigin: CGPoint,
         proxy: ChartProxy
     ) -> some Gesture {
@@ -490,7 +600,7 @@ struct ChartView: View {
                 } else if movingDrawingOriginal != nil {
                     handleMoveChange(value, plotOrigin: plotOrigin, proxy: proxy)
                 } else {
-                    handlePanChange(value, plotWidth: plotWidth)
+                    handlePanChange(value, plotWidth: plotWidth, plotHeight: plotHeight)
                 }
             }
             .onEnded { value in
@@ -509,6 +619,8 @@ struct ChartView: View {
                         }
                     }
                     dragStartDomain = nil
+                    dragStartYDomain = nil
+                    panLockedY = false
                     return
                 }
 
@@ -538,6 +650,8 @@ struct ChartView: View {
                     onSelectDrawing?(nil)
                 }
                 dragStartDomain = nil
+                dragStartYDomain = nil
+                panLockedY = false
             }
     }
 
@@ -597,9 +711,13 @@ struct ChartView: View {
         onMoveDrawing?(resized)
     }
 
-    private func handlePanChange(_ value: DragGesture.Value, plotWidth: CGFloat) {
+    private func handlePanChange(_ value: DragGesture.Value, plotWidth: CGFloat, plotHeight: CGFloat) {
         if dragStartDomain == nil {
             dragStartDomain = effectiveXDomain
+            // Anchor the price window too so a vertical drag shifts it
+            // against a stable reference (mirrors the X anchor).
+            dragStartYDomain = effectiveYDomain
+            panLockedY = false
             // Drop the crosshair while panning — it'd flicker against
             // the moving series otherwise.
             hovered = nil
@@ -610,6 +728,23 @@ struct ChartView: View {
         let delta = Double(value.translation.width) * unitsPerPoint
         // Drag right ⇒ pan into the past (lower indices), so subtract.
         xDomain = (start.lowerBound - delta) ... (start.upperBound - delta)
+
+        // Vertical pan — shift the price window so the chart follows the
+        // cursor up/down, TradingView-style. We only engage once the
+        // drag has a genuine vertical component (>3pt), so a clean
+        // horizontal pan leaves the auto-fit scale untouched; once
+        // engaged the Y scale stays pinned until reset (double-click the
+        // axis, the reset control, or a pair/timeframe change).
+        if !panLockedY, abs(value.translation.height) > 3 { panLockedY = true }
+        if panLockedY, let startY = dragStartYDomain, plotHeight > 0 {
+            let ySpan = startY.upperBound - startY.lowerBound
+            let pricePerPoint = ySpan / Double(plotHeight)
+            // Drag down (+height) ⇒ raise the price window so higher
+            // prices scroll in from the top and the candles track the
+            // cursor downward.
+            let shift = Double(value.translation.height) * pricePerPoint
+            yDomain = (startY.lowerBound + shift) ... (startY.upperBound + shift)
+        }
     }
 
     private func handleDrawChange(
@@ -1075,6 +1210,286 @@ struct ChartView: View {
                     .background(
                         Capsule().fill(baseColor.opacity(zone.isFresh ? 0.95 : 0.6))
                     )
+            }
+        }
+    }
+
+    /// Trading-session overlays — one translucent high-low box per
+    /// session per day, with optional dashed open/close lines, a dotted
+    /// average line, and a corner label (range / average / name). Each
+    /// session keeps its own hue; boxes span only their own bar range
+    /// (`start...end`), unlike order blocks which extend to the live edge.
+    /// Mirrors the Pine "Trading Sessions" study. The display toggles come
+    /// from `indicatorConfig`.
+    @ChartContentBuilder
+    private var sessionMarks: some ChartContent {
+        let cfg = indicatorConfig
+        ForEach(sessionRuns) { run in
+            let xStart = Double(run.start)
+            let xEnd   = Double(run.end)
+
+            // The session's high-low region — low opacity so candles read
+            // through it.
+            RectangleMark(
+                xStart: .value("Session start", xStart),
+                xEnd:   .value("Session end",   xEnd),
+                yStart: .value("Session low",   run.low),
+                yEnd:   .value("Session high",  run.high)
+            )
+            .foregroundStyle(run.color.opacity(0.12))
+
+            if cfg.sessShowOpenClose {
+                // Open & close as dashed rules spanning the session.
+                RuleMark(
+                    xStart: .value("Sess open start", xStart),
+                    xEnd:   .value("Sess open end",   xEnd),
+                    y:      .value("Sess open",       run.open)
+                )
+                .foregroundStyle(run.color.opacity(0.85))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                RuleMark(
+                    xStart: .value("Sess close start", xStart),
+                    xEnd:   .value("Sess close end",   xEnd),
+                    y:      .value("Sess close",       run.close)
+                )
+                .foregroundStyle(run.color.opacity(0.85))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            }
+
+            if cfg.sessShowAverage {
+                // Mean close — the Pine source's dotted average line.
+                RuleMark(
+                    xStart: .value("Sess avg start", xStart),
+                    xEnd:   .value("Sess avg end",   xEnd),
+                    y:      .value("Sess avg",       run.average)
+                )
+                .foregroundStyle(run.color.opacity(0.6))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [1, 3]))
+            }
+
+            // Corner label at the box's lower-left, built from whichever
+            // of range / average / name the user enabled.
+            if let text = sessionLabelText(run) {
+                PointMark(
+                    x: .value("Sess label x", xStart),
+                    y: .value("Sess label y", run.low)
+                )
+                .symbolSize(0)
+                .annotation(position: .bottom, alignment: .leading, spacing: 1) {
+                    Text(text)
+                        .font(.system(size: 8, weight: .bold).monospacedDigit())
+                        .foregroundStyle(run.color)
+                        .multilineTextAlignment(.leading)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Theme.Color.surfaceMax.opacity(0.7))
+                        )
+                        .fixedSize()
+                }
+            }
+        }
+    }
+
+    /// Multi-line session label from the enabled display toggles, matching
+    /// the Pine's "Range / Avg / Name" stack. nil when nothing is enabled
+    /// (so we don't draw an empty chip).
+    private func sessionLabelText(_ run: TradingSessions.SessionRun) -> String? {
+        var lines: [String] = []
+        if indicatorConfig.sessShowRange   { lines.append("Rng \(Self.priceShort(run.range))") }
+        if indicatorConfig.sessShowAverage { lines.append("Avg \(Self.priceShort(run.average))") }
+        if indicatorConfig.sessShowNames   { lines.append(run.name) }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
+    /// NY Open Setup overlay — the opening-range box + high/low rays, and
+    /// (once a breakout fires) the FVG gap plus the entry / SL / TP plan.
+    /// Direction tints the OR + entry green (long) / red (short); a
+    /// resolved plan ends its lines at the TP/SL bar, a live plan runs to
+    /// the chart edge. Drawn behind the candles like the other zone
+    /// overlays. See `NYOpenSetup` for the detection logic.
+    @ChartContentBuilder
+    private var setupMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(nySetupResults) { r in
+            let dirColor = setupDirectionColor(r.direction)
+            let orStart = Double(r.orStartIndex)
+            let orEnd   = Double(r.orEndIndex)
+            let rayEnd  = Double(r.resolveIndex ?? lastIndex)
+
+            // Opening-range box.
+            RectangleMark(
+                xStart: .value("OR start", orStart),
+                xEnd:   .value("OR end",   orEnd),
+                yStart: .value("OR low",   r.orLow),
+                yEnd:   .value("OR high",  r.orHigh)
+            )
+            .foregroundStyle(dirColor.opacity(0.14))
+
+            // OR high/low reference rays — the breakout levels.
+            RuleMark(xStart: .value("ORH s", orStart), xEnd: .value("ORH e", rayEnd),
+                     y: .value("OR high", r.orHigh))
+            .foregroundStyle(dirColor.opacity(0.55))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+            RuleMark(xStart: .value("ORL s", orStart), xEnd: .value("ORL e", rayEnd),
+                     y: .value("OR low", r.orLow))
+            .foregroundStyle(dirColor.opacity(0.55))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+
+            // Range-edge labels at the opening range's left side — "NY High"
+            // above the high, "NY Low" below the low.
+            PointMark(x: .value("NY High x", orStart), y: .value("NY High y", r.orHigh))
+                .symbolSize(0)
+                .annotation(position: .top, alignment: .leading, spacing: 1) {
+                    setupTag("NY High", color: dirColor)
+                }
+            PointMark(x: .value("NY Low x", orStart), y: .value("NY Low y", r.orLow))
+                .symbolSize(0)
+                .annotation(position: .bottom, alignment: .leading, spacing: 1) {
+                    setupTag("NY Low", color: dirColor)
+                }
+
+            // Breakout plan: FVG gap + entry/SL/TP, once a setup is found.
+            if r.hasPlan,
+               let fvgS = r.fvgStartIndex, let fvgE = r.fvgEndIndex,
+               let fLo = r.fvgLow, let fHi = r.fvgHigh,
+               let entry = r.entry, let sl = r.stopLoss, let tp = r.takeProfit {
+                let planStart = Double(fvgE)
+                let planEnd   = Double(r.resolveIndex ?? lastIndex)
+
+                // The fair-value gap the breakout left behind.
+                RectangleMark(
+                    xStart: .value("FVG s", Double(fvgS)),
+                    xEnd:   .value("FVG e", Double(fvgE)),
+                    yStart: .value("FVG lo", fLo),
+                    yEnd:   .value("FVG hi", fHi)
+                )
+                .foregroundStyle(dirColor.opacity(0.22))
+
+                // Entry (dashed, direction-tinted), SL (red), TP (green).
+                RuleMark(xStart: .value("E s", planStart), xEnd: .value("E e", planEnd),
+                         y: .value("Entry", entry))
+                .foregroundStyle(dirColor.opacity(0.9))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                RuleMark(xStart: .value("SL s", planStart), xEnd: .value("SL e", planEnd),
+                         y: .value("SL", sl))
+                .foregroundStyle(Theme.Color.danger.opacity(0.9))
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+                RuleMark(xStart: .value("TP s", planStart), xEnd: .value("TP e", planEnd),
+                         y: .value("TP", tp))
+                .foregroundStyle(Theme.Color.success.opacity(0.9))
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+
+                // Level labels at the plan's right end. Entry carries the
+                // direction arrow + its tint; SL is red, TP green — matching
+                // each line so the meaning reads at a glance.
+                PointMark(x: .value("Entry lbl x", planEnd), y: .value("Entry lbl y", entry))
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        setupTag("Entry \(r.direction == .long ? "↑" : "↓")", color: dirColor)
+                    }
+                PointMark(x: .value("SL lbl x", planEnd), y: .value("SL lbl y", sl))
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        setupTag("SL", color: Theme.Color.danger)
+                    }
+                PointMark(x: .value("TP lbl x", planEnd), y: .value("TP lbl y", tp))
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        setupTag("TP", color: Theme.Color.success)
+                    }
+
+                // Retest fill marker.
+                if let rt = r.retestIndex {
+                    PointMark(x: .value("retest x", Double(rt)), y: .value("retest y", entry))
+                        .symbolSize(40)
+                        .foregroundStyle(dirColor)
+                }
+            }
+        }
+    }
+
+    private func setupDirectionColor(_ dir: NYOpenSetup.Direction?) -> Color {
+        switch dir {
+        case .long:  return Theme.Color.success
+        case .short: return Theme.Color.danger
+        case nil:    return Theme.Color.warn
+        }
+    }
+
+    /// Small filled capsule used for the setup's OR + status tags.
+    private func setupTag(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 8, weight: .heavy))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(color.opacity(0.95)))
+            .fixedSize()
+    }
+
+    /// Order Block zones — translucent rectangles extending from the
+    /// originating candle to the right edge of the chart (so a block
+    /// stays visible as a level until price revisits it). Bullish blocks
+    /// fill green, bearish red. Top/bottom edges plus a dashed
+    /// equilibrium (avg) midline mirror the Pine source's channel, and a
+    /// small "OB↑"/"OB↓" capsule pins the direction to the right edge.
+    @ChartContentBuilder
+    private var orderBlockMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(orderBlockZones) { zone in
+            let color: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
+            let xStart = Double(zone.index)
+            let xEnd   = Double(lastIndex)
+            RectangleMark(
+                xStart: .value("OB start", xStart),
+                xEnd:   .value("OB end",   xEnd),
+                yStart: .value("OB low",   zone.low),
+                yEnd:   .value("OB high",  zone.high)
+            )
+            .foregroundStyle(color.opacity(0.14))
+
+            // Top + bottom edges so the block reads clearly against the
+            // candles sitting inside it.
+            RuleMark(
+                xStart: .value("OB start hi", xStart),
+                xEnd:   .value("OB end hi",   xEnd),
+                y:      .value("OB hi",       zone.high)
+            )
+            .foregroundStyle(color.opacity(0.7))
+            .lineStyle(StrokeStyle(lineWidth: 1))
+            RuleMark(
+                xStart: .value("OB start lo", xStart),
+                xEnd:   .value("OB end lo",   xEnd),
+                y:      .value("OB lo",       zone.low)
+            )
+            .foregroundStyle(color.opacity(0.7))
+            .lineStyle(StrokeStyle(lineWidth: 1))
+
+            // Equilibrium (avg) — the Pine source's solid channel; dashed
+            // here so it reads as the "interaction" line, not an edge.
+            RuleMark(
+                xStart: .value("OB start avg", xStart),
+                xEnd:   .value("OB end avg",   xEnd),
+                y:      .value("OB avg",       zone.avg)
+            )
+            .foregroundStyle(color.opacity(0.5))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+
+            // Direction tag pinned to the right edge of the zone.
+            PointMark(
+                x: .value("OB label", xEnd),
+                y: .value("OB hi",    zone.high)
+            )
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                Text(zone.isBullish ? "OB↑" : "OB↓")
+                    .font(.system(size: 8, weight: .heavy))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(color.opacity(0.95)))
             }
         }
     }
@@ -1852,14 +2267,74 @@ struct ChartView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    // MARK: - Price-axis vertical scaling
+
+    /// Transparent gesture column over the trailing price-axis gutter.
+    /// Dragging it vertically scales the Y axis (TradingView's price-
+    /// scale drag): drag DOWN to zoom out (compress candles), UP to zoom
+    /// in (stretch them). Double-click clears the manual scale and hands
+    /// the axis back to auto-fit. Width roughly matches the axis label
+    /// gutter so it doesn't eat the chart canvas's pan/hover area.
+    private var priceAxisScaleStrip: some View {
+        GeometryReader { geo in
+            Rectangle()
+                .fill(Color.clear)
+                .contentShape(Rectangle())
+                .gesture(priceScaleDrag(plotHeight: geo.size.height))
+                // Double-click the axis → back to auto-fit, matching
+                // TradingView (and the chart's own reset control).
+                .onTapGesture(count: 2) { yDomain = nil }
+                // Resize cursor on hover so the column reads as draggable.
+                .onHover { inside in
+                    if inside { NSCursor.resizeUpDown.push() }
+                    else      { NSCursor.pop() }
+                }
+        }
+        .frame(width: 48)
+    }
+
+    /// Vertical drag → Y-axis scale. Anchors on the price window captured
+    /// at drag start (`yScaleStartDomain`) and keeps its centre fixed, so
+    /// the candles grow/shrink around the middle of the view rather than
+    /// drifting. The factor is exponential in drag distance so the feel
+    /// is consistent whether zoomed in or out.
+    private func priceScaleDrag(plotHeight: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { value in
+                if yScaleStartDomain == nil {
+                    yScaleStartDomain = effectiveYDomain
+                    hovered = nil
+                }
+                guard let start = yScaleStartDomain, plotHeight > 0 else { return }
+                let center = (start.lowerBound + start.upperBound) / 2
+                let halfSpan = (start.upperBound - start.lowerBound) / 2
+                guard halfSpan > 0 else { return }
+                // Drag down (+height) ⇒ factor > 1 ⇒ wider price window ⇒
+                // smaller candles. Drag up ⇒ factor < 1 ⇒ zoom in. Clamp
+                // so a frantic drag can't collapse or explode the scale.
+                let raw = exp(Double(value.translation.height) / Double(plotHeight) * 1.6)
+                let factor = min(max(raw, 0.1), 10)
+                let newHalf = halfSpan * factor
+                yDomain = (center - newHalf) ... (center + newHalf)
+            }
+            .onEnded { _ in yScaleStartDomain = nil }
+    }
+
     // MARK: - Derived
 
-    /// Y-axis domain that hugs the actual data range with ~5% padding.
-    /// Without this, Apple Charts sometimes pins the lower bound at 0,
-    /// which compresses million-toman prices into a single pixel. Also
-    /// folds in indicator extremes so e.g. the upper Bollinger band
-    /// doesn't get clipped off the top.
-    private var yDomain: ClosedRange<Double> {
+    /// Y-axis domain actually handed to Charts. A user-pinned manual
+    /// scale (from dragging the price axis) wins; otherwise we auto-fit
+    /// to the visible data via `autoYDomain`.
+    private var effectiveYDomain: ClosedRange<Double> {
+        yDomain ?? autoYDomain
+    }
+
+    /// Auto-fit Y-axis domain that hugs the actual data range with ~5%
+    /// padding. Without this, Apple Charts sometimes pins the lower bound
+    /// at 0, which compresses million-toman prices into a single pixel.
+    /// Also folds in indicator/overlay extremes so e.g. the upper
+    /// Bollinger band doesn't get clipped off the top.
+    private var autoYDomain: ClosedRange<Double> {
         // Fit Y to only the *visible* bar window — otherwise the axis
         // hugs the entire (possibly multi-year) range and the recent
         // price action gets squashed into a few pixels. HA values can
@@ -1919,6 +2394,31 @@ struct ChartView: View {
         for zone in supplyDemandZones {
             if zone.low  < lo { lo = zone.low }
             if zone.high > hi { hi = zone.high }
+        }
+        // Order Block zones — fold both edges so a block above/below the
+        // visible candles still draws against the chart border.
+        for zone in orderBlockZones {
+            if zone.low  < lo { lo = zone.low }
+            if zone.high > hi { hi = zone.high }
+        }
+        // Trading-session boxes — fold their high/low so a box edge isn't
+        // clipped. Matters mainly in Heikin-Ashi mode, where the raw
+        // session extremes can sit just outside the HA candle range the
+        // visible-candle fit above is based on.
+        for run in sessionRuns {
+            if run.low  < lo { lo = run.low }
+            if run.high > hi { hi = run.high }
+        }
+        // NY Open Setup — fold the OR box and the plan's SL/TP so the
+        // breakout target/stop stay on-screen even when they sit beyond
+        // the visible candles.
+        for r in nySetupResults {
+            if r.orLow  < lo { lo = r.orLow }
+            if r.orHigh > hi { hi = r.orHigh }
+            for v in [r.fvgLow, r.fvgHigh, r.entry, r.stopLoss, r.takeProfit].compactMap({ $0 }) {
+                if v < lo { lo = v }
+                if v > hi { hi = v }
+            }
         }
         // Scenario entry / TP / SL — same treatment. Entry can be nil
         // for legacy history entries; skip it then. Alt scenario folds

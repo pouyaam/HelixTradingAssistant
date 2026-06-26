@@ -11,6 +11,8 @@ struct DataSourcesCard: View {
     @State private var twelveDataKeyDraft: String = ""
     @State private var forexURLDraft: String = ""
     @State private var claudePathDraft: String = ""
+    @State private var goldSourceDraft: GoldDataSource = .twelveData
+    @State private var farazCookieDraft: String = ""
     @State private var isDirty: Bool = false
     @State private var savedFlash: Bool = false
 
@@ -19,6 +21,8 @@ struct DataSourcesCard: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                 sectionTitle
 
+                goldSourceField
+                Divider().background(Theme.Color.border.opacity(0.4))
                 twelveDataField
                 forexField
                 claudeField
@@ -27,6 +31,46 @@ struct DataSourcesCard: View {
             }
         }
         .onAppear { seedFromConfig() }
+    }
+
+    /// Picker for which upstream drives the gold ounce, plus the Faraz
+    /// session-cookie field (revealed only when Faraz is selected).
+    /// Switching the source here clears the stored ounce bars and
+    /// refetches from the new feed on Save.
+    private var goldSourceField: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("PRICE DATA SOURCE (XAU · BTC · SOL · ETH)")
+                .font(.system(size: 9, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+            Picker("", selection: $goldSourceDraft) {
+                ForEach(GoldDataSource.allCases) { src in
+                    Text(src.displayName).tag(src)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .onChange(of: goldSourceDraft) { _ in isDirty = true }
+
+            if goldSourceDraft == .faraz {
+                Text("FARAZ SESSION COOKIE")
+                    .font(.system(size: 9, weight: .bold))
+                    .tracking(0.8)
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .padding(.top, 2)
+                SecureField("Cookie header value copied from a logged-in faraz.io tab", text: $farazCookieDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12).monospaced())
+                    .onChange(of: farazCookieDraft) { _ in isDirty = true }
+                Text("In a logged-in faraz.io tab open DevTools → Network → any request → Headers, copy the full Cookie value and paste it here. Polled every 10s. Drives gold + BTC/SOL/ETH from Faraz. Changing the source clears those pairs' stored bars and refetches.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+            } else {
+                Text("Gold + BTC/SOL/ETH use Twelve Data live ticks with Yahoo Finance history. Indices (DJI) always use Yahoo regardless of this setting.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+            }
+        }
     }
 
     private var sectionTitle: some View {
@@ -130,6 +174,8 @@ struct DataSourcesCard: View {
         twelveDataKeyDraft = dataConfig.twelveDataAPIKey
         forexURLDraft      = dataConfig.forexFactoryURL
         claudePathDraft    = dataConfig.claudeBinaryPath
+        goldSourceDraft    = dataConfig.goldSource
+        farazCookieDraft   = dataConfig.farazCookie
         isDirty = false
     }
 
@@ -139,6 +185,9 @@ struct DataSourcesCard: View {
             forexFactoryURL:  forexURLDraft,
             claudeBinaryPath: claudePathDraft
         )
+        // Set the gold source last: its publish is what triggers the
+        // scheduler's clear-and-refetch, and by now the cookie is saved.
+        dataConfig.updateGoldSource(goldSourceDraft, farazCookie: farazCookieDraft)
         isDirty = false
         savedFlash = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {

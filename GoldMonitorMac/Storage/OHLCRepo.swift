@@ -135,6 +135,15 @@ struct OHLCRepo {
         try await pool.write { db in try Self._deleteClosedDayBars(pairID: pairID, db) }
     }
 
+    /// Async, off-main. Wipe every stored bar for a pair across all
+    /// timeframes. Used when the user switches the pair's data source in
+    /// Settings — the old provider's bars are cleared so the new one
+    /// refetches from a clean slate (rather than interleaving two
+    /// providers' OHLC, which can disagree on a given minute).
+    func deleteAll(pairID: String) async throws {
+        try await pool.write { db in try Self._deleteAll(pairID: pairID, db) }
+    }
+
     /// Atomic live-tick bar roll. Inserts a fresh bar at `bucketStart`
     /// (open=high=low=close=price) or, if one already exists, expands
     /// high/low and advances close — `open` is captured once and never
@@ -287,6 +296,10 @@ struct OHLCRepo {
             )
         }
         return ids.count
+    }
+
+    private static func _deleteAll(pairID: String, _ db: Database) throws {
+        try db.execute(sql: "DELETE FROM ohlc WHERE pair_id = ?", arguments: [pairID])
     }
 
     private static func _count(pairID: String, timeframe: String, _ db: Database) throws -> Int {

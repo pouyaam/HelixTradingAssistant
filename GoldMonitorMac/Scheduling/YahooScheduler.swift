@@ -68,6 +68,34 @@ final class YahooScheduler: ObservableObject {
     /// once we've hit the bottom of available history.
     private var exhaustedOlder: Set<String> = []
 
+    /// Bumped each time the ounce series is cleared + refetched because
+    /// the user changed the gold data source. The dashboard observes this
+    /// and does a full `reloadCandles()` (the cheap trailing splice can't
+    /// represent a wholesale clear). `@Published` so SwiftUI sees it.
+    @Published private(set) var dataResetToken: Int = 0
+
+    /// Combine subscription to `DataSourceConfig.$goldSource`. On a real
+    /// change we clear the ounce bars and refetch from the new upstream.
+    private var goldSourceCancellable: AnyCancellable?
+
+    /// Active data source, read live from the shared config (both this
+    /// scheduler and the config are `@MainActor`, so this is safe).
+    private var goldSource: GoldDataSource { DataSourceConfig.shared.goldSource }
+
+    /// True when a pair should be driven by Faraz rather than the
+    /// default Twelve Data + Yahoo path. The source toggle is global, so
+    /// any pair Faraz has a symbol for (gold + BTC/SOL/ETH) follows it;
+    /// pairs without a Faraz mapping (indices) always stay on Yahoo.
+    private func usesFaraz(_ pairID: String) -> Bool {
+        goldSource == .faraz && FarazHistorySource.symbolByPairID[pairID] != nil
+    }
+
+    /// Pair ids Faraz can serve — derived from the symbol map so adding a
+    /// crypto symbol there is the only change needed to extend coverage.
+    private var farazPairIDs: [String] {
+        pairs.map(\.pairID).filter { FarazHistorySource.symbolByPairID[$0] != nil }
+    }
+
     private func backfillKey(_ pairID: String, _ sourceTF: String) -> String {
         "\(pairID)|\(sourceTF)"
     }
@@ -184,23 +212,63 @@ final class YahooScheduler: ObservableObject {
         guard let repo = cachedRepo else { return }
         let key = backfillKey(pairID, sourceTF)
         if deepBackfilled.contains(key) || backfilling.contains(key) { return }
-        guard let spec = deepFetchSpec(forSourceTF: sourceTF),
-              let cfg = pairs.first(where: { $0.pairID == pairID }) else { return }
+        guard let cfg = pairs.first(where: { $0.pairID == pairID }) else { return }
+
+        let faraz = usesFaraz(pairID)
+        // Each source supports its own set of timeframes — bail early on
+        // an unsupported TF so we don't insert a `backfilling` flag that
+        // never clears.
+        if faraz {
+            guard FarazHistorySource.resolution(forSourceTF: sourceTF) != nil else { return }
+        } else {
+            guard deepFetchSpec(forSourceTF: sourceTF) != nil else { return }
+        }
 
         backfilling.insert(key)
         defer { backfilling.remove(key) }
         do {
-            let bars = try await YahooGoldSource.fetchHistory(
-                pairID: pairID, symbol: cfg.yahooSymbol,
-                skipWeekends: cfg.respectsWeekend,
-                range: spec.range, interval: spec.interval
-            )
+            let bars: [OHLCBar]
+            if faraz {
+                // Faraz honours the from..to window (not `countback` as a
+                // cap), so a large bar count here just widens `from` — giving
+                // deep history per TF (~8d of 1m, ~41d of 5m, ~1.4y of 1h,
+                // decades of 1d), comparable to Yahoo's per-interval ceilings.
+                bars = try await fetchFarazWindow(
+                    pairID: pairID, sourceTF: sourceTF, cfg: cfg,
+                    to: Date(), countback: 12000, firstDataRequest: true
+                )
+            } else {
+                let spec = deepFetchSpec(forSourceTF: sourceTF)!
+                bars = try await YahooGoldSource.fetchHistory(
+                    pairID: pairID, symbol: cfg.yahooSymbol,
+                    skipWeekends: cfg.respectsWeekend,
+                    range: spec.range, interval: spec.interval
+                )
+            }
             try await repo.upsertMany(bars)
             deepBackfilled.insert(key)
             self.lastUpdateAt = Date()
         } catch {
-            self.lastError = "yahoo backfill \(pairID)/\(sourceTF): \(error.localizedDescription)"
+            self.lastError = "\(faraz ? "faraz" : "yahoo") backfill \(pairID)/\(sourceTF): \(error.localizedDescription)"
         }
+    }
+
+    /// Build + run one Faraz `/history` request for a source timeframe,
+    /// anchored at `to` and reaching `countback` bars back. Centralises
+    /// the symbol lookup + from/to math so the bootstrap, periodic sync,
+    /// and pan-left paths all issue identical requests.
+    private func fetchFarazWindow(
+        pairID: String, sourceTF: String, cfg: PairConfig,
+        to: Date, countback: Int, firstDataRequest: Bool
+    ) async throws -> [OHLCBar] {
+        let cookie = DataSourceConfig.shared.farazCookie
+        let symbol = FarazHistorySource.symbolByPairID[pairID] ?? "XAU_USD"
+        let from = to.addingTimeInterval(-Double(countback * FarazHistorySource.tfSeconds(sourceTF)))
+        return try await FarazHistorySource.fetchHistory(
+            pairID: pairID, symbol: symbol, tfTag: sourceTF,
+            from: from, to: to, countback: countback, cookie: cookie,
+            firstDataRequest: firstDataRequest, skipWeekends: cfg.respectsWeekend
+        )
     }
 
     /// Warm every native series for one pair at once (1m/5m/1h/1d),
@@ -239,24 +307,33 @@ final class YahooScheduler: ObservableObject {
         guard sourceTF == "1m" || sourceTF == "5m" else { return 0 }
         let key = backfillKey(pairID, sourceTF)
         if loadingOlder.contains(key) || exhaustedOlder.contains(key) { return 0 }
-        let apiKey = TwelveDataSpotStream.apiKey
-        guard !apiKey.isEmpty else { return 0 }
         guard let cfg = pairs.first(where: { $0.pairID == pairID }),
-              let symbol = cfg.twelveDataSymbol,
               let earliest = try? await repo.earliestBucket(pairID: pairID, timeframe: sourceTF)
         else { return 0 }
 
+        let faraz = usesFaraz(pairID)
         loadingOlder.insert(key)
         defer { loadingOlder.remove(key) }
         do {
             // End the window one second before our oldest bar so the page
             // is strictly older (the boundary bar would just dedupe).
-            let bars = try await TwelveDataHistorySource.fetchHistory(
-                pairID: pairID, symbol: symbol, tfTag: sourceTF,
-                end: earliest.addingTimeInterval(-1),
-                apiKey: apiKey,
-                skipWeekends: cfg.respectsWeekend
-            )
+            let cutoff = earliest.addingTimeInterval(-1)
+            let bars: [OHLCBar]
+            if faraz {
+                guard !DataSourceConfig.shared.farazCookie.isEmpty else { return 0 }
+                bars = try await fetchFarazWindow(
+                    pairID: pairID, sourceTF: sourceTF, cfg: cfg,
+                    to: cutoff, countback: 5000, firstDataRequest: false
+                )
+            } else {
+                let apiKey = TwelveDataSpotStream.apiKey
+                guard !apiKey.isEmpty, let symbol = cfg.twelveDataSymbol else { return 0 }
+                bars = try await TwelveDataHistorySource.fetchHistory(
+                    pairID: pairID, symbol: symbol, tfTag: sourceTF,
+                    end: cutoff, apiKey: apiKey,
+                    skipWeekends: cfg.respectsWeekend
+                )
+            }
             let older = bars.filter { $0.bucketStart < earliest }
             guard !older.isEmpty else {
                 exhaustedOlder.insert(key)
@@ -266,7 +343,7 @@ final class YahooScheduler: ObservableObject {
             self.lastUpdateAt = Date()
             return older.count
         } catch {
-            self.lastError = "twelve-data history \(pairID)/\(sourceTF): \(error.localizedDescription)"
+            self.lastError = "\(faraz ? "faraz" : "twelve-data") history \(pairID)/\(sourceTF): \(error.localizedDescription)"
             return 0
         }
     }
@@ -283,6 +360,10 @@ final class YahooScheduler: ObservableObject {
         s.onTick = { [weak self] symbol, price in
             guard let self = self else { return }
             let id = self.pairIDByTwelveDataSymbol[symbol] ?? symbol
+            // Source gate: when the user has put the ounce on Faraz, the
+            // Twelve Data tick for XAU/USD is ignored — Faraz's 10s poll
+            // is the authoritative ounce feed. Other pairs are unaffected.
+            if self.usesFaraz(id) { return }
             // Fallback gate: if cTrader is currently the authoritative
             // source for ounce, don't let TwelveData overwrite it.
             // Other pairs are unaffected because cTrader only streams
@@ -294,6 +375,18 @@ final class YahooScheduler: ObservableObject {
         }
         s.start()
         stream = s
+
+        // Watch for a gold-source switch in Settings. `dropFirst` skips
+        // the value present at subscription; `removeDuplicates` ignores a
+        // save that didn't actually change the source (e.g. only the
+        // cookie changed). A real change clears + refetches the ounce.
+        goldSourceCancellable = DataSourceConfig.shared.$goldSource
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { await self.switchGoldSource(repo: repo) }
+            }
 
         // 2) Bootstrap + polling/sync loop.
         task = Task { [weak self] in
@@ -312,6 +405,42 @@ final class YahooScheduler: ObservableObject {
         task = nil
         stream?.stop()
         stream = nil
+        goldSourceCancellable?.cancel()
+        goldSourceCancellable = nil
+    }
+
+    // ── Gold-source switch (clear + refetch) ──────────────────────────
+
+    /// React to the user changing the ounce's data source in Settings:
+    /// wipe the stored ounce bars (so two providers' OHLC can't
+    /// interleave), drop this pair's session backfill latches, then
+    /// refetch deep history from the now-active upstream. Bumps
+    /// `dataResetToken` at the end so the dashboard does a full reload.
+    private func switchGoldSource(repo: OHLCRepo) async {
+        // The toggle is global, so every Faraz-capable pair flips between
+        // Faraz and Twelve Data + Yahoo at once — clear + refetch them all
+        // so two providers' OHLC can't interleave in any series.
+        let affected = farazPairIDs
+        for pairID in affected {
+            // Forget what we've already fetched for this pair so the new
+            // source's deep history + pan-left start fresh.
+            deepBackfilled = deepBackfilled.filter { !$0.hasPrefix("\(pairID)|") }
+            exhaustedOlder = exhaustedOlder.filter { !$0.hasPrefix("\(pairID)|") }
+            try? await repo.deleteAll(pairID: pairID)
+            latestPrices[pairID] = nil
+        }
+
+        // Refetch every native series from the active source (the routing
+        // inside ensureDeepHistory picks Faraz vs Yahoo). Fan out across
+        // pairs so the four series each fetch in parallel.
+        await withTaskGroup(of: Void.self) { group in
+            for pairID in affected {
+                group.addTask { [self] in await self.backfillAll(pairID: pairID) }
+            }
+        }
+
+        dataResetToken &+= 1
+        lastUpdateAt = Date()
     }
 
     // ── Bootstrap / gap-fill ──────────────────────────────────────────
@@ -359,6 +488,14 @@ final class YahooScheduler: ObservableObject {
         defer { isFetching = false }
         tickCount += 1
 
+        // Faraz-driven pairs: poll every tick (~10s) so the live tail
+        // refreshes at the cadence the user asked for. Runs independently
+        // of the Yahoo sync below (which skips these pairs while Faraz
+        // owns them).
+        if goldSource == .faraz {
+            await syncFarazPairs(repo: repo)
+        }
+
         // Yahoo authoritative history sync every Nth tick. Fans out
         // across all managed pairs in parallel. The Twelve Data WS
         // and cTrader bridge (when running) keep the *latest tick*
@@ -376,10 +513,64 @@ final class YahooScheduler: ObservableObject {
         }
     }
 
+    /// Faraz live/trailing sync for every Faraz-driven pair (gold +
+    /// BTC/SOL/ETH). Fans out across pairs so one slow request doesn't
+    /// stall the others within a 10s tick.
+    private func syncFarazPairs(repo: OHLCRepo) async {
+        guard !DataSourceConfig.shared.farazCookie.isEmpty else {
+            self.lastError = "faraz: session cookie not set (Settings)."
+            return
+        }
+        let faraz = pairs.filter { FarazHistorySource.symbolByPairID[$0.pairID] != nil }
+        await withTaskGroup(of: Void.self) { group in
+            for cfg in faraz {
+                group.addTask { [self] in await self.syncFarazPair(cfg: cfg, repo: repo) }
+            }
+        }
+        lastUpdateAt = Date()
+        hasBootstrapped = true
+    }
+
+    /// Refresh one Faraz pair's fast series (1m + 5m) every tick so the
+    /// chart tail tracks the latest price, and the slow series (1h + 1d)
+    /// every Nth tick (they barely change intra-bar). The newest 1m close
+    /// becomes the published spot price.
+    private func syncFarazPair(cfg: PairConfig, repo: OHLCRepo) async {
+        var tfs = ["1m", "5m"]
+        if tickCount % yahooEveryNTicks == 0 { tfs += ["1h", "1d"] }
+
+        var newestClose: Double?
+        for tf in tfs {
+            do {
+                // Only the recent tail is needed each poll — deep history
+                // was filled at bootstrap / on source switch. A ~30-bar
+                // window covers the in-progress bar plus any that rolled
+                // over since the last 10s tick, keeping the payload small.
+                let bars = try await fetchFarazWindow(
+                    pairID: cfg.pairID, sourceTF: tf, cfg: cfg,
+                    to: Date(), countback: 30, firstDataRequest: false
+                )
+                try await repo.upsertMany(bars)
+                if tf == "1m", let last = bars.last { newestClose = last.close }
+            } catch {
+                self.lastError = "faraz \(cfg.pairID)/\(tf): \(error.localizedDescription)"
+            }
+        }
+
+        if let px = newestClose {
+            latestPrices[cfg.pairID] = px
+            activeLiveSource = "faraz/\(cfg.pairID)"
+        }
+    }
+
     /// Sync one pair's 1m + 5m history in parallel. Errors are
     /// captured into `lastError` but don't bail — one pair failing
     /// shouldn't stop the others.
     private func syncYahoo(cfg: PairConfig, repo: OHLCRepo) async {
+        // When the ounce is on Faraz, its 10s poll owns the series —
+        // skip Yahoo for this pair so the two sources don't fight over
+        // the same bars. Other pairs sync normally.
+        if usesFaraz(cfg.pairID) { return }
         do {
             // Periodic sync only needs to refresh the *trailing* bars —
             // the deep 1h/1d tails were filled at bootstrap and never
@@ -429,6 +620,10 @@ final class YahooScheduler: ObservableObject {
         source: String,
         repo: OHLCRepo
     ) async {
+        // When this pair is on Faraz, its 10s poll is the only writer —
+        // ignore ticks from every other provider (Twelve Data, cTrader,
+        // gold-api) so they can't interleave a second source's prices.
+        if usesFaraz(pairID) { return }
         // Publish the price immediately (cheap @Published mutation on the
         // main actor) so the UI updates the instant a tick arrives — the
         // bar-rolling DB work below runs off-main and never blocks it.

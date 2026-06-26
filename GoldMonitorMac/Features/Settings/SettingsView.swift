@@ -32,10 +32,6 @@ struct SettingsView: View {
     @AppStorage("markets.crypto.enabled")  private var cryptoEnabled: Bool = true
     @AppStorage("markets.indices.enabled") private var indicesEnabled: Bool = true
 
-    // Claude model + effort.
-    @AppStorage("ai.claude.model")  private var claudeModel: String = "claude-opus-4-7"
-    @AppStorage("ai.claude.effort") private var claudeEffort: String = "medium"
-
     // Codex model + effort. Mirrors the Claude keys; read by
     // CodexEngine at run time. Defaults match the user's frontier
     // Codex model + a high reasoning effort.
@@ -364,66 +360,10 @@ struct SettingsView: View {
                 sectionTitle(
                     icon: "sparkles",
                     title: "Claude (AI analysis)",
-                    subtitle: "Model + reasoning effort the analysis pipeline runs with. Token usage rolls up here from each completed run."
+                    subtitle: "Token usage rolls up here from each completed run. Pick the model + reasoning effort from the engine selector on the analysis page."
                 )
 
-                modelPicker
-                effortPicker
-                Divider().background(Theme.Color.border)
                 usageRow
-            }
-        }
-    }
-
-    private var modelPicker: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("MODEL")
-                .font(.system(size: 9, weight: .bold))
-                .tracking(0.8)
-                .foregroundStyle(Theme.Color.textMuted)
-            Picker("", selection: $claudeModel) {
-                ForEach(Self.availableClaudeModels, id: \.id) { m in
-                    Text(m.label).tag(m.id)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .frame(maxWidth: 320, alignment: .leading)
-
-            Text(modelHint)
-                .font(.system(size: 10))
-                .foregroundStyle(Theme.Color.textMuted)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private var effortPicker: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("REASONING EFFORT")
-                .font(.system(size: 9, weight: .bold))
-                .tracking(0.8)
-                .foregroundStyle(Theme.Color.textMuted)
-            HStack(spacing: 6) {
-                ForEach(Self.effortLevels, id: \.id) { e in
-                    Button {
-                        claudeEffort = e.id
-                    } label: {
-                        Text(e.label)
-                            .font(.system(size: 11, weight: claudeEffort == e.id ? .bold : .medium))
-                            .foregroundStyle(claudeEffort == e.id ? .white : Theme.Color.textSecondary)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 5)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(claudeEffort == e.id
-                                          ? AnyShapeStyle(Theme.accentGradient)
-                                          : AnyShapeStyle(Theme.Color.surface))
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .help(e.tooltip)
-                }
-                Spacer()
             }
         }
     }
@@ -509,31 +449,11 @@ struct SettingsView: View {
         return "\(n)"
     }
 
-    private var modelHint: String {
-        switch claudeModel {
-        case "claude-opus-4-7":            return "Most capable. Best for full TA, Confluence Trade Scanner, multi-timeframe. Higher cost per run."
-        case "claude-opus-4-7[1m]":        return "Opus 4.7 with 1M-token context window — useful for very long histories or multi-pair runs."
-        case "claude-sonnet-4-6":          return "Faster, lower cost. Good default for FVG / S&R / chat follow-ups."
-        case "claude-haiku-4-5-20251001":  return "Fastest, lowest cost. Best for quick lookups or budget-sensitive runs."
-        default:                           return ""
-        }
-    }
-
-    private static let availableClaudeModels: [ClaudeModelOption] = [
-        .init(id: "claude-opus-4-7",              label: "Opus 4.7"),
-        .init(id: "claude-opus-4-7[1m]",          label: "Opus 4.7 · 1M context"),
-        .init(id: "claude-sonnet-4-6",            label: "Sonnet 4.6"),
-        .init(id: "claude-haiku-4-5-20251001",    label: "Haiku 4.5"),
-    ]
-
+    /// Lightweight option types reused by the Codex card's pickers. The
+    /// Claude model/effort catalog moved to `ClaudeModelCatalog` (AI
+    /// layer) when those controls moved to the analysis-page engine
+    /// dropdown.
     private struct ClaudeModelOption: Hashable { let id: String; let label: String }
-
-    private static let effortLevels: [EffortOption] = [
-        .init(id: "low",     label: "Low",     tooltip: "Quick, less reasoning."),
-        .init(id: "medium",  label: "Medium",  tooltip: "Balanced default."),
-        .init(id: "high",    label: "High",    tooltip: "Deepest reasoning."),
-    ]
-
     private struct EffortOption: Hashable { let id: String; let label: String; let tooltip: String }
 
     // ── Network / proxy card ──────────────────────────────────────
@@ -611,12 +531,12 @@ struct SettingsView: View {
         }
     }
 
-    private func labelled<V>(
+    private func labelled(
         _ label: String,
         text: Binding<String>? = nil,
         number: Binding<Int>? = nil,
         placeholder: String = ""
-    ) -> some View where V == Never {
+    ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label.uppercased())
                 .font(.system(size: 9, weight: .bold))

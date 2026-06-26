@@ -13,6 +13,11 @@ struct RootView: View {
     /// would yank the user back into fullscreen every time.
     @State private var didEnterFullscreen = false
 
+    /// Last app version whose "What's New" popup the user dismissed. When
+    /// it differs from the running version, the popup fires once on launch.
+    @AppStorage("whatsNew.lastSeenVersion") private var lastSeenVersion = ""
+    @State private var showWhatsNew = false
+
     var body: some View {
         HStack(spacing: 0) {
             // Sidebar collapses entirely when the dashboard enters chart
@@ -54,6 +59,21 @@ struct RootView: View {
             Button("OK") { app.lastError = nil }
         } message: {
             Text(app.lastError ?? "")
+        }
+        .sheet(isPresented: $showWhatsNew) {
+            WhatsNewView(notes: .latest) {
+                lastSeenVersion = AppInfo.version
+                showWhatsNew = false
+            }
+        }
+        .onAppear {
+            // Fire the What's New popup once when the running version is
+            // newer than the last one the user saw. Defer while the
+            // first-run wizard is up so the two sheets don't collide —
+            // it'll surface on the next launch instead.
+            if !app.showWizard, lastSeenVersion != AppInfo.version {
+                showWhatsNew = true
+            }
         }
     }
 

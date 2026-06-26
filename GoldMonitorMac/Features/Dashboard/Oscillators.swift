@@ -59,11 +59,86 @@ struct OscillatorConfig: Codable, Equatable {
     /// without the clutter of the stepped line behind their candles.
     var utShowTrailingStop: Bool = true
 
-    // Bump the storage key when we add new required fields — old
-    // payloads that lack the new keys would fail to decode otherwise
-    // and the load() fallback would silently lose the user's saved
-    // values. v2 has the UT Bot fields baked in.
+    // Order Block Finder parameters (PineScript v4 port). `obPeriods` is
+    // the required same-direction run length after the OB candle (Pine's
+    // `periods`), `obThreshold` the minimum % move that validates the
+    // block (`threshold`), and `obUseWicks` marks the candle's full
+    // high/low range instead of open→low (bull) / open→high (bear).
+    var obPeriods: Int = 5
+    var obThreshold: Double = 0.0
+    var obUseWicks: Bool = false
+
+    // Trading Sessions overlay (Pine v6 "Trading Sessions" port). The
+    // four `sessShow…` flags mirror the Pine display inputs; the three
+    // per-session flags let the user show only the venues they trade.
+    // Session times / timezones / colours are baked to the canonical
+    // Tokyo / London / New York presets — see `TradingSessions.catalog`.
+    var sessShowNames: Bool = true
+    var sessShowOpenClose: Bool = true
+    var sessShowRange: Bool = true
+    var sessShowAverage: Bool = true
+    var sessShowTokyo: Bool = true
+    var sessShowLondon: Bool = true
+    var sessShowNewYork: Bool = true
+
+    // NY Open Setup (5m opening-range breakout + FVG-retest). `nyAtrMult`
+    // is the "power breakout" gate — the displacement body must be at
+    // least this many ATR(14). `nyAMOnly` limits the hunt to the morning
+    // kill-zone (09:35–11:00 ET) vs the whole NY session. Entry (FVG 50%),
+    // stop (beyond the OR) and target (2R) are fixed — see `NYOpenSetup`.
+    var nyAtrMult: Double = 1.0
+    var nyAMOnly: Bool = true
+
+    // We decode every field with `decodeIfPresent` (see init(from:)) so
+    // adding a field no longer requires bumping this key — an older
+    // payload that predates the field just falls back to its default
+    // instead of failing to decode and wiping the user's whole config.
     private static let storageKey = "dashboard.indicator.config.v2"
+
+    init() {}
+
+    /// Lenient decode: any key missing from an older saved payload falls
+    /// back to the property's default rather than throwing. This is what
+    /// lets us extend the config (e.g. the Order Block fields) without
+    /// resetting the user's existing RSI / MACD / UT Bot tuning. See
+    /// CLAUDE.md "Added a Codable field to a persisted struct".
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        rsiPeriod          = try c.decodeIfPresent(Int.self,    forKey: .rsiPeriod)          ?? 14
+        macdFast           = try c.decodeIfPresent(Int.self,    forKey: .macdFast)           ?? 12
+        macdSlow           = try c.decodeIfPresent(Int.self,    forKey: .macdSlow)           ?? 26
+        macdSignal         = try c.decodeIfPresent(Int.self,    forKey: .macdSignal)         ?? 9
+        stochK             = try c.decodeIfPresent(Int.self,    forKey: .stochK)             ?? 14
+        stochD             = try c.decodeIfPresent(Int.self,    forKey: .stochD)             ?? 3
+        utKeyValue         = try c.decodeIfPresent(Double.self, forKey: .utKeyValue)         ?? 1.0
+        utATRPeriod        = try c.decodeIfPresent(Int.self,    forKey: .utATRPeriod)        ?? 10
+        utUseHeikinAshi    = try c.decodeIfPresent(Bool.self,   forKey: .utUseHeikinAshi)    ?? false
+        utShowTrailingStop = try c.decodeIfPresent(Bool.self,   forKey: .utShowTrailingStop) ?? true
+        obPeriods          = try c.decodeIfPresent(Int.self,    forKey: .obPeriods)          ?? 5
+        obThreshold        = try c.decodeIfPresent(Double.self, forKey: .obThreshold)        ?? 0.0
+        obUseWicks         = try c.decodeIfPresent(Bool.self,   forKey: .obUseWicks)         ?? false
+        sessShowNames      = try c.decodeIfPresent(Bool.self,   forKey: .sessShowNames)      ?? true
+        sessShowOpenClose  = try c.decodeIfPresent(Bool.self,   forKey: .sessShowOpenClose)  ?? true
+        sessShowRange      = try c.decodeIfPresent(Bool.self,   forKey: .sessShowRange)      ?? true
+        sessShowAverage    = try c.decodeIfPresent(Bool.self,   forKey: .sessShowAverage)    ?? true
+        sessShowTokyo      = try c.decodeIfPresent(Bool.self,   forKey: .sessShowTokyo)      ?? true
+        sessShowLondon     = try c.decodeIfPresent(Bool.self,   forKey: .sessShowLondon)     ?? true
+        sessShowNewYork    = try c.decodeIfPresent(Bool.self,   forKey: .sessShowNewYork)    ?? true
+        nyAtrMult          = try c.decodeIfPresent(Double.self, forKey: .nyAtrMult)          ?? 1.0
+        nyAMOnly           = try c.decodeIfPresent(Bool.self,   forKey: .nyAMOnly)           ?? true
+    }
+
+    /// Whether the given `TradingSessions` preset id is toggled on. Used
+    /// by ChartView to filter the (data-keyed, always-all-sessions)
+    /// memoized run list down to what the user wants drawn.
+    func showsSession(_ id: String) -> Bool {
+        switch id {
+        case "tokyo":   return sessShowTokyo
+        case "london":  return sessShowLondon
+        case "newYork": return sessShowNewYork
+        default:        return true
+        }
+    }
 
     static func load() -> OscillatorConfig {
         guard let data = UserDefaults.standard.data(forKey: storageKey),

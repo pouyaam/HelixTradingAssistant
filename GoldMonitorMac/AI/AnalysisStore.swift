@@ -196,7 +196,12 @@ final class AnalysisStore: ObservableObject {
     /// `session.report`. Doesn't render in MarkdownUI; the report
     /// column searches for it to split chunks + insert a second
     /// thinking disclosure right at that boundary.
-    static let expandMarker = "<!--helix-expand-mark-->"
+    ///
+    /// `nonisolated` because it's a plain constant read from
+    /// `computeRenderChunks` (a nonisolated static helper) — it carries
+    /// no actor state, so it doesn't need the class's `@MainActor`
+    /// isolation.
+    nonisolated static let expandMarker = "<!--helix-expand-mark-->"
 
     /// One completed analysis kept in the history list. The structured
     /// payloads (`srLevels`, `fvgZones`, `taScenario`) are extracted
@@ -726,7 +731,7 @@ final class AnalysisStore: ObservableObject {
         // anchors to the cursor instead of treating the data as stale.
         let resolvedUser = Self.replayPreamble(replayAsOf) + user
 
-        var session = Session()
+        let session = Session()
         session.phase = .running
         session.startedAt = Date()
         session.pairName = pair.name
@@ -854,7 +859,7 @@ final class AnalysisStore: ObservableObject {
             // already burned through reasoning) but we handle the
             // case defensively in case future engines surface
             // thinking on follow-ups too.
-            guard var sess = sessions[sessionKey],
+            guard let sess = sessions[sessionKey],
                   let idx = sess.conversation.firstIndex(where: { $0.id == turnID })
             else { return }
             var changed = false
@@ -927,7 +932,7 @@ final class AnalysisStore: ObservableObject {
         tabID: UUID? = nil
     ) {
         let key = SessionKey(pairID: pairID, kind: kind, tabID: tabID)
-        guard var session = sessions[key],
+        guard let session = sessions[key],
               !session.systemPromptUsed.isEmpty,
               !session.userPromptUsed.isEmpty,
               !session.report.isEmpty
@@ -978,7 +983,7 @@ final class AnalysisStore: ObservableObject {
                 }
                 guard let self = self else { return }
                 self.endBatching(for: turnBufferKey)
-                guard var sess = self.sessions[key],
+                guard let sess = self.sessions[key],
                       let idx = sess.conversation.firstIndex(where: { $0.id == turnID })
                 else { return }
                 sess.conversation[idx].isStreaming = false
@@ -991,7 +996,7 @@ final class AnalysisStore: ObservableObject {
             } catch is CancellationError {
                 guard let self = self else { return }
                 self.endBatching(for: turnBufferKey)
-                guard var sess = self.sessions[key],
+                guard let sess = self.sessions[key],
                       let idx = sess.conversation.firstIndex(where: { $0.id == turnID })
                 else { return }
                 sess.conversation[idx].isStreaming = false
@@ -999,7 +1004,7 @@ final class AnalysisStore: ObservableObject {
             } catch {
                 guard let self = self else { return }
                 self.endBatching(for: turnBufferKey)
-                guard var sess = self.sessions[key],
+                guard let sess = self.sessions[key],
                       let idx = sess.conversation.firstIndex(where: { $0.id == turnID })
                 else { return }
                 sess.conversation[idx].isStreaming = false
@@ -1010,7 +1015,7 @@ final class AnalysisStore: ObservableObject {
 
         // Stash the task back on the turn so a future "stop
         // follow-up" affordance can cancel it.
-        if var sess = sessions[key],
+        if let sess = sessions[key],
            let idx = sess.conversation.firstIndex(where: { $0.id == turnID })
         {
             sess.conversation[idx].task = task
@@ -1076,7 +1081,7 @@ final class AnalysisStore: ObservableObject {
     /// lands in a slot the current view doesn't read.
     func loadFromHistory(_ entry: HistoryEntry, tabID: UUID? = nil) {
         let key = SessionKey(pairID: entry.pairID, kind: entry.kind, tabID: tabID)
-        var session = sessions[key] ?? Session()
+        let session = sessions[key] ?? Session()
         session.task?.cancel()
         session.report = entry.report
         session.thinking = entry.thinking ?? ""

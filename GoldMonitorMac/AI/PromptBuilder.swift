@@ -111,7 +111,7 @@ enum PromptBuilder {
     user's questions in a conversational thread. Each turn you'll
     see the pair name, timeframe, last close, 24h change, the most
     recent OHLC bars, a precomputed indicator snapshot (RSI, MACD,
-    EMA50/EMA200, ATR, UT Bot, volume), and a one-line
+    EMA50/EMA200, ATR, order blocks, volume), and a one-line
     higher-timeframe context summary.
 
     Answer concisely and reference specific numbers from the data
@@ -291,7 +291,7 @@ enum PromptBuilder {
     You are a senior gold-market technical analyst running the
     "Confluence Trade Scanner — Supply & Demand" sweep. The user
     gives OHLC bars for 15m, 1h, 4h plus precomputed indicators
-    (ATR, RSI, MACD, EMA50/200, UT Bot, volume).
+    (ATR, RSI, MACD, EMA50/200, order blocks, volume).
 
     Your job is **Supply & Demand only** on this pass. Identify
     zones, pick the best trade idea (and a single alt), and
@@ -415,7 +415,7 @@ enum PromptBuilder {
       * +2 cross-TF confluence (e.g. 1h zone inside 4h zone)
       * +1 strong source (strong S&D / level with 3+ touches)
       * +1 untested zone
-      * +1 each: RSI / MACD / UT Bot align with bias
+      * +1 each: RSI / MACD aligns with bias, or price reacts at an order block
       * +1 with-trend (LONG inside 4h uptrend)
       * −1 counter-trend, −1 tested zone, −1 thin volume
       Cap 10, floor 1.
