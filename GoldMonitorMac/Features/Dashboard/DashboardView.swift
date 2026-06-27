@@ -104,6 +104,7 @@ struct DashboardView: View {
     /// the same `byPair` map so existing chart overlays / Layers
     /// popover / outcome stamping all keep working.
     @EnvironmentObject private var tradeStore: TradeStore
+    @EnvironmentObject private var journal: JournalStore
     /// Per-pair auto-trader config — read for the AUTO pill colour
     /// + click action (jumps to the matching Settings category).
     @EnvironmentObject private var autoTraderConfig: AutoTraderConfigStore
@@ -425,6 +426,7 @@ struct DashboardView: View {
             replay.exit()   // a replay anchored on the old pair's bars makes no sense here
             xDomain = nil   // new pair ⇒ drop any pinned window
             yDomain = nil   // …and any manual price scale
+            if app.journalChartEntry?.pairID != app.selectedPairID { app.journalChartEntry = nil }
             srLevels = .init(support: [], resistance: [])  // overlays are per-pair
             fvgZones = []
             supplyDemandZones = []
@@ -812,6 +814,15 @@ struct DashboardView: View {
                     // (Layers popover history) but the chart drops
                     // them — keeps active runs uncluttered.
                     trades: tradeStore.openVisibleTrades(for: pair.id),
+                    // Journal overlay — show the pinned entry's
+                    // entry/TP/SL lines when the user hit "Show on
+                    // chart" from JournalView. Scoped to the pair
+                    // so switching to a different pair hides it.
+                    journalEntries: {
+                        guard let je = app.journalChartEntry,
+                              je.pairID == pair.id else { return [] }
+                        return [je]
+                    }(),
                     // Suppress the live-price patch during replay — the
                     // last revealed bar is historical, not "now".
                     livePrice: replay.isActive
@@ -854,7 +865,7 @@ struct DashboardView: View {
                         isFullscreen: $app.isChartFullscreen,
                         onZoomIn: { zoom(by: 0.7) },
                         onZoomOut: { zoom(by: 1.4) },
-                        onReset: { xDomain = nil; yDomain = nil }
+                        onReset: { resetChart() }
                     )
                     .padding(.trailing, Theme.Spacing.md)
                     .padding(.bottom, Theme.Spacing.md)
@@ -2108,6 +2119,41 @@ struct DashboardView: View {
         let clamped = max(0.05, min(50, factor))
         let newHalf = halfSpan * clamped
         xDomain = (center - newHalf) ... (center + newHalf)
+    }
+
+    /// TradingView-style reset: jump to the most-recent candles at a
+    /// comfortable zoom (~150 bars) and clear any manual Y-axis pin so
+    /// the price scale auto-fits the visible window.
+    private func resetChart() {
+        let n = candles.count
+        guard n > 0 else { xDomain = nil; yDomain = nil; return }
+        let defaultBars: Double = 150
+        let upper = Double(n - 1) + 0.5
+        let lower = max(-0.5, upper - defaultBars)
+        // Compute an explicit Y fit for the reset window directly from the
+        // candle array. Setting a concrete non-nil value ensures Apple Charts
+        // registers a definite domain change and redraws the Y axis —
+        // transitioning from a pinned value through nil back to a computed
+        // value via the effectiveYDomain chain is unreliable on macOS 13.
+        let loIdx = max(0, Int(lower.rounded(.down)))
+        let hiIdx = min(n - 1, Int(upper.rounded(.up)))
+        let slice = candles[loIdx...hiIdx]
+        if let lo = slice.map(\.low).min(), let hi = slice.map(\.high).max() {
+            let span = max(hi - lo, hi * 0.001, 1.0)
+            let pad  = span * 0.05
+            yDomain = (lo - pad) ... (hi + pad)
+        } else {
+            yDomain = nil
+        }
+        withAnimation(.easeInOut(duration: 0.3)) {
+            xDomain = lower ... upper
+        }
+        // Re-enable continuous Y auto-fit after the animation finishes, so
+        // the user can pan left and have the Y scale follow automatically.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            yDomain = nil
+        }
     }
 
     /// Specialized stat tile for volume — wider precision, compact K/M/B

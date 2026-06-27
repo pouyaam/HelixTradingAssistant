@@ -105,7 +105,7 @@ struct ChartControlsFAB: View {
                    help: "Zoom out",
                    perform: onZoomOut),
             Action(icon: "arrow.counterclockwise",
-                   help: "Reset zoom",
+                   help: "Reset to latest",
                    perform: onReset),
             Action(icon: isFullscreen
                    ? "arrow.down.right.and.arrow.up.left"

@@ -168,6 +168,33 @@ final class ChartDerivedCache {
         return result
     }
 
+    // ── Fair Value Gap ────────────────────────────────────────────────
+
+    private struct FVGSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let lastClose: Double
+        let threshold: Double
+    }
+    private var fvgSig: FVGSig?
+    private var fvgCache: [FairValueGap.Zone] = []
+
+    func fairValueGaps(candles: [Candle], threshold: Double) -> [FairValueGap.Zone] {
+        let sig = FVGSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
+            lastClose: candles.last?.close ?? 0,
+            threshold: threshold
+        )
+        if sig == fvgSig { return fvgCache }
+        let result = FairValueGap.compute(candles, threshold: threshold)
+        fvgSig = sig
+        fvgCache = result
+        return result
+    }
+
     // ── Trading Sessions ──────────────────────────────────────────────
 
     private struct SessionSig: Equatable {

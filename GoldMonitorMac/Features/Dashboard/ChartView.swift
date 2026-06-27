@@ -119,6 +119,11 @@ struct ChartView: View {
     /// (entry / TP / SL) plus a fill-time marker for actives.
     var trades: [Trade] = []
 
+    /// Journal entries pinned on the chart via "Show on chart". Each
+    /// renders entry / TP / SL as styled RuleMarks so the user can
+    /// see the actual trade plan against historical price action.
+    var journalEntries: [JournalEntry] = []
+
     /// Most recent live price for the pair this chart represents.
     /// Drives the live P/L capsule on active trades AND the VALID /
     /// INVALID badge on TA scenario entry tags (a scenario flips to
@@ -283,6 +288,19 @@ struct ChartView: View {
     }
     private static let maxOrderBlocks = 6
 
+    /// FVG zones from the indicator (distinct from AI-analysis `fvgZones`
+    /// which are PromptBuilder.FVGZone values). Computed fresh from candle
+    /// data whenever the indicator is enabled; filtered to the most recent
+    /// to avoid visual noise on deep histories.
+    private var indicatorFvgZones: [FairValueGap.Zone] {
+        guard indicators.contains(.fairValueGap) else { return [] }
+        let all = derived.fairValueGaps(
+            candles: candles,
+            threshold: indicatorConfig.fvgThreshold
+        )
+        return indicatorConfig.fvgShowMitigated ? all : all.filter { !$0.isMitigated }
+    }
+
     /// Session runs to draw: every *enabled* preset's runs that intersect
     /// the visible window (+a margin), capped to the most recent so a deep
     /// history doesn't pile hundreds of boxes into one frame. Swift Charts
@@ -394,10 +412,12 @@ struct ChartView: View {
             // switch below) so the price action stays the visual focus.
             srLevelMarks
             fvgMarks
+            indicatorFvgMarks
             supplyDemandMarks
             orderBlockMarks
             scenarioMarks
             tradeMarks
+            journalMarks
             drawingMarks
             drawingPreviewMarks
 
@@ -1494,6 +1514,69 @@ struct ChartView: View {
         }
     }
 
+    /// Indicator-computed FVG zones. Each gap is a translucent rectangle
+    /// from the bar where it formed to the right edge of the chart
+    /// (extending into the future so the user can watch price approach).
+    /// Mitigated zones (price closed back inside) render at lower opacity
+    /// with dashed boundary lines — same visual grammar as AI `fvgMarks`.
+    @ChartContentBuilder
+    private var indicatorFvgMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(indicatorFvgZones) { zone in
+            let color: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
+            let xStart = Double(zone.index)
+            let xEnd   = Double(lastIndex)
+            RectangleMark(
+                xStart: .value("FVG start", xStart),
+                xEnd:   .value("FVG end",   xEnd),
+                yStart: .value("FVG low",   zone.low),
+                yEnd:   .value("FVG high",  zone.high)
+            )
+            .foregroundStyle(color.opacity(zone.isMitigated ? 0.08 : 0.16))
+
+            // Boundary lines so the zone edges read clearly.
+            RuleMark(
+                xStart: .value("FVG hi start", xStart),
+                xEnd:   .value("FVG hi end",   xEnd),
+                y:      .value("FVG hi",        zone.high)
+            )
+            .foregroundStyle(color.opacity(zone.isMitigated ? 0.35 : 0.65))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: zone.isMitigated ? [4, 3] : []))
+
+            RuleMark(
+                xStart: .value("FVG lo start", xStart),
+                xEnd:   .value("FVG lo end",   xEnd),
+                y:      .value("FVG lo",        zone.low)
+            )
+            .foregroundStyle(color.opacity(zone.isMitigated ? 0.35 : 0.65))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: zone.isMitigated ? [4, 3] : []))
+
+            // Midline — the 50% equilibrium level traders watch for entries.
+            RuleMark(
+                xStart: .value("FVG mid start", xStart),
+                xEnd:   .value("FVG mid end",   xEnd),
+                y:      .value("FVG mid",        zone.mid)
+            )
+            .foregroundStyle(color.opacity(0.35))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+
+            // "FVG↑" / "FVG↓" direction capsule on the right edge.
+            PointMark(
+                x: .value("FVG label", xEnd),
+                y: .value("FVG hi",    zone.high)
+            )
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                Text(zone.isBullish ? "FVG↑" : "FVG↓")
+                    .font(.system(size: 8, weight: .heavy))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(color.opacity(zone.isMitigated ? 0.55 : 0.95)))
+            }
+        }
+    }
+
     /// Scenario marks: TP + SL + (optional) entry lines plus a bias
     /// capsule pinned to the entry rule (or TP rule if entry is missing
     /// — older history entries don't carry an entry price). Positions
@@ -1601,6 +1684,221 @@ struct ChartView: View {
                              color: Theme.Color.danger)
                 }
         }
+    }
+
+    /// Resolves the bar index of the candle whose `bucketStart` is
+    /// closest to `date`. Returns nil when the candle list is empty.
+    private func barIndex(closestTo date: Date) -> Int? {
+        guard !candles.isEmpty else { return nil }
+        var best = 0
+        var bestDist = abs(candles[0].bucketStart.timeIntervalSince(date))
+        for i in 1..<candles.count {
+            let d = abs(candles[i].bucketStart.timeIntervalSince(date))
+            if d < bestDist { bestDist = d; best = i }
+        }
+        return best
+    }
+
+    /// Finds the bar index of the candle where `price` first fell inside
+    /// the candle's [low, high] range, searching backward from `fromIndex`.
+    /// Used to locate the open candle when we only have the entry price
+    /// (no open timestamp — typical for cTrader imports).
+    private func barIndexForEntryPrice(_ price: Double, before fromIndex: Int) -> Int? {
+        guard fromIndex >= 0, fromIndex < candles.count else { return nil }
+        for i in stride(from: fromIndex, through: 0, by: -1) {
+            let c = candles[i]
+            if price >= c.low && price <= c.high { return i }
+        }
+        return nil
+    }
+
+    /// TradingView-style journal overlay:
+    ///
+    ///   Green box  — entry → TP  (profit zone)
+    ///   Red box    — entry → SL  (loss zone)
+    ///   Both boxes span from the open candle to the close candle on X.
+    ///
+    ///   Solid entry rule across the trade span.
+    ///   ▲/▼ arrow at the open candle; ● exit dot at the close candle.
+    ///   Right-edge label tags for TP, SL, Entry prices.
+    ///   P/L badge anchored to the exit dot.
+    @ChartContentBuilder
+    private var journalMarks: some ChartContent {
+        ForEach(journalEntries) { je in
+            let sideColor: Color = je.side == .short ? Theme.Color.danger : Theme.Color.success
+
+            // ── Locate candle positions ───────────────────────────
+            let closeIdx: Int? = barIndex(closestTo: je.date)
+            let openIdx: Int? = {
+                if let od = je.openDate { return barIndex(closestTo: od) }
+                guard let ci = closeIdx, let ep = je.entry else { return nil }
+                return barIndexForEntryPrice(ep, before: ci)
+            }()
+
+            let xOpen  = Double(openIdx  ?? 0)
+            let xClose = Double(closeIdx ?? max(0, candles.count - 1))
+            let hasSpan = openIdx != nil && closeIdx != nil && openIdx != closeIdx
+
+            // ── Green box: entry → TP ─────────────────────────────
+            if let ep = je.entry, let tp = je.takeProfit, hasSpan {
+                RectangleMark(
+                    xStart: .value("Open",  xOpen),
+                    xEnd:   .value("Close", xClose),
+                    yStart: .value("Entry", ep),
+                    yEnd:   .value("TP",    tp)
+                )
+                .foregroundStyle(Theme.Color.success.opacity(0.12))
+
+                // TP border line
+                RuleMark(
+                    xStart: .value("Open",  xOpen),
+                    xEnd:   .value("Close", xClose),
+                    y:      .value("TP",    tp)
+                )
+                .foregroundStyle(Theme.Color.success.opacity(0.8))
+                .lineStyle(StrokeStyle(lineWidth: 1.2))
+                .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                    journalLevelTag(text: "TP  \(Self.priceShort(tp))",
+                                    bg: Theme.Color.success)
+                }
+            } else if let tp = je.takeProfit {
+                // No span — full-width dashed line
+                RuleMark(y: .value("TP", tp))
+                    .foregroundStyle(Theme.Color.success.opacity(0.7))
+                    .lineStyle(StrokeStyle(lineWidth: 1.0, dash: [4, 4]))
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        journalLevelTag(text: "TP  \(Self.priceShort(tp))",
+                                        bg: Theme.Color.success)
+                    }
+            }
+
+            // ── Red box: entry → SL ───────────────────────────────
+            if let ep = je.entry, let sl = je.stopLoss, hasSpan {
+                RectangleMark(
+                    xStart: .value("Open",  xOpen),
+                    xEnd:   .value("Close", xClose),
+                    yStart: .value("Entry", ep),
+                    yEnd:   .value("SL",    sl)
+                )
+                .foregroundStyle(Theme.Color.danger.opacity(0.12))
+
+                // SL border line
+                RuleMark(
+                    xStart: .value("Open",  xOpen),
+                    xEnd:   .value("Close", xClose),
+                    y:      .value("SL",    sl)
+                )
+                .foregroundStyle(Theme.Color.danger.opacity(0.8))
+                .lineStyle(StrokeStyle(lineWidth: 1.2))
+                .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                    journalLevelTag(text: "SL  \(Self.priceShort(sl))",
+                                    bg: Theme.Color.danger)
+                }
+            } else if let sl = je.stopLoss {
+                RuleMark(y: .value("SL", sl))
+                    .foregroundStyle(Theme.Color.danger.opacity(0.7))
+                    .lineStyle(StrokeStyle(lineWidth: 1.0, dash: [4, 4]))
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        journalLevelTag(text: "SL  \(Self.priceShort(sl))",
+                                        bg: Theme.Color.danger)
+                    }
+            }
+
+            // ── Entry solid rule across the trade span ────────────
+            if let ep = je.entry {
+                if hasSpan {
+                    RuleMark(
+                        xStart: .value("Open",  xOpen),
+                        xEnd:   .value("Close", xClose),
+                        y:      .value("Entry", ep)
+                    )
+                    .foregroundStyle(sideColor.opacity(0.95))
+                    .lineStyle(StrokeStyle(lineWidth: 1.6))
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        journalLevelTag(text: "Entry  \(Self.priceShort(ep))",
+                                        bg: sideColor)
+                    }
+                } else {
+                    RuleMark(y: .value("Entry", ep))
+                        .foregroundStyle(sideColor.opacity(0.85))
+                        .lineStyle(StrokeStyle(lineWidth: 1.4, dash: [3, 3]))
+                        .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                            journalLevelTag(text: "Entry  \(Self.priceShort(ep))",
+                                            bg: sideColor)
+                        }
+                }
+            }
+
+            // ── Open candle: entry arrow ▲/▼ ─────────────────────
+            if let ep = je.entry, let oi = openIdx {
+                let offset = (je.side == .long ? -1.0 : 1.0) * (ep * 0.0009)
+                PointMark(
+                    x: .value("Open bar",   Double(oi)),
+                    y: .value("Open price", ep + offset)
+                )
+                .symbolSize(55)
+                .foregroundStyle(sideColor)
+                .symbol {
+                    Image(systemName: je.side == .long
+                          ? "arrowtriangle.up.fill"
+                          : "arrowtriangle.down.fill")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(sideColor)
+                }
+                .annotation(position: je.side == .long ? .bottom : .top,
+                             alignment: .center, spacing: 1) {
+                    Text(je.side.label.uppercased())
+                        .font(.system(size: 7, weight: .black))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(Capsule().fill(sideColor))
+                }
+            }
+
+            // ── Close candle: exit dot + P/L badge ───────────────
+            if let ci = closeIdx {
+                let exitPrice = je.closePrice ?? je.entry ?? 0
+                let plColor = je.profitLoss >= 0 ? Theme.Color.success : Theme.Color.danger
+                PointMark(
+                    x: .value("Close bar",   Double(ci)),
+                    y: .value("Close price", exitPrice)
+                )
+                .symbolSize(48)
+                .foregroundStyle(plColor)
+                .symbol(.circle)
+                .annotation(position: je.side == .long ? .top : .bottom,
+                             alignment: .center, spacing: 2) {
+                    HStack(spacing: 3) {
+                        Text(String(format: "%+.2f", je.profitLoss))
+                            .font(.system(size: 8, weight: .bold).monospacedDigit())
+                            .foregroundStyle(plColor)
+                        Text(je.result.label.uppercased())
+                            .font(.system(size: 7, weight: .black))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 3).padding(.vertical, 1)
+                            .background(Capsule().fill(plColor))
+                    }
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Theme.Color.surface.opacity(0.9))
+                            .overlay(RoundedRectangle(cornerRadius: 4)
+                                .strokeBorder(plColor.opacity(0.4), lineWidth: 0.7))
+                    )
+                    .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+                }
+            }
+        }
+    }
+
+    /// Right-edge price tag for TP / SL / Entry lines — solid colour
+    /// background like TradingView's level labels.
+    private func journalLevelTag(text: String, bg: Color) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .bold).monospacedDigit())
+            .foregroundStyle(.white)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(RoundedRectangle(cornerRadius: 3).fill(bg.opacity(0.85)))
     }
 
     /// Entry-line colour keys to the trade's state: amber when
@@ -2395,6 +2693,11 @@ struct ChartView: View {
             if zone.low  < lo { lo = zone.low }
             if zone.high > hi { hi = zone.high }
         }
+        // Indicator FVG zones — fold both edges into the Y domain.
+        for zone in indicatorFvgZones {
+            if zone.low  < lo { lo = zone.low }
+            if zone.high > hi { hi = zone.high }
+        }
         // Order Block zones — fold both edges so a block above/below the
         // visible candles still draws against the chart border.
         for zone in orderBlockZones {
@@ -2446,6 +2749,14 @@ struct ChartView: View {
         // plot. fillPrice diverges from entry only on market orders.
         for t in trades {
             for v in [t.takeProfit, t.stopLoss, t.entry, t.fillPrice ?? t.entry] {
+                if v < lo { lo = v }
+                if v > hi { hi = v }
+            }
+        }
+        // Journal overlays — fold entry, TP, SL so the lines stay
+        // on-screen even when the position sits beyond visible candles.
+        for je in journalEntries {
+            for v in [je.entry, je.takeProfit, je.stopLoss].compactMap({ $0 }) {
                 if v < lo { lo = v }
                 if v > hi { hi = v }
             }

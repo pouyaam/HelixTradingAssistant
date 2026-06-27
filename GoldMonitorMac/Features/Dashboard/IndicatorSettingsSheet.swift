@@ -148,6 +148,21 @@ struct IndicatorSettingsSheet: View {
 
             Divider().background(Theme.Color.border)
 
+            section(title: "Fair Value Gap") {
+                doubleStepper(
+                    label: "Min. gap size %",
+                    value: $config.fvgThreshold,
+                    range: 0.0...5.0,
+                    step: 0.1
+                )
+                Toggle(isOn: $config.fvgShowMitigated) {
+                    checkboxLabel("Show mitigated gaps")
+                }
+                .toggleStyle(.checkbox)
+            }
+
+            Divider().background(Theme.Color.border)
+
             // Times shown match the baked presets in `TradingSessions.catalog`
             // (regular cash hours, each in its venue's own time zone).
             section(title: "Trading Sessions") {

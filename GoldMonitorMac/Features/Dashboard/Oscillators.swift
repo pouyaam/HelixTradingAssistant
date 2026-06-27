@@ -89,6 +89,13 @@ struct OscillatorConfig: Codable, Equatable {
     var nyAtrMult: Double = 1.0
     var nyAMOnly: Bool = true
 
+    // Fair Value Gap parameters (LuxAlgo port). `fvgThreshold` is the
+    // minimum gap size as a % of the gap floor (0 = no filter, the default).
+    // `fvgShowMitigated` keeps absorbed gaps visible at reduced opacity;
+    // when false they are removed from the chart once mitigated.
+    var fvgThreshold: Double = 0.0
+    var fvgShowMitigated: Bool = true
+
     // We decode every field with `decodeIfPresent` (see init(from:)) so
     // adding a field no longer requires bumping this key — an older
     // payload that predates the field just falls back to its default
@@ -126,6 +133,8 @@ struct OscillatorConfig: Codable, Equatable {
         sessShowNewYork    = try c.decodeIfPresent(Bool.self,   forKey: .sessShowNewYork)    ?? true
         nyAtrMult          = try c.decodeIfPresent(Double.self, forKey: .nyAtrMult)          ?? 1.0
         nyAMOnly           = try c.decodeIfPresent(Bool.self,   forKey: .nyAMOnly)           ?? true
+        fvgThreshold       = try c.decodeIfPresent(Double.self, forKey: .fvgThreshold)       ?? 0.0
+        fvgShowMitigated   = try c.decodeIfPresent(Bool.self,   forKey: .fvgShowMitigated)   ?? true
     }
 
     /// Whether the given `TradingSessions` preset id is toggled on. Used

@@ -55,6 +55,11 @@ final class AppState: ObservableObject {
     /// card with whichever row was last expanded.
     @Published var autoTraderInspectorPairID: String? = nil
 
+    /// Journal entry whose entry/TP/SL lines are currently pinned on
+    /// the chart. Set by JournalView's "Show on chart" button; cleared
+    /// when the user dismisses the overlay or switches pair/timeframe.
+    @Published var journalChartEntry: JournalEntry? = nil
+
     // ── AI analysis tabs (per pair) ────────────────────────────────
     /// Open analysis tabs per symbol — browser-style. Lazily seeded
     /// with one tab the first time a pair's page is shown. In-memory

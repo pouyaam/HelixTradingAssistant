@@ -35,6 +35,12 @@ struct JournalEntry: Identifiable, Codable, Equatable {
     var takeProfit: Double?
     var stopLoss: Double?
     var lots: Double?
+    /// When the trade was opened. Populated by cTrader imports; nil for
+    /// legacy entries or manual entries where only `date` (close time) is set.
+    var openDate: Date?
+    /// Actual closing price. Set by cTrader imports; nil for entries
+    /// where close price wasn't recorded.
+    var closePrice: Double?
 
     // ── Outcome ──────────────────────────────────────────────────
     var result: Result
@@ -120,6 +126,8 @@ struct JournalEntry: Identifiable, Codable, Equatable {
         takeProfit: Double? = nil,
         stopLoss: Double? = nil,
         lots: Double? = nil,
+        openDate: Date? = nil,
+        closePrice: Double? = nil,
         result: Result = .open,
         profitLoss: Double = 0,
         sourceHistoryEntryID: UUID? = nil,
@@ -140,6 +148,8 @@ struct JournalEntry: Identifiable, Codable, Equatable {
         self.takeProfit = takeProfit
         self.stopLoss = stopLoss
         self.lots = lots
+        self.openDate = openDate
+        self.closePrice = closePrice
         self.result = result
         self.profitLoss = profitLoss
         self.sourceHistoryEntryID = sourceHistoryEntryID
@@ -167,6 +177,8 @@ struct JournalEntry: Identifiable, Codable, Equatable {
         takeProfit = try c.decodeIfPresent(Double.self, forKey: .takeProfit)
         stopLoss = try c.decodeIfPresent(Double.self, forKey: .stopLoss)
         lots = try c.decodeIfPresent(Double.self, forKey: .lots)
+        openDate = try c.decodeIfPresent(Date.self, forKey: .openDate)
+        closePrice = try c.decodeIfPresent(Double.self, forKey: .closePrice)
         result = try c.decodeIfPresent(Result.self, forKey: .result) ?? .open
         profitLoss = try c.decodeIfPresent(Double.self, forKey: .profitLoss) ?? 0
         sourceHistoryEntryID = try c.decodeIfPresent(UUID.self, forKey: .sourceHistoryEntryID)

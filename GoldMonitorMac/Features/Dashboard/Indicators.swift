@@ -34,6 +34,12 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable {
     /// on 1m and 5m charts. The dashboard also turns the live day's plan
     /// into alerts + an activate-trade affordance.
     case nyOpenSetup
+    /// Fair Value Gap (FVG) detector — three-candle imbalance zones.
+    /// Renders as translucent green/red rectangles extending rightward
+    /// from the bar where the gap formed. Mitigated gaps (price closed
+    /// back inside) are kept at lower opacity with a dashed outline.
+    /// Ported from LuxAlgo's PineScript v5 FVG indicator (CC BY-NC-SA 4.0).
+    case fairValueGap
 
     var id: String { rawValue }
 
@@ -49,6 +55,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable {
         case .orderBlock:     return "Order Blocks"
         case .tradingSession: return "Trading Sessions"
         case .nyOpenSetup:    return "NY Open Setup"
+        case .fairValueGap:   return "Fair Value Gap"
         }
     }
 
@@ -75,6 +82,9 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable {
         // NY Open Setup colours its plan green/red by direction; the
         // Layers swatch is a neutral amber that reads as "the setup layer".
         case .nyOpenSetup: return Color(red: 0.95, green: 0.75, blue: 0.30) // amber
+        // FVG fills green/red per direction on the chart; the Layers swatch
+        // is a soft teal that reads as "imbalance / gap zones layer".
+        case .fairValueGap: return Color(red: 0.30, green: 0.80, blue: 0.75) // teal
         }
     }
 }
@@ -216,6 +226,9 @@ enum Indicators {
             // NY Open Setup renders as an OR box + FVG + plan lines in
             // ChartView's `setupMarks` (see `NYOpenSetup`), not a series.
             case .nyOpenSetup: pts = []
+            // FVG renders as zone rectangles in ChartView's `indicatorFvgMarks`
+            // (see `FairValueGap`), not a line series.
+            case .fairValueGap: pts = []
             }
             return pts.isEmpty ? nil : (kind, pts)
         }
