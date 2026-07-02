@@ -109,6 +109,7 @@ struct DrawingInspector: View {
         case .horizontalLine: return "minus"
         case .trendLine:      return "line.diagonal"
         case .rectangle:      return "rectangle"
+        case .volumeProfile:  return "chart.bar.xaxis.ascending"
         }
     }
 
@@ -117,6 +118,7 @@ struct DrawingInspector: View {
         case .horizontalLine: return "Horizontal"
         case .trendLine:      return "Trend line"
         case .rectangle:      return "Rectangle"
+        case .volumeProfile:  return "Vol Profile"
         }
     }
 

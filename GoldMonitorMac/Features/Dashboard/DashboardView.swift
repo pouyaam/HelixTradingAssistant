@@ -6,6 +6,7 @@ import Combine
 struct DashboardView: View {
     @EnvironmentObject private var app: AppState
     @EnvironmentObject private var yahoo: YahooScheduler
+    @EnvironmentObject private var notificationInbox: NotificationInbox
 
     // Persisted session state — every selection the user makes here gets
     // restored on relaunch. RawRepresentable<String> enums and primitive
@@ -46,6 +47,10 @@ struct DashboardView: View {
     @State private var oscillatorConfig: OscillatorConfig = .load()
     /// Indicator-settings sheet visibility.
     @State private var showIndicatorSettings: Bool = false
+    /// When non-nil the sheet scrolls to this section on open.
+    @State private var settingsFocusSection: String? = nil
+    /// Whether the chart-corner indicator legend is expanded.
+    @State private var indicatorLegendExpanded: Bool = true
     /// Support / Resistance levels the user has chosen to draw on the
     /// chart from an AI analysis. Cleared when the pair changes; kept
     /// across timeframe switches since levels are price-based, not
@@ -115,8 +120,15 @@ struct DashboardView: View {
     /// Receives the same yahoo / scheduler ticks the trade
     /// evaluator does and pops macOS notifications on hit.
     @StateObject private var alertStore = AlertStore()
+    /// Multi-chart split-screen state (layout + per-pane pair/timeframe/
+    /// indicator selections). `.single` (the default) means the grid is
+    /// off and `chartCard` renders the full-featured primary chart —
+    /// see the layout picker in `pairHeader` and the branch in `body`.
+    @StateObject private var multiChart = MultiChartLayoutStore()
     /// Drives the "set price alert" sheet from the chart header.
     @State private var showAlertSheet: Bool = false
+    /// Drives the risk calculator popover in the chart toolbar.
+    @State private var showRiskCalc: Bool = false
 
     /// TradingView-style Replay. Holds a single shared cursor `Date`
     /// the candle loader clips to, plus playback state. Ephemeral — see
@@ -373,7 +385,11 @@ struct DashboardView: View {
                     if !isChartFull {
                         pairHeader(pair)
                     }
-                    chartCard(pair)
+                    if multiChart.layout == .single {
+                        chartCard(pair)
+                    } else {
+                        ChartGridView(layoutStore: multiChart, indicatorConfig: oscillatorConfig, drawingStore: drawingStore)
+                    }
                 } else {
                     emptyState
                 }
@@ -441,6 +457,8 @@ struct DashboardView: View {
         // Confluence Trade Scanner after a trade closes without the user opening
         // the analysis page.
         .task {
+            alertStore.attach(inbox: notificationInbox)
+            alertStore.timeframeLabel = timeframe.rawValue
             autoTrader.candleLoader = { [weak app = self.app] pairID, tf in
                 guard app != nil else { return [] }
                 // Always live — the live trading engine must never see
@@ -455,9 +473,10 @@ struct DashboardView: View {
                 yahoo?.latestPrices[pairID]
             }
         }
-        .onChange(of: timeframe) { _ in
+        .onChange(of: timeframe) { newValue in
             xDomain = nil   // different bucket size ⇒ refit to data
             yDomain = nil   // drop the manual price scale too
+            alertStore.timeframeLabel = newValue.rawValue
             Task { await reloadCandles() }
             warmHistory()   // ensure this timeframe's deep series is filled
         }
@@ -506,8 +525,10 @@ struct DashboardView: View {
             // Persist on dismiss so the user's choice survives a relaunch
             // even if they close via clicking the backdrop / hitting Esc.
             oscillatorConfig.save()
+            settingsFocusSection = nil
         } content: {
-            IndicatorSettingsSheet(config: $oscillatorConfig)
+            IndicatorSettingsSheet(config: $oscillatorConfig,
+                                   focusSection: settingsFocusSection)
         }
         .sheet(item: $profileSheet) { mode in
             strategyProfileSheet(for: mode)
@@ -654,6 +675,8 @@ struct DashboardView: View {
 
                 Spacer()
 
+                layoutPickerButton(pair)
+
                 fetchTimer(for: pair)
 
                 refreshButton
@@ -686,6 +709,42 @@ struct DashboardView: View {
             intervalSeconds: yahoo.tickIntervalSeconds,
             isFetching: yahoo.isFetching
         )
+    }
+
+    /// Split-screen layout picker: switches the chart area between the
+    /// full-featured single chart (drawings, AI overlays, trades,
+    /// replay) and a 2/4-pane grid of independent, lightweight charts
+    /// (`ChartGridView`). Picking a non-single layout seeds any new
+    /// panes from the current pair. Stays visible regardless of which
+    /// mode is active — it's the only way back to `.single`.
+    private func layoutPickerButton(_ pair: TradingPair) -> some View {
+        Menu {
+            ForEach(ChartLayoutKind.allCases) { layout in
+                Button {
+                    // Defensive: a pane could be mid-fullscreen (which
+                    // drives this same flag) when the user jumps
+                    // straight to a different layout from the menu —
+                    // always land in a clean, non-fullscreen state.
+                    app.isChartFullscreen = false
+                    multiChart.setLayout(layout, defaultPairID: pair.id)
+                } label: {
+                    Label(layout.label, systemImage: multiChart.layout == layout
+                          ? "checkmark.circle.fill" : layout.icon)
+                }
+            }
+            if multiChart.layout != .single {
+                Divider()
+                Toggle("Sync symbol across panes", isOn: $multiChart.syncSymbol)
+            }
+        } label: {
+            Image(systemName: multiChart.layout.icon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .frame(width: 32, height: 32)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Chart layout")
     }
 
     /// Manual refresh — kicks the Yahoo scheduler to fetch a fresh
@@ -755,9 +814,11 @@ struct DashboardView: View {
                         analyzeButton
                         replayButton
                         alertButton
+                        riskCalcButton
                         autoTraderPill
                         toolbarDivider
                         indicatorMenu
+                        indicatorSettingsButton
                         layersButton
                         drawingToolbar
                         toolbarDivider
@@ -854,6 +915,14 @@ struct DashboardView: View {
                 // sits inside the plot area (overlay-position annotation)
                 // so it's safe to clip here.
                 .clipped()
+                // TradingView-style indicator legend — top-right of chart.
+                // Shows every active indicator/oscillator with a per-item
+                // gear button. Applied after .clipped() so it floats freely.
+                .overlay(alignment: .topTrailing) {
+                    indicatorLegendOverlay
+                        .padding(.top, 6)
+                        .padding(.trailing, 8)
+                }
                 // Floating chart controls — zoom in/out, reset zoom,
                 // maximise. Lives ON the chart (bottom-right) rather
                 // than in the top toolbar so the toolbar stays tight
@@ -1108,6 +1177,121 @@ struct DashboardView: View {
     /// on hover so the dot badge isn't the only feedback.
     private func activeCount(label n: Int) -> String {
         n == 0 ? "Indicators" : "Indicators · \(n) active"
+    }
+
+    /// Gear button that opens the indicator settings sheet directly —
+    /// no hunting through the f(x) menu's "Settings…" item.
+    private var indicatorSettingsButton: some View {
+        Button {
+            settingsFocusSection = nil
+            showIndicatorSettings = true
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .frame(width: 26, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface)
+                )
+        }
+        .buttonStyle(.plain)
+        .help("Indicator settings")
+    }
+
+    /// TradingView-style indicator legend floating in the chart's top-right
+    /// corner. Lists every active overlay and panel indicator with a gear
+    /// button per row. Collapse/expand with the chevron.
+    @ViewBuilder
+    private var indicatorLegendOverlay: some View {
+        let overlays = Array(enabledIndicators).sorted { $0.rawValue < $1.rawValue }
+        let panels   = Array(enabledOscillators).sorted { $0.rawValue < $1.rawValue }
+        guard !overlays.isEmpty || !panels.isEmpty else { return AnyView(EmptyView()) }
+        return AnyView(
+            VStack(alignment: .trailing, spacing: 2) {
+                // Collapse / expand toggle
+                Button {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                        indicatorLegendExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        if indicatorLegendExpanded {
+                            Text("Indicators")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Theme.Color.textMuted)
+                        }
+                        Image(systemName: indicatorLegendExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(Theme.Color.textMuted)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(Theme.Color.surface.opacity(0.85))
+                    )
+                }
+                .buttonStyle(.plain)
+
+                if indicatorLegendExpanded {
+                    VStack(alignment: .trailing, spacing: 1) {
+                        ForEach(overlays) { kind in
+                            legendRow(
+                                label: kind.label,
+                                color: kind.color,
+                                settingsSection: kind.settingsSection
+                            )
+                        }
+                        ForEach(panels) { kind in
+                            legendRow(
+                                label: kind.displayName(config: oscillatorConfig),
+                                color: .white.opacity(0.6),
+                                settingsSection: kind.settingsSection
+                            )
+                        }
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func legendRow(label: String, color: Color, settingsSection: String?) -> some View {
+        HStack(spacing: 5) {
+            // Per-indicator gear button — opens settings scrolled to that section.
+            Button {
+                settingsFocusSection = settingsSection
+                showIndicatorSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .frame(width: 16, height: 16)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Theme.Color.surface.opacity(0.7))
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("Settings for \(label)")
+
+            Text(label)
+                .font(.system(size: 10, weight: .medium).monospacedDigit())
+                .foregroundStyle(color)
+                .lineLimit(1)
+
+            // Color swatch
+            RoundedRectangle(cornerRadius: 2)
+                .fill(color)
+                .frame(width: 12, height: 3)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Theme.Color.surface.opacity(0.75))
+        )
     }
 
     /// Two-way binding into the oscillator set. Same pattern as
@@ -1507,6 +1691,8 @@ struct DashboardView: View {
             return "Trend line"
         case .rectangle:
             return "Rectangle"
+        case .volumeProfile:
+            return "Vol Profile"
         }
     }
 
@@ -1791,6 +1977,25 @@ struct DashboardView: View {
         .help(armed > 0
               ? "\(armed) armed alert\(armed == 1 ? "" : "s") on this pair — click to add another"
               : "Create a price alert")
+    }
+
+    private var riskCalcButton: some View {
+        Button {
+            showRiskCalc.toggle()
+        } label: {
+            Image(systemName: "percent")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(showRiskCalc ? Theme.Color.accentStart : Theme.Color.textSecondary)
+                .frame(width: 28, height: 26)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface))
+                .overlay(RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(showRiskCalc ? Theme.Color.accentStart.opacity(0.5) : Color.clear, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help("Risk / position size calculator")
+        .popover(isPresented: $showRiskCalc, arrowEdge: .top) {
+            RiskCalculatorView()
+        }
     }
 
     /// Inline status strip rendered above the chart header when
@@ -2258,6 +2463,7 @@ struct DashboardView: View {
                 let livePeek = yahoo.latestPrices[pairID]
                 alertStore.evaluateRSI(r, pricePeek: livePeek, for: pairID)
             }
+            notifyOrderBlockEvents(result, pairID: pairID)
         }
     }
 
@@ -2291,6 +2497,51 @@ struct DashboardView: View {
         followLatestIfPinned(priorCount: priorCount, newCount: merged.count)
         if let r = Oscillators.rsi(merged, period: oscillatorConfig.rsiPeriod).last?.value {
             alertStore.evaluateRSI(r, pricePeek: yahoo.latestPrices[pairID], for: pairID)
+        }
+        notifyOrderBlockEvents(merged, pairID: pairID)
+    }
+
+    /// Feeds the freshest Order Block / Steroid Order Block zones to
+    /// the alert evaluator so it can fire a notification on
+    /// appear/retest/exhaust transitions. Gated behind each
+    /// indicator's own notify toggle in `OscillatorConfig` — opt-in,
+    /// so users who don't have it turned on pay no extra compute.
+    /// Mirrors the RSI-alert feed just above.
+    private func notifyOrderBlockEvents(_ candles: [Candle], pairID: String) {
+        guard oscillatorConfig.obNotifyEvents || oscillatorConfig.sobNotifyEvents else { return }
+        let pairLabel = app.pairs.first(where: { $0.id == pairID })?.name ?? pairID
+
+        // Each indicator's full-history `compute` runs on its own
+        // background task — same reasoning as `ChartDerivedCache`: this
+        // is real work (order-block run-length scans, volume-profile
+        // bucketing) and must never block the main thread just because
+        // the notify toggle happens to be on.
+        if oscillatorConfig.obNotifyEvents {
+            let config = oscillatorConfig
+            Task.detached(priority: .utility) {
+                let zones = OrderBlocks.compute(
+                    candles,
+                    periods: config.obPeriods,
+                    threshold: config.obThreshold,
+                    useWicks: config.obUseWicks,
+                    detectSteroids: config.obDetectSteroids
+                )
+                await self.alertStore.evaluateOrderBlocks(zones, pairID: pairID, pairLabel: pairLabel)
+            }
+        }
+        if oscillatorConfig.sobNotifyEvents {
+            let config = oscillatorConfig
+            Task.detached(priority: .utility) {
+                let zones = SteroidOrderBlocks.compute(
+                    candles,
+                    periods: config.sobPeriods,
+                    threshold: config.sobThreshold,
+                    useWicks: config.sobUseWicks,
+                    detectSteroids: config.sobDetectSteroids,
+                    volumeMultiplier: config.sobVolumeMultiplier
+                )
+                await self.alertStore.evaluateSteroidOrderBlocks(zones, pairID: pairID, pairLabel: pairLabel)
+            }
         }
     }
 
@@ -2372,12 +2623,7 @@ struct DashboardView: View {
     /// (rather than folding from 5m) is what lets Replay reach years
     /// back instead of ~2 months.
     private func sourceTimeframeTag(for tf: Timeframe) -> String {
-        switch tf {
-        case .m1:             return "1m"
-        case .m5, .m15, .m30: return "5m"
-        case .h1, .h4:        return "1h"
-        case .d1:             return "1d"
-        }
+        OHLCCandleLoader.sourceTimeframeTag(for: tf)
     }
 
     /// True while Yahoo is fetching the full history for the source
@@ -2412,35 +2658,10 @@ struct DashboardView: View {
         until: Date,
         dropClosedDays: Bool
     ) -> [Candle] {
-        let sourceTF = sourceTimeframeTag(for: tf)
-        let needsFold = sourceTF != tf.rawValue
-        do {
-            let bars = try repo.read(
-                pairID: pairID,
-                timeframe: sourceTF,
-                since: since,
-                until: until,
-                dropClosedDays: dropClosedDays
-            )
-            if !bars.isEmpty {
-                return needsFold ? OHLCAggregator.fold(bars: bars, into: tf)
-                                 : bars.map { $0.toCandle() }
-            }
-            // Native 1h/1d series missing — older DB from before they
-            // were ingested, or the bootstrap pull hasn't landed yet.
-            // Fall back to folding from 5m so the chart never blanks
-            // out (just shallower history until the next bootstrap).
-            if sourceTF == "1h" || sourceTF == "1d" {
-                let fallback = try repo.read(
-                    pairID: pairID, timeframe: "5m",
-                    since: since, until: until, dropClosedDays: dropClosedDays
-                )
-                return OHLCAggregator.fold(bars: fallback, into: tf)
-            }
-            return []
-        } catch {
-            return []
-        }
+        OHLCCandleLoader.load(
+            repo: repo, pairID: pairID, tf: tf,
+            since: since, until: until, dropClosedDays: dropClosedDays
+        )
     }
 
     // ── Replay stepping ────────────────────────────────────────────

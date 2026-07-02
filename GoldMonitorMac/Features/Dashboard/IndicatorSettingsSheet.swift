@@ -6,6 +6,9 @@ import SwiftUI
 /// the bound config; the parent persists on dismiss.
 struct IndicatorSettingsSheet: View {
     @Binding var config: OscillatorConfig
+    /// When set, the sheet scrolls to this section on appear so the
+    /// user lands directly on the tunables for the indicator they tapped.
+    var focusSection: String? = nil
     @Environment(\.dismiss) private var dismiss
 
     /// Locally captured snapshot — if the user hits "Cancel" we restore
@@ -15,7 +18,7 @@ struct IndicatorSettingsSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
             HStack {
-                Text("Indicator settings")
+                Text(focusSection.map { "\($0) settings" } ?? "Indicator settings")
                     .font(.system(size: 16, weight: .bold))
                     .foregroundStyle(Theme.Color.textPrimary)
                 Spacer()
@@ -38,10 +41,20 @@ struct IndicatorSettingsSheet: View {
             // Scrollable so the sheet stays usable on a short display as
             // the indicator list grows — the header above and the Save /
             // Restore row below stay pinned outside this region.
-            ScrollView {
-                settingsSections
+            ScrollViewReader { proxy in
+                ScrollView {
+                    settingsSections
+                }
+                .frame(maxHeight: 520)
+                .onAppear {
+                    if let section = focusSection {
+                        // Slight delay so the scroll view has laid out.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            withAnimation { proxy.scrollTo(section, anchor: .top) }
+                        }
+                    }
+                }
             }
-            .frame(maxHeight: 520)
 
             HStack {
                 Button("Restore defaults") {
@@ -144,6 +157,52 @@ struct IndicatorSettingsSheet: View {
                     checkboxLabel("Use whole high/low range")
                 }
                 .toggleStyle(.checkbox)
+                Toggle(isOn: $config.obShowExhausted) {
+                    checkboxLabel("Show exhausted blocks")
+                }
+                .toggleStyle(.checkbox)
+                Toggle(isOn: $config.obDetectSteroids) {
+                    checkboxLabel("Filter by volume (Steroids)")
+                }
+                .toggleStyle(.checkbox)
+                Toggle(isOn: $config.obNotifyEvents) {
+                    checkboxLabel("Notify on appear / retest / exhaust")
+                }
+                .toggleStyle(.checkbox)
+            }
+
+            Divider().background(Theme.Color.border)
+
+            section(title: "Steroid Order Blocks") {
+                periodStepper(label: "Run length (periods)", value: $config.sobPeriods, range: 1...20)
+                doubleStepper(
+                    label: "Min. % move",
+                    value: $config.sobThreshold,
+                    range: 0.0...10.0,
+                    step: 0.1
+                )
+                Toggle(isOn: $config.sobUseWicks) {
+                    checkboxLabel("Use whole high/low range")
+                }
+                .toggleStyle(.checkbox)
+                doubleStepper(
+                    label: "Volume multiplier",
+                    value: $config.sobVolumeMultiplier,
+                    range: 0.5...3.0,
+                    step: 0.1
+                )
+                Toggle(isOn: $config.sobShowExhausted) {
+                    checkboxLabel("Show exhausted blocks")
+                }
+                .toggleStyle(.checkbox)
+                Toggle(isOn: $config.sobDetectSteroids) {
+                    checkboxLabel("Filter by volume (Steroids)")
+                }
+                .toggleStyle(.checkbox)
+                Toggle(isOn: $config.sobNotifyEvents) {
+                    checkboxLabel("Notify on appear / retest / exhaust")
+                }
+                .toggleStyle(.checkbox)
             }
 
             Divider().background(Theme.Color.border)
@@ -238,6 +297,7 @@ struct IndicatorSettingsSheet: View {
                 .font(.system(size: 11, weight: .bold))
                 .tracking(0.6)
                 .foregroundStyle(Theme.Color.textMuted)
+                .id(title)  // anchor for ScrollViewReader scroll-to
             body()
         }
     }
@@ -276,7 +336,6 @@ struct IndicatorSettingsSheet: View {
                 .frame(minWidth: 36, alignment: .trailing)
             Stepper("", value: value, in: range, step: step)
                 .labelsHidden()
-                .controlSize(.small)
         }
     }
 }

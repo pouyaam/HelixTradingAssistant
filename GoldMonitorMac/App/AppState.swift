@@ -135,6 +135,7 @@ final class AppState: ObservableObject {
 
     // ── Database lifecycle ────────────────────────────────────────
     @Published private(set) var database: AppDatabase?
+    @Published var scannerStore: ScannerStore?
 
     /// Static pair catalog. The open-source build doesn't fetch a
     /// pair list from anywhere — the YahooScheduler / TwelveData
@@ -150,10 +151,11 @@ final class AppState: ObservableObject {
     /// Open (or create) the SQLite DB at its canonical location and
     /// run schema migrations. Called once from the app's `.task`
     /// block.
-    func bootDatabase() throws {
+    @MainActor func bootDatabase(notificationInbox: NotificationInbox) throws {
         let url = try AppDatabase.defaultURL()
         let db = try AppDatabase(url: url)
         self.database = db
+        self.scannerStore = ScannerStore(database: db, pairs: self.pairs, notificationInbox: notificationInbox)
         // Seed the selection if there's nothing saved yet. We don't
         // need to re-fetch pairs — the catalog is static.
         if selectedPairID == nil, let first = pairs.first {
@@ -169,9 +171,11 @@ final class AppState: ObservableObject {
 /// The sidebar's top-level navigation entries.
 enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     case dashboard
+    case scanner
     case news
     case portfolio
     case journal
+    case inbox
     case settings
 
     var id: String { rawValue }
@@ -179,9 +183,11 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     var label: String {
         switch self {
         case .dashboard: return "Dashboard"
+        case .scanner:   return "Scanner"
         case .news:      return "News"
         case .portfolio: return "Portfolio"
         case .journal:   return "Journal"
+        case .inbox:     return "Inbox"
         case .settings:  return "Settings"
         }
     }
@@ -189,9 +195,11 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     var symbol: String {
         switch self {
         case .dashboard: return "chart.line.uptrend.xyaxis.circle.fill"
+        case .scanner:   return "scope"
         case .news:      return "newspaper.fill"
         case .portfolio: return "briefcase.fill"
         case .journal:   return "book.closed.fill"
+        case .inbox:     return "bell.fill"
         case .settings:  return "gearshape.fill"
         }
     }

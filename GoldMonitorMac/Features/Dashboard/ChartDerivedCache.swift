@@ -1,8 +1,10 @@
 import Foundation
+import Combine
 
 /// Per-chart memoization of the expensive, *data-derived* arrays:
-/// Heikin-Ashi display candles, indicator series, UT Bot output, and
-/// oscillator points.
+/// Heikin-Ashi display candles, indicator series, UT Bot output, Order
+/// Block / FVG / Trading Session / NY Open Setup zones, and oscillator
+/// points.
 ///
 /// Why this exists: these all depend only on the candle data + indicator
 /// settings — NOT on the visible window. During a pan/zoom only
@@ -12,18 +14,79 @@ import Foundation
 /// away. On deep history that's megabytes of transient allocations per
 /// frame — the main-thread churn that makes panning feel laggy.
 ///
-/// We key each result on a cheap signature of its inputs and recompute
-/// only when that signature actually changes (data reload, the 1 Hz
-/// live-tick trailing update, an indicator toggle, a settings tweak).
+/// We key each result on a cheap signature of its inputs and only
+/// recompute when that signature actually changes (data reload, the
+/// 1 Hz live-tick trailing update, an indicator toggle, a settings
+/// tweak). On a signature change we do NOT block `body` waiting for the
+/// fresh value — Order Blocks / NY Open Setup / MACD etc. can take real
+/// milliseconds on years of 1-minute history, and doing that inline on
+/// the main thread is exactly what made the chart feel laggy. Instead
+/// each indicator gets its own background `Task` (Swift's cooperative
+/// thread pool — the structured-concurrency equivalent of "its own
+/// thread", and genuinely concurrent across indicators since they land
+/// on different pool threads): `body` reads the previous — possibly
+/// stale — value immediately, and the view redraws once the task lands
+/// and publishes the fresh one. The candles themselves always render
+/// immediately; only the overlay/oscillator math trails behind by a
+/// frame or two on a big recompute.
 ///
-/// Held as `@State` in the owning view so it survives the view struct
-/// being re-created on each render. It is a plain class (deliberately
-/// NOT `ObservableObject`): we mutate it as a read-through cache during
-/// `body` evaluation, which is safe precisely because it publishes
-/// nothing — mutating it can't trigger another invalidation pass.
-final class ChartDerivedCache {
+/// `@StateObject` in the owning view (`ChartView`, `OscillatorPanel`) so
+/// it survives the view struct being re-created on each render AND so
+/// `objectWillChange` (fired when a background task publishes a fresh
+/// value) actually triggers a redraw.
+@MainActor
+final class ChartDerivedCache: ObservableObject {
+
+    /// One async-memoized slot: `signature` is the last input we
+    /// computed for, `value` is the most recent result (possibly
+    /// stale while a fresh compute is in flight). Marked
+    /// `@unchecked Sendable` because every mutation happens on
+    /// `MainActor` (see `resolve`) — the class itself is never
+    /// touched concurrently.
+    private final class Slot<Sig: Equatable, Value>: @unchecked Sendable {
+        var signature: Sig?
+        var value: Value
+        var task: Task<Void, Never>?
+        init(_ initial: Value) { value = initial }
+    }
+
+    /// Fast path: `signature` unchanged ⇒ return the cached value
+    /// synchronously (a couple of `Equatable` field comparisons — this
+    /// is what keeps pan/zoom cheap). Slow path: `signature` changed ⇒
+    /// cancel any in-flight recompute for this slot, kick off a new one
+    /// on a background `Task`, and return the previous value right
+    /// away so `body` never blocks. The task publishes its result via
+    /// `objectWillChange` when it lands, which redraws the chart with
+    /// the fresh data.
+    ///
+    /// `compute` must be a pure function over value types — every call
+    /// site here is (candles, config) → derived array, so that always
+    /// holds.
+    private func resolve<Sig: Equatable, Value>(
+        _ slot: Slot<Sig, Value>,
+        signature: Sig,
+        compute: @escaping @Sendable () -> Value
+    ) -> Value {
+        guard slot.signature != signature else { return slot.value }
+        slot.task?.cancel()
+        slot.task = Task.detached(priority: .userInitiated) { [weak self] in
+            let fresh = compute()
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                self.objectWillChange.send()
+                slot.value = fresh
+                slot.signature = signature
+            }
+        }
+        return slot.value
+    }
 
     // ── Display candles (Heikin-Ashi + live-price patch) ──────────────
+    //
+    // Deliberately left synchronous — it's a cheap O(n) transform and
+    // the chart needs it immediately (deferring it would flash the
+    // wrong candle shape on every live tick).
 
     private struct DisplaySig: Equatable {
         let count: Int
@@ -86,8 +149,7 @@ final class ChartDerivedCache {
         let lastClose: Double
         let enabled: Set<IndicatorKind>
     }
-    private var indicatorSig: IndicatorSig?
-    private var indicatorCache: [(kind: IndicatorKind, points: [IndicatorPoint])] = []
+    private let indicatorSlot = Slot<IndicatorSig, [(kind: IndicatorKind, points: [IndicatorPoint])]>([])
 
     func indicators(enabled: Set<IndicatorKind>, candles: [Candle])
         -> [(kind: IndicatorKind, points: [IndicatorPoint])]
@@ -99,11 +161,9 @@ final class ChartDerivedCache {
             lastClose: candles.last?.close ?? 0,
             enabled: enabled
         )
-        if sig == indicatorSig { return indicatorCache }
-        let result = Indicators.compute(enabled, candles: candles)
-        indicatorSig = sig
-        indicatorCache = result
-        return result
+        return resolve(indicatorSlot, signature: sig) {
+            Indicators.compute(enabled, candles: candles)
+        }
     }
 
     // ── UT Bot ────────────────────────────────────────────────────────
@@ -117,8 +177,7 @@ final class ChartDerivedCache {
         let atrPeriod: Int
         let useHeikinAshi: Bool
     }
-    private var utSig: UTSig?
-    private var utCache: UTBot.Output?
+    private let utSlot = Slot<UTSig, UTBot.Output>(UTBot.Output(trailingStop: [], positions: [], signals: []))
 
     func utBot(candles: [Candle], keyValue: Double, atrPeriod: Int, useHeikinAshi: Bool) -> UTBot.Output {
         let sig = UTSig(
@@ -130,11 +189,9 @@ final class ChartDerivedCache {
             atrPeriod: atrPeriod,
             useHeikinAshi: useHeikinAshi
         )
-        if sig == utSig, let cached = utCache { return cached }
-        let result = UTBot.compute(candles, keyValue: keyValue, atrPeriod: atrPeriod, useHeikinAshi: useHeikinAshi)
-        utSig = sig
-        utCache = result
-        return result
+        return resolve(utSlot, signature: sig) {
+            UTBot.compute(candles, keyValue: keyValue, atrPeriod: atrPeriod, useHeikinAshi: useHeikinAshi)
+        }
     }
 
     // ── Order Blocks ────────────────────────────────────────────────
@@ -147,11 +204,17 @@ final class ChartDerivedCache {
         let periods: Int
         let threshold: Double
         let useWicks: Bool
+        let detectSteroids: Bool
     }
-    private var obSig: OBSig?
-    private var obCache: [OrderBlocks.Zone] = []
+    private let obSlot = Slot<OBSig, [OrderBlocks.Zone]>([])
 
-    func orderBlocks(candles: [Candle], periods: Int, threshold: Double, useWicks: Bool) -> [OrderBlocks.Zone] {
+    func orderBlocks(
+        candles: [Candle],
+        periods: Int,
+        threshold: Double,
+        useWicks: Bool,
+        detectSteroids: Bool
+    ) -> [OrderBlocks.Zone] {
         let sig = OBSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
@@ -159,13 +222,64 @@ final class ChartDerivedCache {
             lastClose: candles.last?.close ?? 0,
             periods: periods,
             threshold: threshold,
-            useWicks: useWicks
+            useWicks: useWicks,
+            detectSteroids: detectSteroids
         )
-        if sig == obSig { return obCache }
-        let result = OrderBlocks.compute(candles, periods: periods, threshold: threshold, useWicks: useWicks)
-        obSig = sig
-        obCache = result
-        return result
+        return resolve(obSlot, signature: sig) {
+            OrderBlocks.compute(
+                candles,
+                periods: periods,
+                threshold: threshold,
+                useWicks: useWicks,
+                detectSteroids: detectSteroids
+            )
+        }
+    }
+
+    // ── Steroid Order Blocks ─────────────────────────────────────────
+
+    private struct SteroidOBSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let lastClose: Double
+        let periods: Int
+        let threshold: Double
+        let useWicks: Bool
+        let volumeMultiplier: Double
+        let detectSteroids: Bool
+    }
+    private let sobSlot = Slot<SteroidOBSig, [SteroidOrderBlocks.Zone]>([])
+
+    func steroidOrderBlocks(
+        candles: [Candle],
+        periods: Int,
+        threshold: Double,
+        useWicks: Bool,
+        volumeMultiplier: Double,
+        detectSteroids: Bool
+    ) -> [SteroidOrderBlocks.Zone] {
+        let sig = SteroidOBSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
+            lastClose: candles.last?.close ?? 0,
+            periods: periods,
+            threshold: threshold,
+            useWicks: useWicks,
+            volumeMultiplier: volumeMultiplier,
+            detectSteroids: detectSteroids
+        )
+        return resolve(sobSlot, signature: sig) {
+            SteroidOrderBlocks.compute(
+                candles,
+                periods: periods,
+                threshold: threshold,
+                useWicks: useWicks,
+                detectSteroids: detectSteroids,
+                volumeMultiplier: volumeMultiplier
+            )
+        }
     }
 
     // ── Fair Value Gap ────────────────────────────────────────────────
@@ -177,8 +291,7 @@ final class ChartDerivedCache {
         let lastClose: Double
         let threshold: Double
     }
-    private var fvgSig: FVGSig?
-    private var fvgCache: [FairValueGap.Zone] = []
+    private let fvgSlot = Slot<FVGSig, [FairValueGap.Zone]>([])
 
     func fairValueGaps(candles: [Candle], threshold: Double) -> [FairValueGap.Zone] {
         let sig = FVGSig(
@@ -188,11 +301,9 @@ final class ChartDerivedCache {
             lastClose: candles.last?.close ?? 0,
             threshold: threshold
         )
-        if sig == fvgSig { return fvgCache }
-        let result = FairValueGap.compute(candles, threshold: threshold)
-        fvgSig = sig
-        fvgCache = result
-        return result
+        return resolve(fvgSlot, signature: sig) {
+            FairValueGap.compute(candles, threshold: threshold)
+        }
     }
 
     // ── Trading Sessions ──────────────────────────────────────────────
@@ -203,8 +314,7 @@ final class ChartDerivedCache {
         let lastTS: TimeInterval
         let lastClose: Double
     }
-    private var sessionSig: SessionSig?
-    private var sessionCache: [TradingSessions.SessionRun] = []
+    private let sessionSlot = Slot<SessionSig, [TradingSessions.SessionRun]>([])
 
     /// Memoized session runs over the full catalog. Depends only on the
     /// candle data — *which* presets are shown (and which lines draw) is
@@ -217,11 +327,9 @@ final class ChartDerivedCache {
             lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
             lastClose: candles.last?.close ?? 0
         )
-        if sig == sessionSig { return sessionCache }
-        let result = TradingSessions.compute(candles)
-        sessionSig = sig
-        sessionCache = result
-        return result
+        return resolve(sessionSlot, signature: sig) {
+            TradingSessions.compute(candles)
+        }
     }
 
     // ── NY Open Setup ─────────────────────────────────────────────────
@@ -236,8 +344,7 @@ final class ChartDerivedCache {
         let atrMult: Double
         let amOnly: Bool
     }
-    private var nySetupSig: NYSetupSig?
-    private var nySetupCache: [NYOpenSetup.Result] = []
+    private let nySetupSlot = Slot<NYSetupSig, [NYOpenSetup.Result]>([])
 
     /// Memoized NY Open Setup detection. Folds the last bar's high/low
     /// into the signature (not just close) so the live in-progress bar
@@ -255,14 +362,17 @@ final class ChartDerivedCache {
             atrMult: atrMult,
             amOnly: amOnly
         )
-        if sig == nySetupSig { return nySetupCache }
-        let result = NYOpenSetup.compute(candles, atrMultiple: atrMult, amOnly: amOnly)
-        nySetupSig = sig
-        nySetupCache = result
-        return result
+        return resolve(nySetupSlot, signature: sig) {
+            NYOpenSetup.compute(candles, atrMultiple: atrMult, amOnly: amOnly)
+        }
     }
 
     // ── Oscillator points (RSI / MACD / Stochastic) ───────────────────
+    //
+    // Each `OscillatorPanel` owns its own `ChartDerivedCache` instance
+    // scoped to a single `OscillatorKind`, so this slot is never
+    // multiplexed across kinds within one cache — safe to key on the
+    // scalar config fields alone.
 
     private struct OscSig: Equatable {
         let kind: OscillatorKind
@@ -277,8 +387,7 @@ final class ChartDerivedCache {
         let stochK: Int
         let stochD: Int
     }
-    private var oscSig: OscSig?
-    private var oscCache: [IndicatorPoint] = []
+    private let oscSlot = Slot<OscSig, [IndicatorPoint]>([])
 
     func oscillatorPoints(kind: OscillatorKind, candles: [Candle], config: OscillatorConfig) -> [IndicatorPoint] {
         let sig = OscSig(
@@ -294,19 +403,16 @@ final class ChartDerivedCache {
             stochK: config.stochK,
             stochD: config.stochD
         )
-        if sig == oscSig { return oscCache }
-        let result: [IndicatorPoint]
-        switch kind {
-        case .rsi:
-            result = Oscillators.rsi(candles, period: config.rsiPeriod)
-        case .macd:
-            result = Oscillators.macd(candles, fast: config.macdFast,
-                                      slow: config.macdSlow, signal: config.macdSignal)
-        case .stochastic:
-            result = Oscillators.stochastic(candles, kPeriod: config.stochK, dPeriod: config.stochD)
+        return resolve(oscSlot, signature: sig) {
+            switch kind {
+            case .rsi:
+                return Oscillators.rsi(candles, period: config.rsiPeriod)
+            case .macd:
+                return Oscillators.macd(candles, fast: config.macdFast,
+                                         slow: config.macdSlow, signal: config.macdSignal)
+            case .stochastic:
+                return Oscillators.stochastic(candles, kPeriod: config.stochK, dPeriod: config.stochD)
+            }
         }
-        oscSig = sig
-        oscCache = result
-        return result
     }
 }

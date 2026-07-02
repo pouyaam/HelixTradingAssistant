@@ -18,8 +18,11 @@ struct OscillatorPanel: View {
 
     /// Memoizes this panel's oscillator computation so a pan/zoom (which
     /// only changes `xDomain`) doesn't re-run RSI/MACD/Stoch over the
-    /// full history every frame. See `ChartDerivedCache`.
-    @State private var derived = ChartDerivedCache()
+    /// full history every frame, and runs the recompute on a background
+    /// `Task` so it never blocks the UI. `@StateObject` so a background
+    /// task's `objectWillChange` actually triggers a redraw. See
+    /// `ChartDerivedCache`.
+    @StateObject private var derived = ChartDerivedCache()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {

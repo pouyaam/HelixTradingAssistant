@@ -13,6 +13,7 @@ struct DataSourcesCard: View {
     @State private var claudePathDraft: String = ""
     @State private var goldSourceDraft: GoldDataSource = .twelveData
     @State private var farazCookieDraft: String = ""
+    @State private var farazAPIURLDraft: String = ""
     @State private var isDirty: Bool = false
     @State private var savedFlash: Bool = false
 
@@ -63,6 +64,19 @@ struct DataSourcesCard: View {
                     .font(.system(size: 12).monospaced())
                     .onChange(of: farazCookieDraft) { _ in isDirty = true }
                 Text("In a logged-in faraz.io tab open DevTools → Network → any request → Headers, copy the full Cookie value and paste it here. Polled every 10s. Drives gold + BTC/SOL/ETH from Faraz. Changing the source clears those pairs' stored bars and refetches.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+
+                Text("FARAZ API BASE URL")
+                    .font(.system(size: 9, weight: .bold))
+                    .tracking(0.8)
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .padding(.top, 2)
+                TextField(DataSourceConfig.defaultFarazAPIURL, text: $farazAPIURLDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12).monospaced())
+                    .onChange(of: farazAPIURLDraft) { _ in isDirty = true }
+                Text("Base URL for the Faraz service. Leave blank to use the default (\(DataSourceConfig.defaultFarazAPIURL)). Change this only if your Faraz instance is hosted at a custom domain.")
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.Color.textMuted)
             } else {
@@ -176,6 +190,7 @@ struct DataSourcesCard: View {
         claudePathDraft    = dataConfig.claudeBinaryPath
         goldSourceDraft    = dataConfig.goldSource
         farazCookieDraft   = dataConfig.farazCookie
+        farazAPIURLDraft   = dataConfig.farazAPIURL == DataSourceConfig.defaultFarazAPIURL ? "" : dataConfig.farazAPIURL
         isDirty = false
     }
 
@@ -187,7 +202,7 @@ struct DataSourcesCard: View {
         )
         // Set the gold source last: its publish is what triggers the
         // scheduler's clear-and-refetch, and by now the cookie is saved.
-        dataConfig.updateGoldSource(goldSourceDraft, farazCookie: farazCookieDraft)
+        dataConfig.updateGoldSource(goldSourceDraft, farazCookie: farazCookieDraft, farazAPIURL: farazAPIURLDraft)
         isDirty = false
         savedFlash = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {

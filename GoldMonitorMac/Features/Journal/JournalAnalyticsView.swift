@@ -66,6 +66,11 @@ struct JournalAnalyticsView: View {
                     winRateChart(data)
                 }
                 .frame(height: 160)
+
+                let zones = priceZoneStats
+                if !zones.isEmpty {
+                    priceZoneTable(zones)
+                }
             }
         )
     }
@@ -292,4 +297,116 @@ struct JournalAnalyticsView: View {
         f.dateFormat = "MMM d"
         return f
     }()
+
+    // ── 4 — Price zone win-rate table ─────────────────────────────
+
+    struct ZoneStat: Identifiable {
+        let label: String       // e.g. "3050–3075"
+        let lo: Double
+        let trades: Int
+        let wins: Int
+        let losses: Int
+        let net: Double
+        var id: String { label }
+        var winRate: Double { (wins + losses) == 0 ? 0 : Double(wins) / Double(wins + losses) }
+    }
+
+    /// Bucket entries by their entry price into 25-point ranges.
+    /// Only entries that have an entry price are included.
+    private var priceZoneStats: [ZoneStat] {
+        let withPrice = entries.filter { $0.entry != nil }
+        guard withPrice.count >= 3 else { return [] }
+
+        let bucketSize: Double = 25
+        var map: [Double: [JournalEntry]] = [:]
+        for e in withPrice {
+            guard let ep = e.entry else { continue }
+            let bucket = floor(ep / bucketSize) * bucketSize
+            map[bucket, default: []].append(e)
+        }
+        return map
+            .sorted { $0.key < $1.key }
+            .compactMap { (lo, es) -> ZoneStat? in
+                guard es.count >= 2 else { return nil } // skip buckets with only 1 trade
+                let wins   = es.filter { $0.result == .win }.count
+                let losses = es.filter { $0.result == .loss }.count
+                let net    = es.reduce(0.0) { $0 + $1.profitLoss }
+                let label  = "\(Int(lo))–\(Int(lo + bucketSize))"
+                return ZoneStat(label: label, lo: lo, trades: es.count,
+                                wins: wins, losses: losses, net: net)
+            }
+            .sorted { $0.lo < $1.lo }
+    }
+
+    private func priceZoneTable(_ zones: [ZoneStat]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("OB ZONE WIN RATE (by entry price)")
+                .font(.system(size: 9, weight: .heavy))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+
+            VStack(spacing: 0) {
+                // Header row
+                HStack {
+                    Text("ZONE").frame(width: 110, alignment: .leading)
+                    Text("TRADES").frame(width: 55, alignment: .trailing)
+                    Text("W/L").frame(width: 55, alignment: .trailing)
+                    Text("WIN%").frame(width: 55, alignment: .trailing)
+                    Spacer()
+                    Text("NET P/L").frame(width: 80, alignment: .trailing)
+                }
+                .font(.system(size: 9, weight: .bold))
+                .tracking(0.5)
+                .foregroundStyle(Theme.Color.textMuted)
+                .padding(.horizontal, Theme.Spacing.md)
+                .padding(.vertical, 6)
+
+                Divider().background(Theme.Color.border)
+
+                ForEach(zones) { z in
+                    HStack {
+                        Text(z.label)
+                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(Theme.Color.textPrimary)
+                            .frame(width: 110, alignment: .leading)
+                        Text("\(z.trades)")
+                            .font(.system(size: 11).monospacedDigit())
+                            .foregroundStyle(Theme.Color.textSecondary)
+                            .frame(width: 55, alignment: .trailing)
+                        Text("\(z.wins)/\(z.losses)")
+                            .font(.system(size: 11).monospacedDigit())
+                            .foregroundStyle(Theme.Color.textSecondary)
+                            .frame(width: 55, alignment: .trailing)
+                        // Win rate bar
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Theme.Color.border.opacity(0.5))
+                                .frame(width: 55, height: 14)
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(z.winRate >= 0.5 ? Theme.Color.success : Theme.Color.danger)
+                                .frame(width: 55 * CGFloat(z.winRate), height: 14)
+                            Text(String(format: "%.0f%%", z.winRate * 100))
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 55)
+                        }
+                        .frame(width: 55, alignment: .trailing)
+                        Spacer()
+                        Text(String(format: "%+.2f", z.net))
+                            .font(.system(size: 11, weight: .bold).monospacedDigit())
+                            .foregroundStyle(z.net >= 0 ? Theme.Color.success : Theme.Color.danger)
+                            .frame(width: 80, alignment: .trailing)
+                    }
+                    .padding(.horizontal, Theme.Spacing.md)
+                    .padding(.vertical, 7)
+                    .background(zones.firstIndex(where: { $0.id == z.id })!.isMultiple(of: 2)
+                        ? Theme.Color.surface
+                        : Theme.Color.surfaceHi)
+                }
+            }
+            .background(RoundedRectangle(cornerRadius: Theme.Radius.md).fill(Theme.Color.surface))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).strokeBorder(Theme.Color.border, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
+        }
+    }
 }

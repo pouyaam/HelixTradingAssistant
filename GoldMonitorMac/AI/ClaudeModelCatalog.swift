@@ -25,7 +25,7 @@ enum ClaudeModelCatalog {
 
     /// Defaults applied when the persisted keys are unset. Kept here so
     /// `ClaudeEngine` and the UI agree on the same fallback.
-    static let defaultModelID = "claude-opus-4-8"
+    static let defaultModelID = "claude-sonnet-4-6"
     static let defaultEffortID = "medium"
 
     static let models: [Model] = [

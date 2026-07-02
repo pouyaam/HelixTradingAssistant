@@ -98,6 +98,49 @@ struct PriceAlert: Identifiable, Codable, Equatable {
     }
 }
 
+// MARK: - Order Block lifecycle notification model
+
+/// Lifecycle stage shared by `OrderBlocks.ExhaustionStatus` and
+/// `SteroidOrderBlocks.ExhaustionStatus` — same three cases, distinct
+/// types (each indicator's `compute` is a standalone pure function), so
+/// `AlertStore` bridges through this raw-value-compatible enum instead
+/// of depending on either concrete type.
+private enum BlockStage: String {
+    case fresh, tested, exhausted
+}
+
+/// The three notify-worthy transitions in a block's life.
+private enum BlockLifecycleEvent {
+    case appeared, retested, exhausted
+}
+
+/// Indicator-agnostic view of one Order Block / Steroid Order Block
+/// zone, built by `AlertStore.evaluateOrderBlocks` /
+/// `evaluateSteroidOrderBlocks` from the concrete `Zone` types.
+private struct BlockZoneSnapshot {
+    let key: String
+    let isBullish: Bool
+    let high: Double
+    let low: Double
+    let stage: BlockStage
+
+    /// Stable identity for a zone, deliberately NOT `Zone.id` (which is
+    /// `"<arrayIndex>-bull/bear"`). The array index is only the zone's
+    /// position within whatever candle window happened to be passed to
+    /// `compute()` on this call — it shifts every time the window
+    /// changes shape (a live tick refetch, history warming backfilling
+    /// older bars onto the front, a timeframe refold), even though the
+    /// zone itself hasn't changed. Keying on the price range instead —
+    /// copied verbatim from the originating candle's OHLC, so it's
+    /// identical across recomputations — is what makes a zone "the
+    /// same zone" regardless of which window detected it. Getting this
+    /// wrong is what caused a flood of "formed" notifications for
+    /// zones that already existed (see Inbox duplicate-order-block bug).
+    static func stableKey(isBullish: Bool, high: Double, low: Double) -> String {
+        "\(isBullish ? "bull" : "bear")-\(String(format: "%.5f", high))-\(String(format: "%.5f", low))"
+    }
+}
+
 // MARK: - AlertStore
 
 /// Per-app persistent store of price alerts. Lives at the
@@ -130,9 +173,39 @@ final class AlertStore: ObservableObject {
     /// first observation after a relaunch).
     private var lastSeenRSI: [String: Double] = [:]
 
+    /// Order-block lifecycle tracking for `evaluateOrderBlocks` /
+    /// `evaluateSteroidOrderBlocks`. Keyed by `"<namespace>|<pairID>|<zone.id>"`
+    /// (namespace separates "ob" from "sob" so the two indicators never
+    /// collide on the same zone key). Transient — resets on relaunch.
+    private var lastBlockStage: [String: BlockStage] = [:]
+    /// `"<namespace>|<pairID>"` pairs we've evaluated at least once.
+    /// The *first* evaluation for a pair only seeds `lastBlockStage`
+    /// without notifying — otherwise loading years of history on
+    /// launch would fire an "appeared" notification for every
+    /// pre-existing block instead of just the new ones.
+    private var blockBaselineSeeded: Set<String> = []
+
+    /// Shared app-wide notification history every `notify*` call
+    /// funnels through instead of posting to `UNUserNotificationCenter`
+    /// directly. Attached by `DashboardView`'s mount `.task` (before
+    /// any candle/tick processing can trigger an evaluate call), so
+    /// this should never actually be nil in practice — but `notify*`
+    /// no-ops rather than crashing if it somehow isn't attached yet.
+    private weak var inbox: NotificationInbox?
+    /// Chart timeframe label ("1h", "4h", …) shown on the
+    /// notification body. Kept in sync by `DashboardView` whenever
+    /// the user changes timeframe. Empty until first synced.
+    var timeframeLabel: String = ""
+
     init() {
         load()
         requestNotificationPermission()
+    }
+
+    /// Wire this store into the shared notification inbox. Idempotent
+    /// — safe to call on every dashboard mount.
+    func attach(inbox: NotificationInbox) {
+        self.inbox = inbox
     }
 
     // ── Reads ─────────────────────────────────────────────────────
@@ -295,6 +368,114 @@ final class AlertStore: ObservableObject {
         if changed { save() }
     }
 
+    // ── Order Block lifecycle notifications ─────────────────────────
+
+    /// Diff freshly-computed Order Block zones against what's already
+    /// been observed for `pairID` and fire a system notification for
+    /// every zone that just appeared, was retested for the first time,
+    /// or became exhausted. Called from the dashboard after every
+    /// candle reload / live-tick refresh, gated by
+    /// `OscillatorConfig.obNotifyEvents` (opt-in, default off).
+    func evaluateOrderBlocks(_ zones: [OrderBlocks.Zone], pairID: String, pairLabel: String) {
+        evaluateBlockZones(
+            zones.map {
+                BlockZoneSnapshot(key: BlockZoneSnapshot.stableKey(isBullish: $0.isBullish, high: $0.high, low: $0.low),
+                                  isBullish: $0.isBullish, high: $0.high, low: $0.low,
+                                  stage: BlockStage(rawValue: $0.status.rawValue) ?? .fresh)
+            },
+            namespace: "ob", label: "Order Block", pairID: pairID, pairLabel: pairLabel
+        )
+    }
+
+    /// Same lifecycle notifications as `evaluateOrderBlocks`, for
+    /// Steroid Order Blocks — kept as a distinct namespace so the two
+    /// indicators never collide even when a zone happens to land at
+    /// the same bar index.
+    func evaluateSteroidOrderBlocks(_ zones: [SteroidOrderBlocks.Zone], pairID: String, pairLabel: String) {
+        evaluateBlockZones(
+            zones.map {
+                BlockZoneSnapshot(key: BlockZoneSnapshot.stableKey(isBullish: $0.isBullish, high: $0.high, low: $0.low),
+                                  isBullish: $0.isBullish, high: $0.high, low: $0.low,
+                                  stage: BlockStage(rawValue: $0.status.rawValue) ?? .fresh)
+            },
+            namespace: "sob", label: "Steroid Order Block", pairID: pairID, pairLabel: pairLabel
+        )
+    }
+
+    private func evaluateBlockZones(
+        _ zones: [BlockZoneSnapshot],
+        namespace: String,
+        label: String,
+        pairID: String,
+        pairLabel: String
+    ) {
+        let baselineKey = "\(namespace)|\(pairID)"
+        let isFirstObservation = !blockBaselineSeeded.contains(baselineKey)
+        let keyPrefix = "\(baselineKey)|"
+        var seenKeys: Set<String> = []
+
+        for zone in zones {
+            let storageKey = keyPrefix + zone.key
+            seenKeys.insert(storageKey)
+            let previousStage = lastBlockStage[storageKey]
+            defer { lastBlockStage[storageKey] = zone.stage }
+
+            guard !isFirstObservation else { continue }
+
+            if previousStage == nil {
+                notifyBlockLifecycle(.appeared, label: label, pairID: pairID, pairLabel: pairLabel, zone: zone)
+            } else if previousStage == .fresh, zone.stage == .tested {
+                notifyBlockLifecycle(.retested, label: label, pairID: pairID, pairLabel: pairLabel, zone: zone)
+            } else if previousStage != .exhausted, zone.stage == .exhausted {
+                notifyBlockLifecycle(.exhausted, label: label, pairID: pairID, pairLabel: pairLabel, zone: zone)
+            }
+        }
+
+        // Drop zones that rolled out of the detected set (e.g. no longer
+        // returned once they're far enough in the past) so this doesn't
+        // grow without bound across a long-running session.
+        lastBlockStage = lastBlockStage.filter { !$0.key.hasPrefix(keyPrefix) || seenKeys.contains($0.key) }
+        blockBaselineSeeded.insert(baselineKey)
+    }
+
+    private func notifyBlockLifecycle(
+        _ event: BlockLifecycleEvent,
+        label: String,
+        pairID: String,
+        pairLabel: String,
+        zone: BlockZoneSnapshot
+    ) {
+        let direction = zone.isBullish ? "Bullish" : "Bearish"
+        let range = "\(Self.formatPrice(zone.low))–\(Self.formatPrice(zone.high))"
+        let title: String
+        let body: String
+        switch event {
+        case .appeared:
+            title = "\(pairLabel) — \(direction) \(label) formed"
+            body = "New \(direction.lowercased()) \(label.lowercased()) at \(range). Watch for a reaction on a return visit."
+        case .retested:
+            title = "\(pairLabel) — \(direction) \(label) retested"
+            body = "Price returned to the \(direction.lowercased()) \(label.lowercased()) at \(range)."
+        case .exhausted:
+            title = "\(pairLabel) — \(direction) \(label) exhausted"
+            body = "Price closed through the \(direction.lowercased()) \(label.lowercased()) at \(range) — zone invalidated."
+        }
+        // Dedup key covers the zone + lifecycle event so re-testing a
+        // zone later (a genuinely new event) still gets its own key,
+        // while the same transition can't double-fire.
+        let dedupKey = "ob|\(zone.key)|\(event)"
+        inbox?.record(
+            dedupKey: dedupKey,
+            cooldown: 60 * 60 * 6,
+            pairID: pairID,
+            pairLabel: pairLabel,
+            category: .orderBlock,
+            title: title,
+            body: body,
+            timeframeLabel: timeframeLabel.isEmpty ? nil : timeframeLabel
+        )
+    }
+
     // ── Notifications ─────────────────────────────────────────────
 
     /// Ask for notification permission once at first launch.
@@ -310,31 +491,32 @@ final class AlertStore: ObservableObject {
     }
 
     private func notify(alert: PriceAlert, price: Double) {
-        let content = UNMutableNotificationContent()
-        content.title = alert.title
-        content.body = alert.body + " · now \(Self.formatPrice(price))"
-        content.sound = .default
-        let request = UNNotificationRequest(
-            identifier: alert.id.uuidString,
-            content: content,
-            trigger: nil
+        let tf = timeframeLabel.isEmpty ? "" : " · \(timeframeLabel)"
+        inbox?.record(
+            dedupKey: "alert|\(alert.id.uuidString)|\(alert.firedAt?.timeIntervalSinceReferenceDate ?? 0)",
+            cooldown: 30 * 60,
+            pairID: alert.pairID,
+            pairLabel: alert.pairID,
+            category: .priceAlert,
+            title: alert.title,
+            body: alert.body + " · now \(Self.formatPrice(price))" + tf,
+            timeframeLabel: timeframeLabel.isEmpty ? nil : timeframeLabel
         )
-        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
     }
 
     private func notifyRSI(alert: PriceAlert, rsi: Double, pricePeek: Double?) {
-        let content = UNMutableNotificationContent()
-        content.title = alert.title
         var body = alert.body + " · RSI " + String(format: "%.1f", rsi)
         if let p = pricePeek { body += " · price " + Self.formatPrice(p) }
-        content.body = body
-        content.sound = .default
-        let request = UNNotificationRequest(
-            identifier: alert.id.uuidString,
-            content: content,
-            trigger: nil
+        inbox?.record(
+            dedupKey: "alert|\(alert.id.uuidString)|\(alert.firedAt?.timeIntervalSinceReferenceDate ?? 0)",
+            cooldown: 30 * 60,
+            pairID: alert.pairID,
+            pairLabel: alert.pairID,
+            category: .rsiAlert,
+            title: alert.title,
+            body: body,
+            timeframeLabel: timeframeLabel.isEmpty ? nil : timeframeLabel
         )
-        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
     }
 
     private static func formatPrice(_ v: Double) -> String {

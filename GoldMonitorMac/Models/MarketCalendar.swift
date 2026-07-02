@@ -11,15 +11,31 @@ enum MarketCalendar {
     static let exchangeTimezone = TimeZone(identifier: "America/New_York")
         ?? TimeZone(secondsFromGMT: -5 * 3600)!
 
-    /// True if `date` falls on Saturday or Sunday in exchange-local time.
-    /// COMEX is closed all of Saturday and most of Sunday — we treat the
-    /// whole calendar weekend as closed since Yahoo doesn't return data
-    /// for those hours anyway.
+    /// True if `date` falls in a period COMEX is actually closed.
+    ///
+    /// COMEX gold futures trade Sunday 6:00 pm ET through Friday 5:00 pm ET
+    /// with a daily 5pm→6pm maintenance break.  The rule:
+    ///   • Saturday — always closed (full day).
+    ///   • Sunday   — closed BEFORE 18:00 ET; open from 18:00 ET onward.
+    ///   • Monday–Friday — open (the daily 5pm–6pm gap is short enough that
+    ///     we do not filter it here; it produces at most one stale bar).
+    ///
+    /// Previously the entire Sunday was treated as closed, which caused
+    /// Sunday-evening COMEX bars (valid trading bars that happen to fall on
+    /// a Sunday in ET) to be silently dropped for users in timezones ahead
+    /// of ET (e.g. Tehran UTC+4:30, where COMEX's Sunday 6 pm ET reopening
+    /// is 2:30 am Monday local time).
     static func isClosedDay(_ date: Date) -> Bool {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = exchangeTimezone
         // Calendar weekday is 1-indexed: 1 = Sunday … 7 = Saturday.
         let wd = cal.component(.weekday, from: date)
-        return wd == 1 || wd == 7
+        if wd == 7 { return true }   // Saturday: always closed
+        if wd == 1 {
+            // Sunday: closed before 18:00 ET, open from 18:00 ET (COMEX reopens).
+            let hour = cal.component(.hour, from: date)
+            return hour < 18
+        }
+        return false
     }
 }

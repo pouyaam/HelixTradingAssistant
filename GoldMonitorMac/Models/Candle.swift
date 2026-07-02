@@ -26,7 +26,7 @@ struct Candle: Identifiable, Hashable {
 
 /// Supported analysis timeframes. Same set as the web app's
 /// [`ChartAnalysisPanel`](../../newWebapp2/src/components/Chart/ChartAnalysisPanel.tsx).
-enum Timeframe: String, CaseIterable, Identifiable {
+enum Timeframe: String, CaseIterable, Identifiable, Codable {
     case m1 = "1m"
     case m5 = "5m"
     case m15 = "15m"
@@ -82,7 +82,7 @@ enum Timeframe: String, CaseIterable, Identifiable {
 /// Chart rendering style. The dashboard forces line on 1m timeframes
 /// because candlesticks are visual noise at that granularity (most bars
 /// have body=0 or close to it).
-enum ChartType: String, CaseIterable, Identifiable {
+enum ChartType: String, CaseIterable, Identifiable, Codable {
     case line
     case candle
     /// Heikin Ashi candles. Drawn just like regular candles but with

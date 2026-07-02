@@ -5,7 +5,7 @@ import SwiftUI
 /// (overlaid on the price chart), these run on their own Y scale —
 /// RSI/Stoch are 0-100, MACD oscillates around zero — so they render in
 /// their own sub-panels below the main chart.
-enum OscillatorKind: String, CaseIterable, Identifiable, Hashable {
+enum OscillatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     case rsi
     case macd
     case stochastic
@@ -13,6 +13,15 @@ enum OscillatorKind: String, CaseIterable, Identifiable, Hashable {
     var id: String { rawValue }
 
     var label: String {
+        switch self {
+        case .rsi:        return "RSI"
+        case .macd:       return "MACD"
+        case .stochastic: return "Stochastic"
+        }
+    }
+
+    /// Section title in `IndicatorSettingsSheet` for scroll-to routing.
+    var settingsSection: String {
         switch self {
         case .rsi:        return "RSI"
         case .macd:       return "MACD"
@@ -67,6 +76,25 @@ struct OscillatorConfig: Codable, Equatable {
     var obPeriods: Int = 5
     var obThreshold: Double = 0.0
     var obUseWicks: Bool = false
+    var obShowExhausted: Bool = true
+    var obDetectSteroids: Bool = false
+    /// Fire a system notification when an Order Block appears, gets its
+    /// first retest, or is exhausted. Opt-in (default off) — evaluating
+    /// this costs an extra full-history `OrderBlocks.compute` on every
+    /// candle refresh, so users who don't care about the alerts pay
+    /// nothing. See `AlertStore.evaluateOrderBlocks`.
+    var obNotifyEvents: Bool = false
+
+    // Steroid Order Blocks parameters.
+    var sobPeriods: Int = 5
+    var sobThreshold: Double = 0.0
+    var sobUseWicks: Bool = false
+    var sobVolumeMultiplier: Double = 1.2
+    var sobShowExhausted: Bool = true
+    var sobDetectSteroids: Bool = true
+    /// Same lifecycle notifications as `obNotifyEvents`, for Steroid
+    /// Order Blocks.
+    var sobNotifyEvents: Bool = false
 
     // Trading Sessions overlay (Pine v6 "Trading Sessions" port). The
     // four `sessShow…` flags mirror the Pine display inputs; the three
@@ -124,6 +152,16 @@ struct OscillatorConfig: Codable, Equatable {
         obPeriods          = try c.decodeIfPresent(Int.self,    forKey: .obPeriods)          ?? 5
         obThreshold        = try c.decodeIfPresent(Double.self, forKey: .obThreshold)        ?? 0.0
         obUseWicks         = try c.decodeIfPresent(Bool.self,   forKey: .obUseWicks)         ?? false
+        obShowExhausted    = try c.decodeIfPresent(Bool.self,   forKey: .obShowExhausted)    ?? true
+        obDetectSteroids   = try c.decodeIfPresent(Bool.self,   forKey: .obDetectSteroids)   ?? false
+        obNotifyEvents     = try c.decodeIfPresent(Bool.self,   forKey: .obNotifyEvents)     ?? false
+        sobPeriods         = try c.decodeIfPresent(Int.self,    forKey: .sobPeriods)         ?? 5
+        sobThreshold       = try c.decodeIfPresent(Double.self, forKey: .sobThreshold)       ?? 0.0
+        sobUseWicks        = try c.decodeIfPresent(Bool.self,   forKey: .sobUseWicks)        ?? false
+        sobVolumeMultiplier = try c.decodeIfPresent(Double.self, forKey: .sobVolumeMultiplier) ?? 1.2
+        sobShowExhausted   = try c.decodeIfPresent(Bool.self,   forKey: .sobShowExhausted)   ?? true
+        sobDetectSteroids  = try c.decodeIfPresent(Bool.self,   forKey: .sobDetectSteroids)  ?? true
+        sobNotifyEvents    = try c.decodeIfPresent(Bool.self,   forKey: .sobNotifyEvents)    ?? false
         sessShowNames      = try c.decodeIfPresent(Bool.self,   forKey: .sessShowNames)      ?? true
         sessShowOpenClose  = try c.decodeIfPresent(Bool.self,   forKey: .sessShowOpenClose)  ?? true
         sessShowRange      = try c.decodeIfPresent(Bool.self,   forKey: .sessShowRange)      ?? true

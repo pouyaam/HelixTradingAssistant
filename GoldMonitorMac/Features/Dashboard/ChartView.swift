@@ -79,6 +79,7 @@ struct ChartView: View {
     /// duplicate of the main one".
     var taAltScenario: PromptBuilder.TAScenario? = nil
 
+
     /// User-drawn shapes (horizontal lines, trend lines, rectangles).
     /// DashboardView owns the persistent store and feeds the visible
     /// subset here; ChartView is stateless about which pair these
@@ -149,11 +150,15 @@ struct ChartView: View {
     var onPickReplayAnchor: ((Int) -> Void)? = nil
 
     @State private var hovered: HoverState?
-    /// Memoizes the data-derived arrays (HA candles, indicators, UT Bot)
-    /// so pan/zoom — which only changes `xDomain` — doesn't recompute
-    /// them over the full history every frame. @State so it survives the
-    /// struct being re-created each render. See `ChartDerivedCache`.
-    @State private var derived = ChartDerivedCache()
+    /// Memoizes the data-derived arrays (HA candles, indicators, UT Bot,
+    /// Order Blocks, …) so pan/zoom — which only changes `xDomain` —
+    /// doesn't recompute them over the full history every frame, and
+    /// runs each indicator's recompute on a background `Task` so a slow
+    /// one never blocks the UI. `@StateObject` so it survives the struct
+    /// being re-created each render AND so a background task's
+    /// `objectWillChange` actually triggers a redraw. See
+    /// `ChartDerivedCache`.
+    @StateObject private var derived = ChartDerivedCache()
     @State private var dragStartDomain: ClosedRange<Double>?
     /// Price window captured at the start of a chart pan, so vertical
     /// drag shifts it against a stable reference. `panLockedY` flips true
@@ -279,14 +284,32 @@ struct ChartView: View {
     /// or invalidated already).
     private var orderBlockZones: [OrderBlocks.Zone] {
         guard indicators.contains(.orderBlock) else { return [] }
-        return Array(derived.orderBlocks(
+        let all = derived.orderBlocks(
             candles: candles,
             periods: indicatorConfig.obPeriods,
             threshold: indicatorConfig.obThreshold,
-            useWicks: indicatorConfig.obUseWicks
-        ).suffix(Self.maxOrderBlocks))
+            useWicks: indicatorConfig.obUseWicks,
+            detectSteroids: indicatorConfig.obDetectSteroids
+        )
+        let filtered = indicatorConfig.obShowExhausted ? all : all.filter { $0.status != .exhausted }
+        return Array(filtered.suffix(Self.maxOrderBlocks))
     }
     private static let maxOrderBlocks = 6
+
+    /// Steroid Order Block zones.
+    private var steroidOrderBlockZones: [SteroidOrderBlocks.Zone] {
+        guard indicators.contains(.steroidOrderBlock) else { return [] }
+        let all = derived.steroidOrderBlocks(
+            candles: candles,
+            periods: indicatorConfig.sobPeriods,
+            threshold: indicatorConfig.sobThreshold,
+            useWicks: indicatorConfig.sobUseWicks,
+            volumeMultiplier: indicatorConfig.sobVolumeMultiplier,
+            detectSteroids: indicatorConfig.sobDetectSteroids
+        )
+        let filtered = indicatorConfig.sobShowExhausted ? all : all.filter { $0.status != .exhausted }
+        return Array(filtered.suffix(Self.maxOrderBlocks))
+    }
 
     /// FVG zones from the indicator (distinct from AI-analysis `fvgZones`
     /// which are PromptBuilder.FVGZone values). Computed fresh from candle
@@ -327,6 +350,7 @@ struct ChartView: View {
         return Array(visible.suffix(Self.maxSessionRuns))
     }
     private static let maxSessionRuns = 90
+
 
     /// NY Open Setup results to draw: the per-day setups whose footprint
     /// (opening range → resolution / live edge) overlaps the visible
@@ -415,6 +439,7 @@ struct ChartView: View {
             indicatorFvgMarks
             supplyDemandMarks
             orderBlockMarks
+            steroidOrderBlockMarks
             scenarioMarks
             tradeMarks
             journalMarks
@@ -708,6 +733,7 @@ struct ChartView: View {
         case .horizontalLine: return [.start]
         case .trendLine:      return [.start, .end]
         case .rectangle:      return [.topLeft, .topRight, .bottomLeft, .bottomRight]
+        case .volumeProfile:  return [.topLeft, .topRight, .bottomLeft, .bottomRight]
         }
     }
 
@@ -816,6 +842,9 @@ struct ChartView: View {
         case .rectangle:
             guard hasDrag else { return }
             onCommitDrawing?(ChartDrawing(kind: .rectangle, start: start, end: end))
+        case .volumeProfile:
+            guard hasDrag else { return }
+            onCommitDrawing?(ChartDrawing(kind: .volumeProfile, start: start, end: end))
         }
     }
 
@@ -937,6 +966,23 @@ struct ChartView: View {
                 y: min(ysScreen, yeScreen),
                 width:  abs(xeScreen - xsScreen),
                 height: abs(yeScreen - ysScreen)
+            )
+            if rect.contains(p) { return 0 }
+            let dx = max(rect.minX - p.x, 0, p.x - rect.maxX)
+            let dy = max(rect.minY - p.y, 0, p.y - rect.maxY)
+            return hypot(dx, dy)
+        case .volumeProfile:
+            guard let end = d.end,
+                  let xs = barIndex(forDate: d.start.date),
+                  let xe = barIndex(forDate: end.date),
+                  let xsScreen: CGFloat = proxy.position(forX: xs),
+                  let xeScreen: CGFloat = proxy.position(forX: xe),
+                  let ysScreen = proxy.position(forY: d.start.price),
+                  let yeScreen = proxy.position(forY: end.price)
+            else { return nil }
+            let rect = CGRect(
+                x: min(xsScreen, xeScreen), y: min(ysScreen, yeScreen),
+                width: abs(xeScreen - xsScreen), height: abs(yeScreen - ysScreen)
             )
             if rect.contains(p) { return 0 }
             let dx = max(rect.minX - p.x, 0, p.x - rect.maxX)
@@ -1449,6 +1495,113 @@ struct ChartView: View {
             .fixedSize()
     }
 
+    private struct OrderOBStyle {
+        let color: Color
+        let tagColor: Color
+        let fillOpacity: Double
+        let borderOpacity: Double
+        let borderStyle: StrokeStyle
+        let midLineStyle: StrokeStyle
+        let labelText: String
+    }
+
+    private func styleForOrderOB(
+        _ zone: OrderBlocks.Zone,
+        baseColor: Color
+    ) -> OrderOBStyle {
+        switch zone.status {
+        case .fresh:
+            return OrderOBStyle(
+                color: baseColor,
+                tagColor: baseColor.opacity(0.95),
+                fillOpacity: 0.14,
+                borderOpacity: 0.7,
+                borderStyle: StrokeStyle(lineWidth: 1),
+                midLineStyle: StrokeStyle(lineWidth: 1, dash: [3, 3]),
+                labelText: zone.isBullish ? "OB↑" : "OB↓"
+            )
+        case .tested:
+            return OrderOBStyle(
+                color: baseColor.opacity(0.7),
+                tagColor: baseColor.opacity(0.7),
+                fillOpacity: 0.07,
+                borderOpacity: 0.35,
+                borderStyle: StrokeStyle(lineWidth: 0.9, dash: [2, 2]),
+                midLineStyle: StrokeStyle(lineWidth: 0.9, dash: [2, 4]),
+                labelText: zone.isBullish ? "OB↑ · Tested" : "OB↓ · Tested"
+            )
+        case .exhausted:
+            return OrderOBStyle(
+                color: Theme.Color.textMuted,
+                tagColor: Theme.Color.textMuted.opacity(0.8),
+                fillOpacity: 0.03,
+                borderOpacity: 0.18,
+                borderStyle: StrokeStyle(lineWidth: 0.8, dash: [2, 6]),
+                midLineStyle: StrokeStyle(lineWidth: 0.8, dash: [1, 8]),
+                labelText: zone.isBullish ? "OB↑ · Exhausted" : "OB↓ · Exhausted"
+            )
+        }
+    }
+
+    @ChartContentBuilder
+    private func orderOBMark(for zone: OrderBlocks.Zone, lastIndex: Int) -> some ChartContent {
+        let baseColor: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
+        let xStart = Double(zone.index)
+        let xEnd   = Double(lastIndex)
+        
+        let style = styleForOrderOB(zone, baseColor: baseColor)
+        
+        RectangleMark(
+            xStart: .value("OB start", xStart),
+            xEnd:   .value("OB end",   xEnd),
+            yStart: .value("OB low",   zone.low),
+            yEnd:   .value("OB high",  zone.high)
+        )
+        .foregroundStyle(style.color.opacity(style.fillOpacity))
+
+        // Top + bottom edges so the block reads clearly against the
+        // candles sitting inside it.
+        RuleMark(
+            xStart: .value("OB start hi", xStart),
+            xEnd:   .value("OB end hi",   xEnd),
+            y:      .value("OB hi",       zone.high)
+        )
+        .foregroundStyle(style.color.opacity(style.borderOpacity))
+        .lineStyle(style.borderStyle)
+        RuleMark(
+            xStart: .value("OB start lo", xStart),
+            xEnd:   .value("OB end lo",   xEnd),
+            y:      .value("OB lo",       zone.low)
+        )
+        .foregroundStyle(style.color.opacity(style.borderOpacity))
+        .lineStyle(style.borderStyle)
+
+        // Equilibrium (avg) — the Pine source's solid channel; dashed
+        // here so it reads as the "interaction" line, not an edge.
+        RuleMark(
+            xStart: .value("OB start avg", xStart),
+            xEnd:   .value("OB end avg",   xEnd),
+            y:      .value("OB avg",       zone.avg)
+        )
+        .foregroundStyle(style.color.opacity(style.borderOpacity * 0.7))
+        .lineStyle(style.midLineStyle)
+
+        // Direction tag pinned to the right edge of the zone.
+        PointMark(
+            x: .value("OB label", xEnd),
+            y: .value("OB hi",    zone.high)
+        )
+        .symbolSize(0)
+        .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+            Text(style.labelText)
+                .font(.system(size: 8, weight: .heavy))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(style.tagColor))
+        }
+    }
+
     /// Order Block zones — translucent rectangles extending from the
     /// originating candle to the right edge of the chart (so a block
     /// stays visible as a level until price revisits it). Bullish blocks
@@ -1459,58 +1612,124 @@ struct ChartView: View {
     private var orderBlockMarks: some ChartContent {
         let lastIndex = candles.count - 1
         ForEach(orderBlockZones) { zone in
-            let color: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
-            let xStart = Double(zone.index)
-            let xEnd   = Double(lastIndex)
-            RectangleMark(
-                xStart: .value("OB start", xStart),
-                xEnd:   .value("OB end",   xEnd),
-                yStart: .value("OB low",   zone.low),
-                yEnd:   .value("OB high",  zone.high)
-            )
-            .foregroundStyle(color.opacity(0.14))
+            orderOBMark(for: zone, lastIndex: lastIndex)
+        }
+    }
 
-            // Top + bottom edges so the block reads clearly against the
-            // candles sitting inside it.
-            RuleMark(
-                xStart: .value("OB start hi", xStart),
-                xEnd:   .value("OB end hi",   xEnd),
-                y:      .value("OB hi",       zone.high)
-            )
-            .foregroundStyle(color.opacity(0.7))
-            .lineStyle(StrokeStyle(lineWidth: 1))
-            RuleMark(
-                xStart: .value("OB start lo", xStart),
-                xEnd:   .value("OB end lo",   xEnd),
-                y:      .value("OB lo",       zone.low)
-            )
-            .foregroundStyle(color.opacity(0.7))
-            .lineStyle(StrokeStyle(lineWidth: 1))
+    /// Steroid Order Block zones — order blocks on steroids (volume-profile validated).
+    @ChartContentBuilder
+    private var steroidOrderBlockMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(steroidOrderBlockZones) { zone in
+            steroidOBMark(for: zone, lastIndex: lastIndex)
+        }
+    }
 
-            // Equilibrium (avg) — the Pine source's solid channel; dashed
-            // here so it reads as the "interaction" line, not an edge.
-            RuleMark(
-                xStart: .value("OB start avg", xStart),
-                xEnd:   .value("OB end avg",   xEnd),
-                y:      .value("OB avg",       zone.avg)
-            )
-            .foregroundStyle(color.opacity(0.5))
-            .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+    private struct SteroidOBStyle {
+        let color: Color
+        let tagColor: Color
+        let fillOpacity: Double
+        let borderOpacity: Double
+        let borderStyle: StrokeStyle
+        let midLineStyle: StrokeStyle
+        let labelText: String
+    }
 
-            // Direction tag pinned to the right edge of the zone.
-            PointMark(
-                x: .value("OB label", xEnd),
-                y: .value("OB hi",    zone.high)
+    private func styleForSteroidOB(
+        _ zone: SteroidOrderBlocks.Zone,
+        baseColor: Color,
+        accentColor: Color
+    ) -> SteroidOBStyle {
+        switch zone.status {
+        case .fresh:
+            return SteroidOBStyle(
+                color: baseColor,
+                tagColor: accentColor,
+                fillOpacity: 0.18,
+                borderOpacity: 0.85,
+                borderStyle: StrokeStyle(lineWidth: 1.2),
+                midLineStyle: StrokeStyle(lineWidth: 1.2, dash: [4, 2]),
+                labelText: zone.isBullish ? "⚡ SOB↑" : "⚡ SOB↓"
             )
-            .symbolSize(0)
-            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
-                Text(zone.isBullish ? "OB↑" : "OB↓")
-                    .font(.system(size: 8, weight: .heavy))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(color.opacity(0.95)))
-            }
+        case .tested:
+            return SteroidOBStyle(
+                color: baseColor.opacity(0.7),
+                tagColor: accentColor.opacity(0.7),
+                fillOpacity: 0.09,
+                borderOpacity: 0.45,
+                borderStyle: StrokeStyle(lineWidth: 1.0, dash: [3, 3]),
+                midLineStyle: StrokeStyle(lineWidth: 1.0, dash: [2, 4]),
+                labelText: zone.isBullish ? "⚡ SOB↑ · Tested" : "⚡ SOB↓ · Tested"
+            )
+        case .exhausted:
+            return SteroidOBStyle(
+                color: Theme.Color.textMuted,
+                tagColor: Theme.Color.textMuted.opacity(0.8),
+                fillOpacity: 0.03,
+                borderOpacity: 0.18,
+                borderStyle: StrokeStyle(lineWidth: 0.8, dash: [2, 6]),
+                midLineStyle: StrokeStyle(lineWidth: 0.8, dash: [1, 8]),
+                labelText: zone.isBullish ? "⚡ SOB↑ · Exhausted" : "⚡ SOB↓ · Exhausted"
+            )
+        }
+    }
+
+    @ChartContentBuilder
+    private func steroidOBMark(for zone: SteroidOrderBlocks.Zone, lastIndex: Int) -> some ChartContent {
+        let baseColor: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
+        let accentColor = IndicatorKind.steroidOrderBlock.color
+        let xStart = Double(zone.index)
+        let xEnd   = Double(lastIndex)
+        
+        let style = styleForSteroidOB(zone, baseColor: baseColor, accentColor: accentColor)
+        
+        RectangleMark(
+            xStart: .value("SOB start", xStart),
+            xEnd:   .value("SOB end",   xEnd),
+            yStart: .value("SOB low",   zone.low),
+            yEnd:   .value("SOB high",  zone.high)
+        )
+        .foregroundStyle(style.color.opacity(style.fillOpacity))
+
+        // Top + bottom edges
+        RuleMark(
+            xStart: .value("SOB start hi", xStart),
+            xEnd:   .value("SOB end hi",   xEnd),
+            y:      .value("SOB hi",       zone.high)
+        )
+        .foregroundStyle(style.color.opacity(style.borderOpacity))
+        .lineStyle(style.borderStyle)
+        
+        RuleMark(
+            xStart: .value("SOB start lo", xStart),
+            xEnd:   .value("SOB end lo",   xEnd),
+            y:      .value("SOB lo",       zone.low)
+        )
+        .foregroundStyle(style.color.opacity(style.borderOpacity))
+        .lineStyle(style.borderStyle)
+
+        // Equilibrium (avg) midline in the indicator's distinct accent color
+        RuleMark(
+            xStart: .value("SOB start avg", xStart),
+            xEnd:   .value("SOB end avg",   xEnd),
+            y:      .value("SOB avg",       zone.avg)
+        )
+        .foregroundStyle(style.tagColor.opacity(0.8))
+        .lineStyle(style.midLineStyle)
+
+        // Direction tag with lightning bolt and color weighting
+        PointMark(
+            x: .value("SOB label", xEnd),
+            y: .value("SOB hi",    zone.high)
+        )
+        .symbolSize(0)
+        .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+            Text(style.labelText)
+                .font(.system(size: 8, weight: .heavy))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(style.tagColor))
         }
     }
 
@@ -2017,17 +2236,48 @@ struct ChartView: View {
                    let xs = barIndex(forDate: d.start.date),
                    let xe = barIndex(forDate: end.date)
                 {
-                    // Translucent fill derived from the stroke colour
-                    // so a single colour pick drives the whole shape.
-                    // We keep the relative scale of the original
-                    // palette (stroke alpha → ~0.16× fill alpha).
+                    let x0 = min(xs, xe), x1 = max(xs, xe)
+                    let y0 = min(d.start.price, end.price)
+                    let y1 = max(d.start.price, end.price)
+                    // Translucent fill
                     RectangleMark(
-                        xStart: .value("X start", min(xs, xe)),
-                        xEnd:   .value("X end",   max(xs, xe)),
-                        yStart: .value("Y start", min(d.start.price, end.price)),
-                        yEnd:   .value("Y end",   max(d.start.price, end.price))
+                        xStart: .value("X0", x0), xEnd: .value("X1", x1),
+                        yStart: .value("Y0", y0), yEnd: .value("Y1", y1)
                     )
                     .foregroundStyle(stroke.opacity(d.color.alpha * 0.18))
+                    // Border — four edges as LineMark pairs
+                    let sid = d.id.uuidString
+                    LineMark(x: .value("Bx", x0), y: .value("By", y1),
+                             series: .value("S", "rt-\(sid)"))
+                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
+                    LineMark(x: .value("Bx", x1), y: .value("By", y1),
+                             series: .value("S", "rt-\(sid)"))
+                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
+                    LineMark(x: .value("Bx", x0), y: .value("By", y0),
+                             series: .value("S", "rb-\(sid)"))
+                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
+                    LineMark(x: .value("Bx", x1), y: .value("By", y0),
+                             series: .value("S", "rb-\(sid)"))
+                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
+                    LineMark(x: .value("Bx", x0), y: .value("By", y0),
+                             series: .value("S", "rl-\(sid)"))
+                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
+                    LineMark(x: .value("Bx", x0), y: .value("By", y1),
+                             series: .value("S", "rl-\(sid)"))
+                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
+                    LineMark(x: .value("Bx", x1), y: .value("By", y0),
+                             series: .value("S", "rr-\(sid)"))
+                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
+                    LineMark(x: .value("Bx", x1), y: .value("By", y1),
+                             series: .value("S", "rr-\(sid)"))
+                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
+                }
+            case .volumeProfile:
+                if let end = d.end,
+                   let xs = barIndex(forDate: d.start.date),
+                   let xe = barIndex(forDate: end.date)
+                {
+                    vpMarks(for: d, end: end, xs: xs, xe: xe, stroke: stroke, lw: lw)
                 }
             }
         }
@@ -2111,7 +2361,7 @@ struct ChartView: View {
                 HandlePoint(x: xs, y: d.start.price),
                 HandlePoint(x: xe, y: end.price)
             ]
-        case .rectangle:
+        case .rectangle, .volumeProfile:
             guard let end = d.end,
                   let xs = barIndex(forDate: d.start.date),
                   let xe = barIndex(forDate: end.date)
@@ -2194,6 +2444,20 @@ struct ChartView: View {
                         yEnd:   .value("Preview Y end",   max(s.price, e.price))
                     )
                     .foregroundStyle(DrawingPalette.fill.opacity(0.6))
+                }
+            case .volumeProfile:
+                // Preview as a dashed rectangle outline while dragging
+                if let e = drawingEnd,
+                   let xs = barIndex(forDate: s.date),
+                   let xe = barIndex(forDate: e.date)
+                {
+                    RectangleMark(
+                        xStart: .value("VP Preview x0", min(xs, xe)),
+                        xEnd:   .value("VP Preview x1", max(xs, xe)),
+                        yStart: .value("VP Preview y0", min(s.price, e.price)),
+                        yEnd:   .value("VP Preview y1", max(s.price, e.price))
+                    )
+                    .foregroundStyle(DrawingPalette.fill.opacity(0.25))
                 }
             }
         }
@@ -2618,6 +2882,85 @@ struct ChartView: View {
             .onEnded { _ in yScaleStartDomain = nil }
     }
 
+    // MARK: - Volume Profile
+
+    @ChartContentBuilder
+    private func vpMarks(
+        for d: ChartDrawing, end: DrawingPoint,
+        xs: Double, xe: Double,
+        stroke: Color, lw: CGFloat
+    ) -> some ChartContent {
+        let buckets = computeVP(start: d.start.date, end: end.date)
+        let maxVol  = buckets.map(\.volume).max() ?? 1
+        if !buckets.isEmpty && maxVol > 0 {
+            let rangeWidth  = abs(xe - xs)
+            let maxBarWidth = rangeWidth * 0.28
+            let bucketSize  = buckets.count > 1
+                ? (buckets[1].priceLevel - buckets[0].priceLevel)
+                : buckets[0].priceLevel * 0.001
+            let pocLevel  = buckets.max(by: { $0.volume < $1.volume })?.priceLevel
+            let rightEdge = max(xs, xe)
+            let sid       = d.id.uuidString
+
+            ForEach(Array(buckets.enumerated()), id: \.offset) { _, bucket in
+                let barWidth = maxBarWidth * (bucket.volume / maxVol)
+                let isPOC   = bucket.priceLevel == pocLevel
+                let barColor: Color = isPOC
+                    ? Color(red: 0.96, green: 0.36, blue: 0.36)
+                    : stroke.opacity(0.75)
+                RectangleMark(
+                    xStart: .value("VP x0", rightEdge - barWidth),
+                    xEnd:   .value("VP x1", rightEdge),
+                    yStart: .value("VP y0", bucket.priceLevel),
+                    yEnd:   .value("VP y1", bucket.priceLevel + bucketSize * 0.92)
+                )
+                .foregroundStyle(barColor.opacity(isPOC ? 0.85 : 0.55))
+            }
+            // Right-edge border
+            LineMark(x: .value("VPr", rightEdge), y: .value("VPr0", d.start.price),
+                     series: .value("S", "vpr0-\(sid)"))
+                .foregroundStyle(stroke.opacity(0.5)).lineStyle(StrokeStyle(lineWidth: 1))
+            LineMark(x: .value("VPr", rightEdge), y: .value("VPr1", end.price),
+                     series: .value("S", "vpr0-\(sid)"))
+                .foregroundStyle(stroke.opacity(0.5)).lineStyle(StrokeStyle(lineWidth: 1))
+        }
+    }
+
+    struct VPBucket {
+        let priceLevel: Double  // floor of the bucket
+        let volume: Double
+    }
+
+    /// Compute a Fixed Range Volume Profile for the candles whose
+    /// `bucketStart` falls in [start, end]. Divides the price range
+    /// into `bucketCount` equal bands and sums each candle's volume
+    /// into the band that contains its typical price ((H+L+C)/3).
+    private func computeVP(start: Date, end: Date, bucketCount: Int = 30) -> [VPBucket] {
+        let lo = min(start, end)
+        let hi = max(start, end)
+        let inRange = candles.filter { $0.bucketStart >= lo && $0.bucketStart <= hi }
+        guard !inRange.isEmpty else { return [] }
+
+        let priceMin = inRange.map(\.low).min()!
+        let priceMax = inRange.map(\.high).max()!
+        guard priceMax > priceMin else { return [] }
+
+        let bucketSize = (priceMax - priceMin) / Double(bucketCount)
+        var volumes = [Double](repeating: 0, count: bucketCount)
+
+        for c in inRange {
+            let typical = (c.high + c.low + c.close) / 3
+            let idx = min(bucketCount - 1, Int((typical - priceMin) / bucketSize))
+            let vol = c.volume ?? 0
+            volumes[idx] += vol > 0 ? vol : 1
+        }
+
+        return (0..<bucketCount).map { i in
+            VPBucket(priceLevel: priceMin + Double(i) * bucketSize,
+                     volume: volumes[i])
+        }
+    }
+
     // MARK: - Derived
 
     /// Y-axis domain actually handed to Charts. A user-pinned manual
@@ -2704,6 +3047,11 @@ struct ChartView: View {
             if zone.low  < lo { lo = zone.low }
             if zone.high > hi { hi = zone.high }
         }
+        // Steroid Order Block zones — fold both edges.
+        for zone in steroidOrderBlockZones {
+            if zone.low  < lo { lo = zone.low }
+            if zone.high > hi { hi = zone.high }
+        }
         // Trading-session boxes — fold their high/low so a box edge isn't
         // clipped. Matters mainly in Heikin-Ashi mode, where the raw
         // session extremes can sit just outside the HA candle range the
@@ -2723,6 +3071,7 @@ struct ChartView: View {
                 if v > hi { hi = v }
             }
         }
+
         // Scenario entry / TP / SL — same treatment. Entry can be nil
         // for legacy history entries; skip it then. Alt scenario folds
         // in the same way so its lines stay on-screen too.

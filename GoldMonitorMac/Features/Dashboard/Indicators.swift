@@ -5,7 +5,7 @@ import SwiftUI
 /// chart. Each kind is self-describing (label, colour, computation) so
 /// ChartView can iterate without a giant switch. New indicators get
 /// added here and automatically show up in the menu.
-enum IndicatorKind: String, CaseIterable, Identifiable, Hashable {
+enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     case sma20
     case sma50
     case sma200
@@ -22,6 +22,8 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable {
     /// `orderBlockMarks`) and reads its run length / threshold / wick
     /// options from the indicator config.
     case orderBlock
+    /// Steroid Order Blocks — institutional order blocks validated by Volume Profile.
+    case steroidOrderBlock
     /// Trading Sessions — shades the Tokyo / London / New York sessions as
     /// per-day high-low boxes with open/close/average lines. Like the two
     /// above it renders as zones, not a line series (see `TradingSessions`
@@ -53,6 +55,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable {
         case .bollinger:      return "Bollinger (20, 2)"
         case .utBot:          return "UT Bot Alerts"
         case .orderBlock:     return "Order Blocks"
+        case .steroidOrderBlock: return "Steroid OB"
         case .tradingSession: return "Trading Sessions"
         case .nyOpenSetup:    return "NY Open Setup"
         case .fairValueGap:   return "Fair Value Gap"
@@ -62,6 +65,21 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable {
     /// Distinct hue per indicator. Chosen to stay readable on the dark
     /// surface and to not collide with the candle red/green or accent
     /// colours used for the price line.
+    /// Title of the corresponding section in `IndicatorSettingsSheet`.
+    /// `nil` = indicator has no tunables (SMA/EMA/Bollinger are on/off only),
+    /// so the gear button opens the full settings sheet without scrolling.
+    var settingsSection: String? {
+        switch self {
+        case .sma20, .sma50, .sma200, .ema9, .ema21, .bollinger: return nil
+        case .utBot:             return "UT Bot Alerts"
+        case .orderBlock:        return "Order Blocks"
+        case .steroidOrderBlock: return "Steroid Order Blocks"
+        case .tradingSession:    return "Trading Sessions"
+        case .nyOpenSetup:       return "NY Open Setup"
+        case .fairValueGap:      return "Fair Value Gap"
+        }
+    }
+
     var color: Color {
         switch self {
         case .sma20:     return Color(red: 1.00, green: 0.78, blue: 0.20) // gold
@@ -75,6 +93,8 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable {
         // chart; this hue is only the Layers-popover swatch, so a neutral
         // indigo reads as "the zones layer" without implying a bias.
         case .orderBlock: return Color(red: 0.55, green: 0.50, blue: 0.95) // indigo
+        // Steroid Order Blocks has a vibrant coral/orange highlight.
+        case .steroidOrderBlock: return Color(red: 1.00, green: 0.40, blue: 0.20) // coral
         // Trading sessions each carry their own hue (blue/orange/green) on
         // the chart; this single swatch is just the Layers-popover marker,
         // so a muted steel-blue reads as "the sessions layer".
@@ -220,6 +240,7 @@ enum Indicators {
             // `orderBlockMarks`, not as a line series — same reason
             // UT Bot is empty here.
             case .orderBlock: pts = []
+            case .steroidOrderBlock: pts = []
             // Trading Sessions render as per-day boxes in ChartView's
             // `sessionMarks` (see `TradingSessions`), not a line series.
             case .tradingSession: pts = []

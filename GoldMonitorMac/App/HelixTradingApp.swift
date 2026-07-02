@@ -21,6 +21,9 @@ struct HelixTradingApp: App {
     /// realised P/L + notes, optionally referencing the AI run that
     /// produced the idea. Distinct from the paper-trade simulator.
     @StateObject private var journalStore = JournalStore()
+    /// Saved AI reviews of a trading day/week/month — separate from
+    /// `journalStore` since a review isn't tied to a single trade.
+    @StateObject private var dayReviewStore = DayReviewStore()
     /// Per-pair auto-trader configuration. Separate from the
     /// engine so the Settings card can bind to its `byPair` map
     /// directly without going through the engine for every
@@ -36,6 +39,12 @@ struct HelixTradingApp: App {
     /// any screen that needs a key (Twelve Data, calendar, etc.)
     /// reads from the same source of truth.
     @StateObject private var dataConfig = DataSourceConfig.shared
+    /// App-wide history of every notification the app has sent
+    /// (price/RSI alerts, order-block lifecycle, scanner
+    /// opportunities). No DB dependency, so — unlike `ScannerStore`,
+    /// which needs `bootDatabase()` first — it's constructed eagerly
+    /// here alongside the other app-root stores.
+    @StateObject private var notificationInbox = NotificationInbox()
 
     /// Auto-trader orchestrator — constructed eagerly with no
     /// deps so it's always in the SwiftUI environment from first
@@ -54,10 +63,12 @@ struct HelixTradingApp: App {
                 .environmentObject(analysisStore)
                 .environmentObject(tradeStore)
                 .environmentObject(journalStore)
+                .environmentObject(dayReviewStore)
                 .environmentObject(autoTraderConfig)
                 .environmentObject(paperBalance)
                 .environmentObject(autoTrader)
                 .environmentObject(dataConfig)
+                .environmentObject(notificationInbox)
                 .frame(minWidth: 980, idealWidth: 1180, minHeight: 640, idealHeight: 760)
                 .preferredColorScheme(.dark)
                 .task {
@@ -76,7 +87,7 @@ struct HelixTradingApp: App {
                     )
 
                     do {
-                        try appState.bootDatabase()
+                        try appState.bootDatabase(notificationInbox: notificationInbox)
                     } catch {
                         appState.lastError = "Database init failed: \(error.localizedDescription)"
                         return

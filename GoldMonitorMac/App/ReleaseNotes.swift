@@ -35,6 +35,39 @@ struct ReleaseNotes {
     let highlights: [ReleaseHighlight]
 
     static let latest = ReleaseNotes(
+        version: "1.3",
+        tagline: "Steroid Order Blocks, Volume Profile, multi-chart grid, AI-reviewed journal days, and a real notification inbox.",
+        highlights: [
+            .init(icon: "bolt.badge.a.fill",
+                  title: "Steroid Order Blocks",
+                  detail: "Order Blocks cross-validated against real trading volume — a zone only survives if its originating candle's volume beats its 20-period average, or it overlaps a High Volume Node from the Volume Profile. Toggle it as its own indicator with a tunable volume multiplier."),
+            .init(icon: "square.stack.3d.up.badge.a",
+                  title: "Order Block exhaustion lifecycle",
+                  detail: "Every zone now tracks fresh → tested → exhausted with a retest counter. Hide dead zones with \"Show exhausted blocks,\" and optionally get notified on appear / retest / exhaust."),
+            .init(icon: "chart.bar.xaxis.ascending",
+                  title: "Volume Profile drawing",
+                  detail: "Drag a box over any price/time range to render a horizontal volume histogram — 30 buckets, Point of Control highlighted — resizable and repositionable like a rectangle."),
+            .init(icon: "square.grid.2x2",
+                  title: "Multi-chart grid",
+                  detail: "Split the dashboard into 2 or 4 independent panes, each with its own pair, timeframe, and indicators. Optionally sync the symbol across panes, and go fullscreen on one pane or the whole grid."),
+            .init(icon: "calendar.badge.sparkles",
+                  title: "AI review for a whole journal day, week, or month",
+                  detail: "Beyond per-trade post-mortems, run a full-session AI review across every trade in a period — overview, what drove the result, OB quality, discipline patterns, and rules to carry forward. Reviews now save and browse from AI Review History instead of vanishing when the sheet closes."),
+            .init(icon: "bell.fill",
+                  title: "Notification Inbox",
+                  detail: "A new sidebar section collects every alert — order blocks, price/RSI alerts, Scanner opportunities — into one filterable history with unread badges and the triggering timeframe, instead of relying on macOS Notification Center."),
+            .init(icon: "scope",
+                  title: "Strategy Scanner",
+                  detail: "Continuously scans every enabled pair for Swing and Scalp confluence setups, surfacing long/short opportunities with entry/stop/target/R:R and a push notification the moment one appears."),
+            .init(icon: "function",
+                  title: "Risk Calculator",
+                  detail: "A new Journal toolbar popover: enter balance, risk %, entry, and stop loss to get a suggested lot size."),
+        ]
+    )
+
+    /// Archive of past release notes. Not shown in the popup, but kept here
+    /// as a source of truth for the changelog history.
+    static let v1_2 = ReleaseNotes(
         version: "1.2",
         tagline: "Fair Value Gaps, smarter journal, AI trade post-mortems, and chart fixes.",
         highlights: [

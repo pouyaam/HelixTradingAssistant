@@ -167,7 +167,17 @@ final class YahooScheduler: ObservableObject {
 
     private var task: Task<Void, Never>?
     private var stream: TwelveDataSpotStream?
+    private var farazStream: FarazWebSocketStream?
     private var tickCount: Int = 0
+    /// Wall-clock of the most recent tick delivered by `FarazWebSocketStream`.
+    /// When this is recent the 10s HTTP poll is suppressed — the WS is the
+    /// live source. HTTP still runs every Nth tick for 5m / 1h / 1d bars
+    /// that the WS doesn't broadcast.
+    private var lastFarazWSTick: Date?
+    /// Seconds of silence before we consider the Faraz WS stale and fall
+    /// back to the HTTP poll. 20s is comfortably past the Socket.IO
+    /// heartbeat interval (25s), so a live socket always wins.
+    private let farazWSStaleSeconds: TimeInterval = 20
 
     /// Optional higher-priority source for the XAU/USD live feed. When
     /// set and "fresh", TwelveData ticks AND the gold-api fallback are
@@ -261,12 +271,14 @@ final class YahooScheduler: ObservableObject {
         pairID: String, sourceTF: String, cfg: PairConfig,
         to: Date, countback: Int, firstDataRequest: Bool
     ) async throws -> [OHLCBar] {
-        let cookie = DataSourceConfig.shared.farazCookie
+        let cookie     = DataSourceConfig.shared.farazCookie
+        let apiBaseURL = DataSourceConfig.shared.farazAPIURL
         let symbol = FarazHistorySource.symbolByPairID[pairID] ?? "XAU_USD"
         let from = to.addingTimeInterval(-Double(countback * FarazHistorySource.tfSeconds(sourceTF)))
         return try await FarazHistorySource.fetchHistory(
             pairID: pairID, symbol: symbol, tfTag: sourceTF,
             from: from, to: to, countback: countback, cookie: cookie,
+            apiBaseURL: apiBaseURL,
             firstDataRequest: firstDataRequest, skipWeekends: cfg.respectsWeekend
         )
     }
@@ -376,6 +388,11 @@ final class YahooScheduler: ObservableObject {
         s.start()
         stream = s
 
+        // Start Faraz WebSocket if it's the active source.
+        if goldSource == .faraz {
+            startFarazStream(repo: repo)
+        }
+
         // Watch for a gold-source switch in Settings. `dropFirst` skips
         // the value present at subscription; `removeDuplicates` ignores a
         // save that didn't actually change the source (e.g. only the
@@ -405,6 +422,7 @@ final class YahooScheduler: ObservableObject {
         task = nil
         stream?.stop()
         stream = nil
+        stopFarazStream()
         goldSourceCancellable?.cancel()
         goldSourceCancellable = nil
     }
@@ -416,7 +434,70 @@ final class YahooScheduler: ObservableObject {
     /// interleave), drop this pair's session backfill latches, then
     /// refetch deep history from the now-active upstream. Bumps
     /// `dataResetToken` at the end so the dashboard does a full reload.
+    // MARK: - Faraz WebSocket stream lifecycle
+
+    private func startFarazStream(repo: OHLCRepo) {
+        stopFarazStream()
+        let symbols    = Array(FarazHistorySource.symbolByPairID.values)
+        let cookie     = DataSourceConfig.shared.farazCookie
+        let apiBaseURL = DataSourceConfig.shared.farazAPIURL
+        let s = FarazWebSocketStream(symbols: symbols, cookie: cookie, apiBaseURL: apiBaseURL)
+        s.onTick = { [weak self] pairID, price in
+            guard let self else { return }
+            Task { await self.applyFarazTick(price: price, pairID: pairID, repo: repo) }
+        }
+        s.onCandle = { [weak self] bar in
+            guard let self else { return }
+            Task {
+                try? await repo.upsertMany([bar])
+                await MainActor.run { self.lastUpdateAt = Date() }
+            }
+        }
+        s.start()
+        farazStream = s
+    }
+
+    private func stopFarazStream() {
+        farazStream?.stop()
+        farazStream = nil
+    }
+
+    /// True when the Faraz WS has delivered a tick recently enough to be
+    /// considered the authoritative live source. Mirrors `streamIsFreshForOunce`.
+    private func farazWSIsFresh() -> Bool {
+        guard let last = lastFarazWSTick else { return false }
+        return Date().timeIntervalSince(last) < farazWSStaleSeconds
+    }
+
+    /// Live tick from the Faraz WebSocket — bypasses the `usesFaraz` gate
+    /// that suppresses other sources, since this IS the Faraz source.
+    private func applyFarazTick(price: Double, pairID: String, repo: OHLCRepo) async {
+        lastFarazWSTick = Date()
+        latestPrices[pairID] = price
+        activeLiveSource = "faraz-ws/\(pairID)"
+        let cfg = pairs.first { $0.pairID == pairID }
+        let respectsWeekend = cfg?.respectsWeekend ?? false
+        try? await rollLiveBar(pairID: pairID, timeframe: "1m", bucketSize: 60,
+                               respectsWeekend: respectsWeekend, price: price, repo: repo)
+        try? await rollLiveBar(pairID: pairID, timeframe: "5m", bucketSize: 300,
+                               respectsWeekend: respectsWeekend, price: price, repo: repo)
+        let now = Date()
+        if let prev = lastUpdateAt, now.timeIntervalSince(prev) < 1.0 {
+            hasBootstrapped = true
+            return
+        }
+        lastUpdateAt = now
+        hasBootstrapped = true
+    }
+
     private func switchGoldSource(repo: OHLCRepo) async {
+        // Start or stop the Faraz WS stream to match the new source.
+        if goldSource == .faraz {
+            startFarazStream(repo: repo)
+        } else {
+            stopFarazStream()
+        }
+
         // The toggle is global, so every Faraz-capable pair flips between
         // Faraz and Twelve Data + Yahoo at once — clear + refetch them all
         // so two providers' OHLC can't interleave in any series.
@@ -488,12 +569,16 @@ final class YahooScheduler: ObservableObject {
         defer { isFetching = false }
         tickCount += 1
 
-        // Faraz-driven pairs: poll every tick (~10s) so the live tail
-        // refreshes at the cadence the user asked for. Runs independently
-        // of the Yahoo sync below (which skips these pairs while Faraz
-        // owns them).
+        // Faraz-driven pairs: the WebSocket provides live price ticks and
+        // 1m / 1D candle updates in real time, so the HTTP poll is only
+        // needed when the WS is stale/disconnected (live fallback) OR every
+        // Nth tick to refresh 5m / 1h / 1d bars the WS doesn't broadcast.
         if goldSource == .faraz {
-            await syncFarazPairs(repo: repo)
+            let wsStale = !farazWSIsFresh()
+            let historyTick = tickCount % yahooEveryNTicks == 0
+            if wsStale || historyTick {
+                await syncFarazPairs(repo: repo)
+            }
         }
 
         // Yahoo authoritative history sync every Nth tick. Fans out

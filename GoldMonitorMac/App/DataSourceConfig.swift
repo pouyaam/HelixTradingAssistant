@@ -70,12 +70,17 @@ final class DataSourceConfig: ObservableObject {
     /// (the scheduler surfaces a "set your cookie" hint).
     @Published var farazCookie: String
 
+    /// Base URL of the Faraz API. Defaults to `https://faraz.io` — override
+    /// if your Faraz instance is hosted at a different domain or path prefix.
+    @Published var farazAPIURL: String
+
     private static let storageKey = "dataSourceConfig.v1"
 
     /// Stable defaults — the FF feed URL is public, the rest
     /// are blank-by-default so a fresh install nudges the user
     /// through the wizard.
     private static let defaultForexFactoryURL = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
+    nonisolated static let defaultFarazAPIURL = "https://faraz.io"
 
     private init() {
         let saved = Self.load()
@@ -84,8 +89,9 @@ final class DataSourceConfig: ObservableObject {
         self.claudeBinaryPath = saved.claudeBinaryPath
         // New fields are optional in the persisted blob so older payloads
         // (which predate them) still decode — fall back to sane defaults.
-        self.goldSource  = saved.goldSource.flatMap(GoldDataSource.init(rawValue:)) ?? .twelveData
-        self.farazCookie = saved.farazCookie ?? ""
+        self.goldSource   = saved.goldSource.flatMap(GoldDataSource.init(rawValue:)) ?? .twelveData
+        self.farazCookie  = saved.farazCookie ?? ""
+        self.farazAPIURL  = saved.farazAPIURL ?? Self.defaultFarazAPIURL
     }
 
     /// Apply a freshly-configured snapshot and persist. Called by
@@ -100,8 +106,10 @@ final class DataSourceConfig: ObservableObject {
     /// Switch the active gold source + Faraz cookie and persist. The
     /// scheduler observes `$goldSource` and, on a real change, clears the
     /// stored ounce bars and refetches from the new upstream.
-    func updateGoldSource(_ source: GoldDataSource, farazCookie: String) {
-        self.farazCookie = farazCookie.trimmingCharacters(in: .whitespacesAndNewlines)
+    func updateGoldSource(_ source: GoldDataSource, farazCookie: String, farazAPIURL: String) {
+        self.farazCookie  = farazCookie.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedURL = farazAPIURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.farazAPIURL  = trimmedURL.isEmpty ? Self.defaultFarazAPIURL : trimmedURL
         // Set the source LAST: its `didSet`/publish is the trigger the
         // scheduler keys off, and by then the cookie is already in place.
         self.goldSource = source
@@ -119,6 +127,7 @@ final class DataSourceConfig: ObservableObject {
         // every field to its default.
         var goldSource: String?
         var farazCookie: String?
+        var farazAPIURL: String?
     }
 
     private func save() {
@@ -127,7 +136,8 @@ final class DataSourceConfig: ObservableObject {
             forexFactoryURL:  forexFactoryURL,
             claudeBinaryPath: claudeBinaryPath,
             goldSource:  goldSource.rawValue,
-            farazCookie: farazCookie
+            farazCookie: farazCookie,
+            farazAPIURL: farazAPIURL
         )
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: Self.storageKey)

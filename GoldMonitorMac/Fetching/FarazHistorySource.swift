@@ -40,6 +40,7 @@ enum FarazHistorySource {
         to: Date,
         countback: Int,
         cookie: String,            // read at the @MainActor call site
+        apiBaseURL: String,        // read at the @MainActor call site
         firstDataRequest: Bool,
         skipWeekends: Bool
     ) async throws -> [OHLCBar] {
@@ -48,7 +49,7 @@ enum FarazHistorySource {
             throw FarazError.unsupportedTimeframe(tfTag)
         }
 
-        var comps = URLComponents(string: "https://faraz.io/api/customer/trading-view/history")!
+        var comps = URLComponents(string: "\(apiBaseURL)/api/customer/trading-view/history")!
         comps.queryItems = [
             .init(name: "symbolName", value: symbol),
             .init(name: "resolution", value: resolution),
@@ -66,7 +67,7 @@ enum FarazHistorySource {
         req.timeoutInterval = 20
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("Mozilla/5.0 HelixTradingApp", forHTTPHeaderField: "User-Agent")
-        req.setValue("https://faraz.io/", forHTTPHeaderField: "Referer")
+        req.setValue("\(apiBaseURL)/", forHTTPHeaderField: "Referer")
         // The whole auth story: a session cookie lifted from the browser.
         req.setValue(cookie, forHTTPHeaderField: "Cookie")
 

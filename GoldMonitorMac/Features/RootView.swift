@@ -91,12 +91,16 @@ struct RootView: View {
         switch app.selectedSidebarItem {
         case .dashboard, .none:
             DashboardView()
+        case .scanner:
+            ScannerView()
         case .news:
             NewsView()
         case .portfolio:
             AnalyticsView()
         case .journal:
             JournalView()
+        case .inbox:
+            NotificationInboxView()
         case .settings:
             SettingsView()
         }

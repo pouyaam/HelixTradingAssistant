@@ -9,6 +9,7 @@ import SwiftUI
 /// design consistent across products.
 struct SidebarView: View {
     @EnvironmentObject private var app: AppState
+    @EnvironmentObject private var notificationInbox: NotificationInbox
 
     // Market visibility — set by the Settings page. Hidden
     // categories drop out of the sidebar entirely (their pairs
@@ -192,6 +193,7 @@ struct SidebarView: View {
                 SidebarRow(
                     item: item,
                     isSelected: app.selectedSidebarItem == item,
+                    badgeCount: item == .inbox ? notificationInbox.unreadCount : 0,
                     action: { app.selectedSidebarItem = item }
                 )
             }
@@ -357,6 +359,7 @@ struct SidebarView: View {
 private struct SidebarRow: View {
     let item: SidebarItem
     let isSelected: Bool
+    var badgeCount: Int = 0
     let action: () -> Void
     @State private var hovered = false
 
@@ -369,6 +372,13 @@ private struct SidebarRow: View {
                 Text(item.label)
                     .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
                 Spacer()
+                if badgeCount > 0 {
+                    Text(badgeCount > 99 ? "99+" : "\(badgeCount)")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Capsule().fill(Theme.Color.danger))
+                }
             }
             .foregroundStyle(isSelected
                 ? Theme.Color.textPrimary

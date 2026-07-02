@@ -79,6 +79,7 @@ struct ChartDrawing: Identifiable, Codable, Equatable {
         case horizontalLine
         case trendLine
         case rectangle
+        case volumeProfile
     }
 
     init(
@@ -140,6 +141,22 @@ struct ChartDrawing: Identifiable, Codable, Equatable {
     func resized(anchor: Handle, to cursor: DrawingPoint) -> ChartDrawing {
         var copy = self
         switch kind {
+        case .volumeProfile:
+            // VP uses same two-corner semantics as rectangle
+            guard let oldEnd = copy.end else { return copy }
+            switch anchor {
+            case .topLeft, .start:
+                copy.start = cursor
+            case .bottomRight, .end:
+                copy.end = cursor
+            case .topRight:
+                copy.start = DrawingPoint(date: copy.start.date, price: cursor.price)
+                copy.end   = DrawingPoint(date: cursor.date, price: oldEnd.price)
+            case .bottomLeft:
+                copy.start = DrawingPoint(date: cursor.date, price: copy.start.price)
+                copy.end   = DrawingPoint(date: copy.end?.date ?? oldEnd.date, price: cursor.price)
+            }
+            return copy
         case .horizontalLine:
             // Horizontal lines extend across the chart, so only the
             // price actually changes. The date stays whatever it was
@@ -190,28 +207,27 @@ enum DrawingTool: String, CaseIterable, Identifiable, Equatable {
     case horizontalLine
     case trendLine
     case rectangle
+    case volumeProfile
 
     var id: String { rawValue }
 
-    /// Tooltip + accessibility label.
     var label: String {
         switch self {
         case .none:           return "Cursor"
         case .horizontalLine: return "Horizontal line"
         case .trendLine:      return "Trend line"
         case .rectangle:      return "Rectangle"
+        case .volumeProfile:  return "Volume Profile"
         }
     }
 
-    /// SF Symbol shown on the toolbar button. Picked to read at a
-    /// glance — the horizontal-line icon literally is a horizontal
-    /// rule, the trend line is a diagonal stroke, etc.
     var systemImage: String {
         switch self {
         case .none:           return "cursorarrow"
         case .horizontalLine: return "minus"
         case .trendLine:      return "line.diagonal"
         case .rectangle:      return "rectangle"
+        case .volumeProfile:  return "chart.bar.xaxis.ascending"
         }
     }
 }
