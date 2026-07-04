@@ -168,6 +168,7 @@ final class YahooScheduler: ObservableObject {
     private var task: Task<Void, Never>?
     private var stream: TwelveDataSpotStream?
     private var farazStream: FarazWebSocketStream?
+    private var farazWSObservation: AnyCancellable?
     private var tickCount: Int = 0
     /// Wall-clock of the most recent tick delivered by `FarazWebSocketStream`.
     /// When this is recent the 10s HTTP poll is suppressed — the WS is the
@@ -178,6 +179,14 @@ final class YahooScheduler: ObservableObject {
     /// back to the HTTP poll. 20s is comfortably past the Socket.IO
     /// heartbeat interval (25s), so a live socket always wins.
     private let farazWSStaleSeconds: TimeInterval = 20
+
+    /// True when the Faraz WS has ever completed a successful namespace
+    /// handshake this session. Published so the UI can distinguish
+    /// "WS never connected" from "WS connected but stale".
+    @Published private(set) var farazWSConnected: Bool = false
+    /// True when the Faraz WS has established at least one successful
+    /// connection this session (even if it's currently disconnected/reconnecting).
+    @Published private(set) var farazWSEverConnected: Bool = false
 
     /// Optional higher-priority source for the XAU/USD live feed. When
     /// set and "fresh", TwelveData ticks AND the gold-api fallback are
@@ -453,6 +462,13 @@ final class YahooScheduler: ObservableObject {
                 await MainActor.run { self.lastUpdateAt = Date() }
             }
         }
+        // Observe WS connection state changes.
+        farazWSObservation = s.$isConnected.combineLatest(s.$wsEverConnected)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] connected, everConnected in
+                self?.farazWSConnected = connected
+                self?.farazWSEverConnected = everConnected
+            }
         s.start()
         farazStream = s
     }
@@ -460,6 +476,10 @@ final class YahooScheduler: ObservableObject {
     private func stopFarazStream() {
         farazStream?.stop()
         farazStream = nil
+        farazWSObservation?.cancel()
+        farazWSObservation = nil
+        farazWSConnected = false
+        // Don't reset farazWSEverConnected — it's a session-lifetime flag
     }
 
     /// True when the Faraz WS has delivered a tick recently enough to be
@@ -574,10 +594,16 @@ final class YahooScheduler: ObservableObject {
         // needed when the WS is stale/disconnected (live fallback) OR every
         // Nth tick to refresh 5m / 1h / 1d bars the WS doesn't broadcast.
         if goldSource == .faraz {
-            let wsStale = !farazWSIsFresh()
+            let wsFresh = farazWSIsFresh()
             let historyTick = tickCount % yahooEveryNTicks == 0
-            if wsStale || historyTick {
+            if !wsFresh {
+                // WS is stale or never connected — HTTP poll every tick as
+                // the primary source for all timeframes.
                 await syncFarazPairs(repo: repo)
+            } else if historyTick {
+                // WS is fresh — only poll for 1h/1d history the WS doesn't
+                // broadcast. 1m/5m come from the WS live ticks.
+                await syncFarazPairsHistory(repo: repo)
             }
         }
 
@@ -614,6 +640,33 @@ final class YahooScheduler: ObservableObject {
         }
         lastUpdateAt = Date()
         hasBootstrapped = true
+    }
+
+    /// History-only sync when the WS is fresh — fetches 1h + 1d bars
+    /// that the WS doesn't broadcast, skipping 1m/5m (the WS handles
+    /// those live).
+    private func syncFarazPairsHistory(repo: OHLCRepo) async {
+        guard !DataSourceConfig.shared.farazCookie.isEmpty else { return }
+        let faraz = pairs.filter { FarazHistorySource.symbolByPairID[$0.pairID] != nil }
+        await withTaskGroup(of: Void.self) { group in
+            for cfg in faraz {
+                group.addTask { [self] in
+                    for tf in ["1h", "1d"] {
+                        do {
+                            let bars = try await self.fetchFarazWindow(
+                                pairID: cfg.pairID, sourceTF: tf, cfg: cfg,
+                                to: Date(), countback: 30, firstDataRequest: false
+                            )
+                            try await repo.upsertMany(bars)
+                        } catch {
+                            await MainActor.run {
+                                self.lastError = "faraz \(cfg.pairID)/\(tf): \(error.localizedDescription)"
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Refresh one Faraz pair's fast series (1m + 5m) every tick so the

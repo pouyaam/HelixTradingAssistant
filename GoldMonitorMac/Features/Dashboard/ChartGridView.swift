@@ -5,6 +5,13 @@ import SwiftUI
 /// `DashboardView.body` in place of the single-chart `chartCard` when
 /// the layout isn't `.single` — see `DashboardView`'s `multiChart`
 /// state and the layout picker in its pair header.
+///
+/// Layout switching is lag-free because the view tree is *always* a
+/// fixed 2×2 grid. Unused slots collapse to zero frame + zero
+/// opacity instead of being removed from the hierarchy — same trick
+/// the fullscreen toggle already uses. This means no
+/// `ChartPaneView` is ever torn down or rebuilt on a layout switch;
+/// only frame/opacity values change, which SwiftUI animates smoothly.
 struct ChartGridView: View {
     @EnvironmentObject private var app: AppState
     @ObservedObject var layoutStore: MultiChartLayoutStore
@@ -23,6 +30,7 @@ struct ChartGridView: View {
 
     var body: some View {
         let panes = layoutStore.panes
+        let layout = layoutStore.layout
         VStack(spacing: Theme.Spacing.sm) {
             // Lives above the grid itself (not in `DashboardView`'s
             // `pairHeader`, which hides in fullscreen) so it's the one
@@ -33,36 +41,55 @@ struct ChartGridView: View {
             if fullscreenPaneID == nil {
                 gridToolbar
             }
-            Group {
-                if let fsID = fullscreenPaneID, let fullscreenPane = panes.first(where: { $0.id == fsID }) {
-                    pane(fullscreenPane)
-                } else {
-                    VStack(spacing: Theme.Spacing.md) {
-                        switch layoutStore.layout {
-                        case .single:
-                            if let first = panes.first { pane(first) }
-
-                        case .twoColumn:
-                            HStack(spacing: Theme.Spacing.md) {
-                                ForEach(panes.prefix(2)) { pane($0) }
-                            }
-
-                        case .twoRow:
-                            ForEach(panes.prefix(2)) { pane($0) }
-
-                        case .grid2x2:
-                            HStack(spacing: Theme.Spacing.md) {
-                                ForEach(Array(panes.prefix(2))) { pane($0) }
-                            }
-                            HStack(spacing: Theme.Spacing.md) {
-                                ForEach(Array(panes.dropFirst(2).prefix(2))) { pane($0) }
-                            }
-                        }
-                    }
+            // Fixed 2×2 grid — the same container hierarchy every time.
+            // Unused slots collapse to zero frame + zero opacity instead
+            // of being dropped from the tree, so no ChartPaneView is
+            // ever torn down or rebuilt on a layout switch. Only
+            // frame/opacity values change, which the .animation modifier
+            // below handles smoothly.
+            //
+            // Pane-to-slot remapping per layout:
+            //   twoColumn: pane 0→slot 0 (top-left), pane 1→slot 1 (top-right)
+            //   twoRow:    pane 0→slot 0 (top-left), pane 1→slot 2 (bottom-left)
+            //   grid2x2:   pane 0→slot 0, pane 1→slot 1, pane 2→slot 2, pane 3→slot 3
+            //
+            // Collapsing an unused slot to a `Color.clear` placeholder
+            // isn't enough on its own — left at `maxWidth/maxHeight:
+            // .infinity` (see the `paneSlot` "no pane" branch) it still
+            // claims an equal share of the row/column, so `twoColumn`
+            // (whole bottom row unused) only ever gave its panes the top
+            // *half* of the height, and `twoRow` (whole right column
+            // unused) only the left *half* of the width. Explicitly
+            // collapsing the unused row/column to zero here hands that
+            // reclaimed space back to the row/column that's actually in
+            // use.
+            let showsBottomRow = layout == .twoRow || layout == .grid2x2
+            let showsRightColumn = layout == .twoColumn || layout == .grid2x2
+            VStack(spacing: showsBottomRow ? Theme.Spacing.md : 0) {
+                HStack(spacing: showsRightColumn ? Theme.Spacing.md : 0) {
+                    paneSlot(panes, slot: 0, layout: layout)
+                    paneSlot(panes, slot: 1, layout: layout)
+                        .frame(maxWidth: showsRightColumn ? .infinity : 0)
+                        .opacity(showsRightColumn ? 1 : 0)
                 }
+                HStack(spacing: showsRightColumn ? Theme.Spacing.md : 0) {
+                    paneSlot(panes, slot: 2, layout: layout)
+                    paneSlot(panes, slot: 3, layout: layout)
+                        .frame(maxWidth: showsRightColumn ? .infinity : 0)
+                        .opacity(showsRightColumn ? 1 : 0)
+                }
+                .frame(maxHeight: showsBottomRow ? .infinity : 0)
+                .opacity(showsBottomRow ? 1 : 0)
             }
+            .transition(.opacity)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Animates frame / opacity changes when the layout switches.
+        // Because the view hierarchy never changes (fixed 2×2 grid),
+        // SwiftUI smoothly resizes panes instead of cross-fading
+        // between two entirely different container trees.
+        .animation(.easeInOut(duration: 0.25), value: layoutStore.layout)
         // Keep the sidebar-collapse behavior in sync with pane
         // fullscreen the same way the primary chart's own maximise
         // button drives it (see `DashboardView.isChartFull` /
@@ -75,6 +102,15 @@ struct ChartGridView: View {
         // rather than showing a stale, now-nonexistent pane.
         .onChange(of: layoutStore.layout) { _ in
             fullscreenPaneID = nil
+        }
+        // When syncSymbol is on, pushing a new pair from the sidebar
+        // should update every pane in the grid — otherwise the sidebar
+        // selection is silently ignored in grid mode.
+        .onChange(of: app.selectedPairID) { newPairID in
+            guard layoutStore.syncSymbol, let newPairID else { return }
+            var updated = layoutStore.panes
+            for i in updated.indices { updated[i].pairID = newPairID }
+            layoutStore.panes = updated
         }
     }
 
@@ -106,18 +142,66 @@ struct ChartGridView: View {
         }
     }
 
+    // MARK: - Pane slot (fixed grid cell)
+
+    /// Maps a visual slot (0–3 in the 2×2 grid) to the pane index
+    /// for the current layout. Returns nil when the slot is unused
+    /// in the given layout (e.g. slot 1 in twoRow mode).
+    private func paneIndex(forSlot slot: Int, layout: ChartLayoutKind) -> Int? {
+        switch layout {
+        case .single:
+            return slot == 0 ? 0 : nil
+        case .twoColumn:
+            switch slot {
+            case 0: return 0
+            case 1: return 1
+            default: return nil
+            }
+        case .twoRow:
+            switch slot {
+            case 0: return 0
+            case 2: return 1   // pane 1 goes to bottom-left
+            default: return nil
+            }
+        case .grid2x2:
+            return slot < 4 ? slot : nil
+        }
+    }
+
+    /// One cell of the fixed 2×2 grid. When the slot has no pane for
+    /// the current layout, or the pane index is beyond the panes array,
+    /// an empty `Color.clear` placeholder fills the slot. When a pane
+    /// exists but is hidden (another pane is fullscreen, or slot is
+    /// unused), it collapses to zero size but stays mounted.
     @ViewBuilder
-    private func pane(_ p: ChartPane) -> some View {
-        ChartPaneView(
-            pane: p,
-            indicatorConfig: indicatorConfig,
-            drawingStore: drawingStore,
-            isFullscreen: Binding(
-                get: { fullscreenPaneID == p.id },
-                set: { fullscreenPaneID = $0 ? p.id : nil }
-            )
-        ) { updated in
-            layoutStore.updatePane(updated)
+    private func paneSlot(_ panes: [ChartPane], slot: Int, layout: ChartLayoutKind) -> some View {
+        if let idx = paneIndex(forSlot: slot, layout: layout), idx < panes.count {
+            let p = panes[idx]
+            let isFullscreenSibling = fullscreenPaneID != nil && fullscreenPaneID != p.id
+            let isHidden = isFullscreenSibling
+            ChartPaneView(
+                pane: p,
+                indicatorConfig: indicatorConfig,
+                drawingStore: drawingStore,
+                isFullscreen: Binding(
+                    get: { fullscreenPaneID == p.id },
+                    set: { fullscreenPaneID = $0 ? p.id : nil }
+                ),
+                // .twoRow / .grid2x2 stack two full pane rows, needing
+                // roughly double the vertical budget of a single row —
+                // trim each pane's minimums so both rows actually fit
+                // the window (see `ChartPaneView.isCompact`).
+                isCompact: layout == .twoRow || layout == .grid2x2
+            ) { updated in
+                layoutStore.updatePane(updated)
+            }
+            .frame(maxWidth: isHidden ? 0 : .infinity, maxHeight: isHidden ? 0 : .infinity)
+            .opacity(isHidden ? 0 : 1)
+            .allowsHitTesting(!isHidden)
+            .clipped()
+        } else {
+            Color.clear
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }

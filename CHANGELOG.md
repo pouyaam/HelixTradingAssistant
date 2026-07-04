@@ -4,6 +4,36 @@ All notable changes to Helix Trading App are documented here.
 
 ---
 
+## [v1.4] — 2026-07-04
+
+**Multiple journals, an in-app updater, the OpenCode engine, and a much faster chart.**
+
+### New Features
+
+- **Multiple journals** — the Journal screen now opens to a list of independently-tracked journals (e.g. "Prop firm challenge," "Personal account," "Backtests"), each with its own trades, win rate, and net P&L shown at a glance. Tap a journal to open its trade log (rename or delete from the row's context menu); an "all-time" AI review is available per journal. Entries added from outside the Journal screen (e.g. "Add to journal" from an AI analysis run) file into whichever journal was opened most recently. Existing single-journal installs migrate automatically into a "My Journal" journal — no data loss.
+
+- **In-app updates** — `Settings → Updates` now checks GitHub releases for a newer version, shows the release notes, and downloads + opens the `.dmg` in Finder, replacing the old "open the releases page manually" placeholder link.
+
+- **OpenCode engine** — a third AI engine alongside Claude and Codex. Runs locally via the OpenCode CLI (`opencode run`), or against a self-hosted remote OpenCode server (`opencode serve`) reachable over HTTP with optional basic-auth. Ships with a curated catalog of 5 free Zen models (MiMo V2.5 Free, DeepSeek V4 Flash Free, North Mini Code Free, Nemotron 3 Ultra Free, Big Pickle Free) that work out of the box without billing, plus 12 paid models from Anthropic, OpenAI, Google, DeepSeek, Alibaba, and Moonshot. Free models don't require an API key — authentication is handled automatically. An API key for paid Zen models, and the remote server's password, are stored in Keychain via Settings → AI → OpenCode.
+
+- **Improved journal AI reviews** — day/week/month review prompts now include full OHLC data for each relevant timeframe alongside the trade log, giving the AI richer context for session analysis. Review history is persisted and browsable from the Journal's overflow menu.
+
+- **Trading Sessions now track the live day** — instead of drawing every historical session box in view, the indicator now shows only each venue's current (or most recently closed) run, with its high/low/average extended as dotted reference lines through to the live edge — so, e.g., Tokyo's range stays visible while London/New York are trading.
+
+### Performance
+
+- **Smoother panning, zooming, and replay** — indicator and oscillator recomputation (Order Blocks, FVG, NY Open Setup, MACD, RSI, etc.) now runs off the main thread. Order Block / Steroid Order Block exhaustion scanning dropped from O(n²) to a single O(n) forward pass. Bar-index lookups (drawing placement, hover) now binary-search instead of scanning linearly. Replay stepping and auto-play splice one bar into memory instead of reloading and re-folding the entire stored series on every tick.
+- **No more chart teardown on layout/fullscreen changes** — switching multi-chart grid layouts, toggling a pane (or the main chart) fullscreen, and dragging the pair-header sidebar all previously destroyed and rebuilt the underlying `ChartView` (and its indicator cache), causing a visible stall. These now vary a `Card`'s chrome/frame in place, so chart state and caches survive the transition.
+
+### Bug Fixes
+
+- **Grid-mode header no longer clips** — the pair header could get squeezed to a sliver (and cropped) when a 2-row/2×2 grid demanded more vertical space than the window had; it now keeps its intrinsic size and lets the grid absorb any overflow instead.
+- **Sidebar pair selection now updates every pane** — with "Sync symbol across panes" on, picking a new pair from the sidebar while in grid mode previously only affected the primary chart; it now propagates to all panes.
+- **Faraz WebSocket-fresh periods skip redundant HTTP polling** — once the socket is confirmed live, the 10s poll now only fetches the 1h/1d history the socket doesn't broadcast, instead of re-polling every timeframe on every tick.
+- **AI analysis sessions no longer lose in-flight state** — a session looked up before its first run returned a fresh, un-stored placeholder each time; it's now created once and reused, so state started on one lookup is visible on the next.
+
+---
+
 ## [v1.3] — 2026-07-02
 
 **Steroid Order Blocks, Volume Profile, multi-chart grid, AI-reviewed journal days, and a real notification inbox.**

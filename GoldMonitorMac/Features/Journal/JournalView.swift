@@ -1,12 +1,20 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The trade journal screen (sidebar → Journal). A hand-written log of
-/// trades the user actually took: position, profit/loss, free-form
-/// notes, and — for ideas that came from an AI run — a reference back
-/// to that analysis. Complements the Portfolio analytics (which grades
-/// *paper* trades) with a record of real decisions and their outcomes.
-struct JournalView: View {
+/// A single journal's trades (sidebar → Journal → tap a journal row).
+/// A hand-written log of trades the user actually took: position,
+/// profit/loss, free-form notes, and — for ideas that came from an AI
+/// run — a reference back to that analysis. Complements the Portfolio
+/// analytics (which grades *paper* trades) with a record of real
+/// decisions and their outcomes.
+///
+/// Scoped to one `Journal` (`journalID`) — `JournalListView` is what the
+/// user actually lands on first; this is pushed on top when they open a
+/// specific journal, and `onBack` returns them to the list.
+struct JournalDetailView: View {
+    let journalID: UUID
+    let onBack: () -> Void
+
     @EnvironmentObject private var app: AppState
     @EnvironmentObject private var journal: JournalStore
     @EnvironmentObject private var dayReviewStore: DayReviewStore
@@ -57,11 +65,23 @@ struct JournalView: View {
     @State private var customStart: Date = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
     @State private var customEnd: Date = Date()
 
+    /// Display name of the journal this view is scoped to. Falls back
+    /// to a generic label if the journal was deleted out from under this
+    /// view (shouldn't happen — `JournalView` drops back to the list
+    /// the moment that occurs — but avoids a crash if it briefly does).
+    private var journalName: String {
+        journal.journals.first(where: { $0.id == journalID })?.name ?? "Journal"
+    }
+
+    /// This journal's entries — every place the old single-journal view
+    /// read `journal.entries` / `journal.sorted` now reads this instead.
+    private var scopedEntries: [JournalEntry] { journal.entries(in: journalID) }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Spacing.xl) {
                 header
-                if journal.entries.isEmpty {
+                if scopedEntries.isEmpty {
                     emptyState
                 } else {
                     summaryCards
@@ -117,12 +137,29 @@ struct JournalView: View {
         } message: {
             Text(importError ?? "")
         }
+        // Entries added from outside this screen (e.g. "Add to journal"
+        // on an AI analysis run) have no journal context of their own —
+        // they land in whichever journal the user had open most
+        // recently. Mark this one as soon as its screen appears.
+        .task { journal.markLastUsed(journalID) }
     }
 
     // ── Header ────────────────────────────────────────────────────
     private var header: some View {
         HStack(spacing: Theme.Spacing.sm) {
-            Label("Journal", systemImage: "book.closed.fill")
+            Button {
+                onBack()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .frame(width: 28, height: 28)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Color.surface))
+                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.Color.border, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .help("Back to all journals")
+            Label(journalName, systemImage: "book.closed.fill")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(Theme.Color.textPrimary)
             Spacer()
@@ -154,7 +191,7 @@ struct JournalView: View {
                 } label: {
                     Label("Import cTrader CSV…", systemImage: "square.and.arrow.down")
                 }
-                if !journal.entries.isEmpty {
+                if !scopedEntries.isEmpty {
                     Button {
                         exportCSV()
                     } label: {
@@ -237,7 +274,7 @@ struct JournalView: View {
     private func blankDraft() -> JournalEntry {
         let pairID = app.selectedPairID ?? app.pairs.first?.id ?? ""
         let pairName = app.pairs.first { $0.id == pairID }?.name ?? ""
-        return JournalEntry(pairID: pairID, pairName: pairName)
+        return JournalEntry(journalID: journalID, pairID: pairID, pairName: pairName)
     }
 
     /// Draft pre-set to noon on a specific calendar day. Used by the
@@ -246,7 +283,7 @@ struct JournalView: View {
         let pairID = app.selectedPairID ?? app.pairs.first?.id ?? ""
         let pairName = app.pairs.first { $0.id == pairID }?.name ?? ""
         let noon = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: day) ?? day
-        return JournalEntry(date: noon, pairID: pairID, pairName: pairName)
+        return JournalEntry(date: noon, journalID: journalID, pairID: pairID, pairName: pairName)
     }
 
     // ── Analytics section ─────────────────────────────────────────
@@ -715,7 +752,7 @@ struct JournalView: View {
 
     /// Entries restricted to the current date range (ignores result filter).
     private var rangeEntries: [JournalEntry] {
-        let all = journal.sorted
+        let all = journal.sorted(in: journalID)
         guard let r = dateRange else { return all }
         return all.filter { $0.date >= r.start && $0.date < r.end }
     }
@@ -926,7 +963,7 @@ struct JournalView: View {
         panel.allowedContentTypes = [UTType.commaSeparatedText]
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        let csv = buildExportCSV(journal.sorted)
+        let csv = buildExportCSV(journal.sorted(in: journalID))
         try? csv.write(to: url, atomically: true, encoding: .utf8)
     }
 
@@ -981,10 +1018,13 @@ struct JournalView: View {
                 // file/export it came from, so re-importing a statement
                 // that overlaps a previous one (e.g. exporting "today" more
                 // than once) only adds the rows not already logged.
-                // `journal.entries` is re-read fresh on every iteration, so
+                // `scopedEntries` is re-read fresh on every iteration, so
                 // a duplicate *within* the same file also gets caught
-                // against rows added earlier in this same loop.
-                let isDuplicate = journal.entries.contains {
+                // against rows added earlier in this same loop. Scoped to
+                // this journal — importing the same statement into two
+                // different journals is allowed, re-importing it into
+                // the same one isn't.
+                let isDuplicate = scopedEntries.contains {
                     $0.pairID == entry.pairID &&
                     $0.side == entry.side &&
                     $0.entry == entry.entry &&
@@ -1077,6 +1117,7 @@ struct JournalView: View {
 
             results.append(JournalEntry(
                 date: closeDate,      // date = close time for cTrader imports
+                journalID: journalID,
                 pairID: pairID,
                 pairName: pairName,
                 title: "\(side == .long ? "Long" : "Short") \(symbol)",

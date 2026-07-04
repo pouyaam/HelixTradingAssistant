@@ -1,10 +1,8 @@
 import SwiftUI
 
-/// Updates section. Sparkle integration is deferred — see
-/// [`docs/MACOS_APP.md`](../../../../docs/MACOS_APP.md) "Phase F" for the
-/// step-by-step setup. For now this card just shows the current version
-/// and a one-click "Open releases page" affordance.
 struct UpdatesCard: View {
+    @StateObject private var updater = UpdateChecker()
+
     private var version: String {
         let dict = Bundle.main.infoDictionary ?? [:]
         let short = dict["CFBundleShortVersionString"] as? String ?? "0.0.0"
@@ -27,19 +25,93 @@ struct UpdatesCard: View {
                             .foregroundStyle(Theme.Color.textPrimary)
                     }
                     Spacer()
-                    SecondaryButton(title: "Check for updates…") {
-                        // Placeholder — once Sparkle is wired in (Phase F.2),
-                        // this calls `SUUpdater.shared().checkForUpdates(nil)`.
-                        // For now, surface the manual link.
-                        if let url = URL(string: "https://github.com/your-org/gold-monitor-mac/releases") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
+                    actionButton
                 }
 
-                Text("Auto-updates via Sparkle will land in a follow-up build. For now, check the releases page manually.")
+                statusRow
+            }
+        }
+        .alert("Update Error", isPresented: Binding(
+            get: { if case .error = updater.state { return true } else { return false } },
+            set: { if !$0 { updater.state = .idle } }
+        )) {
+            Button("OK", role: .cancel) { updater.state = .idle }
+        } message: {
+            if case .error(let msg) = updater.state {
+                Text(msg)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var actionButton: some View {
+        switch updater.state {
+        case .idle:
+            SecondaryButton(title: "Check for updates\u{2026}") {
+                Task { await updater.checkForUpdates() }
+            }
+        case .checking:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Checking\u{2026}")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.Color.textMuted)
+            }
+        case .updateAvailable:
+            PrimaryButton("Download & Install") {
+                Task { await updater.downloadAndUpdate() }
+            }
+        case .downloading:
+            VStack(alignment: .trailing, spacing: 4) {
+                ProgressView(value: updater.downloadProgress)
+                    .frame(width: 120)
+                Text("Downloading\u{2026}")
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.Color.textMuted)
+            }
+        case .upToDate:
+            SecondaryButton(title: "Check again") {
+                Task { await updater.checkForUpdates() }
+            }
+        case .error:
+            SecondaryButton(title: "Retry") {
+                Task { await updater.checkForUpdates() }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var statusRow: some View {
+        switch updater.state {
+        case .idle:
+            EmptyView()
+        case .checking:
+            EmptyView()
+        case .updateAvailable(let ver, _):
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .foregroundStyle(.green)
+                Text("Version \(ver) is available.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+        case .downloading:
+            EmptyView()
+        case .upToDate:
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text("You\u{2019}re up to date.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+        case .error:
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("Update check failed. Tap Retry.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.Color.textSecondary)
             }
         }
     }

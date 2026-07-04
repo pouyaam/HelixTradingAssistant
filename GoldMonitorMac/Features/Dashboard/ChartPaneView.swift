@@ -29,6 +29,12 @@ struct ChartPaneView: View {
     /// — see `ChartGridView`). Toggled by the header's fullscreen
     /// button or the right-click menu's "Fullscreen" item.
     @Binding var isFullscreen: Bool
+    /// True when the grid stacks two full rows of panes (`.twoRow` /
+    /// `.grid2x2`) — those layouts need roughly double the vertical
+    /// budget of a single-row layout, so this trims chart/volume/
+    /// oscillator minimums and padding to help both rows actually fit
+    /// the window instead of overflowing it.
+    var isCompact: Bool = false
     let onUpdate: (ChartPane) -> Void
 
     @State private var candles: [Candle] = []
@@ -63,21 +69,20 @@ struct ChartPaneView: View {
             }
     }
 
-    @ViewBuilder
     private var content: some View {
         // Fullscreen drops the Card chrome (rounded corners, padding,
         // surface fill) the same way the primary chart's own
         // `isChartFull` does — the chart's edges meet the window edges
-        // so it truly fills the space with nothing else visible.
-        if isFullscreen {
-            chartStack
-        } else {
-            Card {
-                chartStack
-                    .padding(Theme.Spacing.md)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // so it truly fills the space with nothing else visible. A
+        // single, unconditional `Card` call (chrome + padding vary by
+        // value) instead of `if isFullscreen { chartStack } else {
+        // Card { chartStack } }` — that `if/else` would tear down and
+        // rebuild `chartStack`'s `ChartView` (and its indicator cache)
+        // on every fullscreen toggle. See `Card.chromeless`.
+        Card(padding: isFullscreen ? 0 : (isCompact ? Theme.Spacing.md : Theme.Spacing.xl), chromeless: isFullscreen) {
+            chartStack.padding(isFullscreen ? 0 : Theme.Spacing.md)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var chartStack: some View {
@@ -96,8 +101,6 @@ struct ChartPaneView: View {
                     activeTool: activeDrawingTool,
                     onCommitDrawing: { drawing in
                         drawingStore.add(drawing, for: pane.pairID)
-                        // TradingView-style: drop back to cursor after a
-                        // successful draw — same as the primary chart.
                         activeDrawingTool = .none
                         selectedDrawingID = drawing.id
                     },
@@ -110,17 +113,17 @@ struct ChartPaneView: View {
                     },
                     livePrice: yahoo.latestPrices[pane.pairID]
                 )
-                .frame(minHeight: 200, maxHeight: .infinity)
+                .frame(minHeight: isCompact ? 130 : 200, maxHeight: .infinity)
                 .clipped()
                 .contextMenu { optionsMenu }
 
                 if pane.showVolume {
                     VolumeBarsView(candles: candles, accent: pair.color, xDomain: xDomain)
-                        .frame(height: 36)
+                        .frame(height: isCompact ? 28 : 36)
                 }
                 ForEach(pane.oscillators.sorted(by: { $0.rawValue < $1.rawValue })) { osc in
                     OscillatorPanel(kind: osc, candles: candles, config: indicatorConfig, xDomain: xDomain)
-                        .frame(height: 80)
+                        .frame(height: isCompact ? 56 : 80)
                 }
             } else {
                 Text("Pair unavailable")
@@ -129,6 +132,7 @@ struct ChartPaneView: View {
                     .frame(maxWidth: .infinity, minHeight: 200)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // ── Header ────────────────────────────────────────────────────

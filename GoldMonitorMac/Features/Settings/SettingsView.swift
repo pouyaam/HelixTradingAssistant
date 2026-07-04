@@ -38,6 +38,20 @@ struct SettingsView: View {
     @AppStorage("ai.codex.model")  private var codexModel: String = "gpt-5.5"
     @AppStorage("ai.codex.effort") private var codexEffort: String = "high"
 
+    // OpenCode model. Read by OpenCodeEngine at run time.
+    @AppStorage("ai.opencode.model") private var opencodeModel: String = OpenCodeModelCatalog.defaultModelID
+
+    // OpenCode API key — loaded from / saved to Keychain.
+    @State private var opencodeAPIKey: String = KeychainHelper.get(.opencodeAPIKey) ?? ""
+    @State private var opencodeAPIKeyDirty: Bool = false
+
+    // OpenCode remote server settings.
+    @AppStorage("ai.opencode.useRemote") private var opencodeUseRemote: Bool = false
+    @AppStorage("ai.opencode.serverURL") private var opencodeServerURL: String = ""
+    @State private var opencodeServerPassword: String = KeychainHelper.get(.opencodeServerPass) ?? ""
+    @State private var opencodeServerPasswordDirty: Bool = false
+    @State private var opencodeServerTestState: TestState = .idle
+
     // Token usage counters (rolled per-render).
     @AppStorage("ai.claude.tokens.today")   private var tokensToday: Int = 0
     @AppStorage("ai.claude.tokens.week")    private var tokensWeek: Int = 0
@@ -251,6 +265,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
             claudeCard
             codexCard
+            opencodeCard
         }
     }
 
@@ -277,6 +292,335 @@ struct SettingsView: View {
                 codexEffortPicker
             }
         }
+    }
+
+    // ── OpenCode card ─────────────────────────────────────────────
+
+    private var opencodeCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                sectionTitle(
+                    icon: "terminal.fill",
+                    title: "OpenCode (AI analysis)",
+                    subtitle: "Free models included via OpenCode Zen, or bring your own provider keys. Pick OpenCode in the engine selector on the analysis page."
+                )
+
+                opencodeRemoteToggle
+
+                if opencodeUseRemote {
+                    opencodeRemoteServerSection
+                } else {
+                    if !opencodeInstalled {
+                        Label("OpenCode CLI not found. Install with `curl -fsSL https://opencode.ai/install | bash`, then restart.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Theme.Color.warn)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    opencodeAPIKeySection
+                }
+
+                opencodeModelPicker
+                opencodeUsageSection
+            }
+        }
+    }
+
+    private var opencodeInstalled: Bool { OpenCodeEngine.locateBinary() != nil }
+
+    private var opencodeRemoteToggle: some View {
+        Toggle(isOn: $opencodeUseRemote) {
+            HStack(spacing: Theme.Spacing.sm) {
+                Image(systemName: "network")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Use Remote Server")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Theme.Color.textPrimary)
+                    Text("Connect to a remote OpenCode server instead of the local CLI")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.Color.textMuted)
+                }
+            }
+        }
+        .toggleStyle(.switch)
+        .tint(Theme.Color.accentStart)
+    }
+
+    private var opencodeRemoteServerSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            // Server URL
+            VStack(alignment: .leading, spacing: 6) {
+                Text("SERVER URL")
+                    .font(.system(size: 9, weight: .bold))
+                    .tracking(0.8)
+                    .foregroundStyle(Theme.Color.textMuted)
+                HStack(spacing: Theme.Spacing.sm) {
+                    TextField("http://your-vps-ip:4096", text: $opencodeServerURL)
+                        .textFieldStyle(.plain)
+                        .padding(Theme.Spacing.sm)
+                        .background(
+                            RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                                .fill(Theme.Color.surface)
+                        )
+                        .foregroundStyle(Theme.Color.textPrimary)
+                        .font(.system(size: 12, design: .monospaced))
+                    Button {
+                        testRemoteServer()
+                    } label: {
+                        if case .working = opencodeServerTestState {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("Test")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.Color.accentStart)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .fill(Theme.Color.surface)
+                                )
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(opencodeServerURL.isEmpty)
+                }
+                if case .ok = opencodeServerTestState {
+                    Label("Connected successfully", systemImage: "checkmark.circle.fill")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.Color.success)
+                }
+                if case .failed(let msg) = opencodeServerTestState {
+                    Label(msg, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.Color.danger)
+                        .lineLimit(2)
+                }
+                Text("Run `opencode serve --port 4096 --hostname 0.0.0.0` on your VPS to start the server.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Server Password
+            VStack(alignment: .leading, spacing: 6) {
+                Text("SERVER PASSWORD")
+                    .font(.system(size: 9, weight: .bold))
+                    .tracking(0.8)
+                    .foregroundStyle(Theme.Color.textMuted)
+                HStack(spacing: Theme.Spacing.sm) {
+                    SecureField("Optional password (OPENCODE_SERVER_PASSWORD)", text: $opencodeServerPassword)
+                        .textFieldStyle(.plain)
+                        .padding(Theme.Spacing.sm)
+                        .background(
+                            RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                                .fill(Theme.Color.surface)
+                        )
+                        .foregroundStyle(Theme.Color.textPrimary)
+                        .font(.system(size: 12, design: .monospaced))
+                        .onChange(of: opencodeServerPassword) { _ in opencodeServerPasswordDirty = true }
+                    Button {
+                        let pass = opencodeServerPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+                        KeychainHelper.set(.opencodeServerPass, pass)
+                        opencodeServerPasswordDirty = false
+                    } label: {
+                        Text(opencodeServerPasswordDirty ? "Save" : "Saved")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(opencodeServerPasswordDirty ? .white : Theme.Color.textSecondary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(opencodeServerPasswordDirty
+                                          ? AnyShapeStyle(Theme.accentGradient)
+                                          : AnyShapeStyle(Theme.Color.surface))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+                Text("Set `OPENCODE_SERVER_PASSWORD` on the server for secure connections. Username defaults to `opencode`.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func testRemoteServer() {
+        guard let serverURL = URL(string: opencodeServerURL) else {
+            opencodeServerTestState = .failed("Invalid URL")
+            return
+        }
+
+        opencodeServerTestState = .working
+        Task {
+            do {
+                let healthURL = serverURL.appendingPathComponent("global/health")
+                var request = URLRequest(url: healthURL)
+                request.timeoutInterval = 10
+
+                // Add basic auth if password is set
+                let password = opencodeServerPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !password.isEmpty {
+                    let credentials = "opencode:\(password)"
+                    let base64 = Data(credentials.utf8).base64EncodedString()
+                    request.setValue("Basic \(base64)", forHTTPHeaderField: "Authorization")
+                }
+
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    await MainActor.run { opencodeServerTestState = .failed("Invalid response") }
+                    return
+                }
+
+                if http.statusCode == 200 {
+                    await MainActor.run { opencodeServerTestState = .ok }
+                } else if http.statusCode == 401 {
+                    await MainActor.run { opencodeServerTestState = .failed("Authentication failed. Check password.") }
+                } else {
+                    await MainActor.run { opencodeServerTestState = .failed("Server returned \(http.statusCode)") }
+                }
+            } catch {
+                await MainActor.run {
+                    opencodeServerTestState = .failed("Connection failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private var opencodeAPIKeySection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("API KEY")
+                .font(.system(size: 9, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+            HStack(spacing: Theme.Spacing.sm) {
+                TextField("sk-… or paste from opencode.ai/auth", text: $opencodeAPIKey)
+                    .textFieldStyle(.plain)
+                    .padding(Theme.Spacing.sm)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                            .fill(Theme.Color.surface)
+                    )
+                    .foregroundStyle(Theme.Color.textPrimary)
+                    .font(.system(size: 12, design: .monospaced))
+                    .onChange(of: opencodeAPIKey) { _ in opencodeAPIKeyDirty = true }
+                Button {
+                    let key = opencodeAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                    KeychainHelper.set(.opencodeAPIKey, key)
+                    opencodeAPIKeyDirty = false
+                } label: {
+                    Text(opencodeAPIKeyDirty ? "Save" : "Saved")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(opencodeAPIKeyDirty ? .white : Theme.Color.textSecondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(opencodeAPIKeyDirty
+                                      ? AnyShapeStyle(Theme.accentGradient)
+                                      : AnyShapeStyle(Theme.Color.surface))
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+            Text("Get your key at opencode.ai/auth. Free models work without a key if you've run `opencode auth login` in your terminal.")
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.Color.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var opencodeModelPicker: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("MODEL")
+                .font(.system(size: 9, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+            Picker("", selection: $opencodeModel) {
+                Section("FREE") {
+                    ForEach(OpenCodeModelCatalog.freeModels) { m in
+                        Text(m.label).tag(m.id)
+                    }
+                }
+                Section("PAID") {
+                    ForEach(OpenCodeModelCatalog.paidModels) { m in
+                        Text(m.label).tag(m.id)
+                    }
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(maxWidth: 320, alignment: .leading)
+
+            if let model = OpenCodeModelCatalog.allModels.first(where: { $0.id == opencodeModel }) {
+                Text(model.hint)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var opencodeUsageSection: some View {
+        let _ = rollOpenCodeUsageWindows()
+        return VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            Text("USAGE")
+                .font(.system(size: 9, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+            HStack(spacing: Theme.Spacing.xl) {
+                usageStat(label: "Today",     value: formatTokens(opencodeTokensToday))
+                usageStat(label: "This week", value: formatTokens(opencodeTokensWeek))
+            }
+            HStack {
+                Button {
+                    if let url = URL(string: "https://opencode.ai/auth") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Label("Open OpenCode billing", systemImage: "arrow.up.right.square")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.Color.accentStart)
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                Button("Reset counters") {
+                    opencodeTokensToday = 0
+                    opencodeTokensWeek  = 0
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.Color.textMuted)
+            }
+        }
+    }
+
+    // OpenCode token usage counters (rolled per-render).
+    @AppStorage("ai.opencode.tokens.today")   private var opencodeTokensToday: Int = 0
+    @AppStorage("ai.opencode.tokens.week")    private var opencodeTokensWeek: Int = 0
+    @AppStorage("ai.opencode.tokens.dayKey")  private var opencodeTokensDayKey: String = ""
+    @AppStorage("ai.opencode.tokens.weekKey") private var opencodeTokensWeekKey: String = ""
+
+    private func rollOpenCodeUsageWindows() -> Bool {
+        let cal = Calendar(identifier: .iso8601)
+        let now = Date()
+        let dayKey = Self.dayKeyFmt.string(from: now)
+        if dayKey != opencodeTokensDayKey {
+            opencodeTokensDayKey = dayKey
+            opencodeTokensToday = 0
+        }
+        let comps = cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)
+        let weekKey = "\(comps.yearForWeekOfYear ?? 0)-W\(comps.weekOfYear ?? 0)"
+        if weekKey != opencodeTokensWeekKey {
+            opencodeTokensWeekKey = weekKey
+            opencodeTokensWeek = 0
+        }
+        return true
     }
 
     private var codexInstalled: Bool { CodexEngine.locateBinary() != nil }

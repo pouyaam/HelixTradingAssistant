@@ -86,12 +86,14 @@ extension AIEngine {
 enum AIEngineKind: String, CaseIterable, Identifiable {
     case claude
     case codex
+    case opencode
 
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .claude: return "Claude"
-        case .codex:  return "Codex"
+        case .claude:   return "Claude"
+        case .codex:    return "Codex"
+        case .opencode: return "OpenCode"
         }
     }
 }
@@ -102,8 +104,9 @@ enum AIEngineKind: String, CaseIterable, Identifiable {
 enum AIEngineFactory {
     static func make(_ kind: AIEngineKind) -> AIEngine {
         switch kind {
-        case .claude: return ClaudeEngine()
-        case .codex:  return CodexEngine()
+        case .claude:   return ClaudeEngine()
+        case .codex:    return CodexEngine()
+        case .opencode: return OpenCodeEngine()
         }
     }
 }

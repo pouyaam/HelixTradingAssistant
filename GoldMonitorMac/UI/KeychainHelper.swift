@@ -18,9 +18,11 @@ enum KeychainHelper {
     /// the actual call sites — typo'd raw strings would silently miss
     /// existing entries and look like a "key not set" state.
     enum Key: String {
-        case anthropicAPIKey = "anthropic.api_key"
-        case socks5Password  = "socks5.password" // reserved for future
-        case backendPassword = "backend.password"
+        case anthropicAPIKey      = "anthropic.api_key"
+        case opencodeAPIKey       = "opencode.api_key"
+        case opencodeServerPass   = "opencode.server_password"
+        case socks5Password       = "socks5.password" // reserved for future
+        case backendPassword      = "backend.password"
     }
 
     // MARK: - Read

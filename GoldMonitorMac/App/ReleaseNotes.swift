@@ -35,6 +35,28 @@ struct ReleaseNotes {
     let highlights: [ReleaseHighlight]
 
     static let latest = ReleaseNotes(
+        version: "1.4",
+        tagline: "Multiple journals, an in-app updater, the OpenCode engine, and a smoother, faster chart.",
+        highlights: [
+            .init(icon: "books.vertical.fill",
+                  title: "Multiple journals",
+                  detail: "Keep separate trade logs — e.g. \"Prop firm challenge,\" \"Personal account,\" \"Backtests\" — each with its own trades, win rate, and P&L. The Journal screen now opens to a list of journals; tap one to log trades inside it, rename, or delete."),
+            .init(icon: "arrow.down.app.fill",
+                  title: "In-app updates",
+                  detail: "Settings → Updates now checks GitHub releases directly, shows the new version's notes, and downloads + opens the .dmg for you — no more digging up the releases page by hand."),
+            .init(icon: "terminal",
+                  title: "OpenCode engine",
+                  detail: "A third AI engine alongside Claude and Codex — runs locally via the OpenCode CLI, or against your own remote OpenCode server, with 5 free Zen models (no API key needed) plus 12 paid models from Anthropic, OpenAI, Google, DeepSeek, and more."),
+            .init(icon: "sparkles",
+                  title: "Improved journal AI reviews",
+                  detail: "Day/week/month review prompts now include full OHLC data for each timeframe, giving the AI richer context. Review history is persisted and browsable from the Journal's overflow menu."),
+            .init(icon: "gauge.with.dots.needle.67percent",
+                  title: "Smoother, faster charts",
+                  detail: "Indicator/oscillator recomputation now runs off the main thread, Order Block exhaustion scanning dropped from quadratic to linear time, and switching multi-chart layouts or toggling fullscreen no longer tears down and rebuilds the chart — panning, zooming, and replay all feel noticeably snappier on years of 1-minute data."),
+        ]
+    )
+
+    static let v1_3 = ReleaseNotes(
         version: "1.3",
         tagline: "Steroid Order Blocks, Volume Profile, multi-chart grid, AI-reviewed journal days, and a real notification inbox.",
         highlights: [

@@ -75,10 +75,18 @@ enum ChartLayoutKind: String, CaseIterable, Identifiable, Codable {
     }
 }
 
-/// Persists the multi-chart grid's layout + per-pane settings.
+/// Persists the multi-chart grid's layout + pane settings.
 /// Independent of the primary dashboard's `@AppStorage` state, so
 /// switching into grid mode and back never disturbs the single-chart
 /// selections.
+///
+/// All layouts share a single `panes` array (up to 4 entries). When
+/// the layout changes, only the pane *count* is adjusted — existing
+/// panes keep their UUIDs so their `ChartPaneView`s stay mounted and
+/// don't need to re-read candle history from GRDB or recompute
+/// indicators. This eliminates the lag that the old per-layout
+/// `panesByLayout` dictionary caused (swapping UUIDs → tearing down
+/// every view on each layout switch).
 @MainActor
 final class MultiChartLayoutStore: ObservableObject {
     @Published var layout: ChartLayoutKind { didSet { save() } }
@@ -89,7 +97,7 @@ final class MultiChartLayoutStore: ObservableObject {
     /// not the same symbol at different zoom levels.
     @Published var syncSymbol: Bool { didSet { save() } }
 
-    private static let storageKey = "dashboard.multichart.v1"
+    private static let storageKey = "dashboard.multichart.v3"
 
     private struct Payload: Codable {
         var layout: ChartLayoutKind
@@ -115,14 +123,32 @@ final class MultiChartLayoutStore: ObservableObject {
     /// layout. New panes seed from `defaultPairID` at a spread of
     /// common timeframes so a freshly opened grid is immediately
     /// useful (15m/1h/4h/1d) instead of four identical 1h charts.
+    /// Only appends or truncates — existing panes are never touched,
+    /// so their UUIDs (and mounted `ChartPaneView`s) survive.
     func ensurePaneCount(defaultPairID: String) {
         let target = layout.paneCount
         guard panes.count != target else { return }
         if panes.count < target {
+            // Inherit the primary chart's indicator / oscillator / volume
+            // selections so grid panes open with the same sub-charts the
+            // user already sees in single-chart mode — instead of empty
+            // panes that require re-enabling everything from scratch.
+            let indicatorsRaw = UserDefaults.standard.string(forKey: "dashboard.indicators") ?? ""
+            let indicators = Set(indicatorsRaw.split(separator: ",").compactMap { IndicatorKind(rawValue: String($0)) })
+            let oscillatorsRaw = UserDefaults.standard.string(forKey: "dashboard.oscillators") ?? ""
+            let oscillators = Set(oscillatorsRaw.split(separator: ",").compactMap { OscillatorKind(rawValue: String($0)) })
+            let showVolume: Bool = (UserDefaults.standard.object(forKey: "dashboard.showVolume") as? Bool) ?? true
+
             let seedTFs: [Timeframe] = [.m15, .h1, .h4, .d1]
             while panes.count < target {
                 let tf = seedTFs[panes.count % seedTFs.count]
-                panes.append(ChartPane(pairID: panes.last?.pairID ?? defaultPairID, timeframe: tf))
+                panes.append(ChartPane(
+                    pairID: panes.last?.pairID ?? defaultPairID,
+                    timeframe: tf,
+                    indicators: indicators,
+                    oscillators: oscillators,
+                    showVolume: showVolume
+                ))
             }
         } else {
             panes = Array(panes.prefix(target))

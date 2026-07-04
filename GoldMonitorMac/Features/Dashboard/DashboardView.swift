@@ -383,22 +383,40 @@ struct DashboardView: View {
                     // is opened via a button on the chart header
                     // regardless of mode.
                     if !isChartFull {
+                        // Grid mode stacks two full-height pane rows below
+                        // this, which can demand more vertical space than
+                        // the window has. Without pinning the header to its
+                        // intrinsic size, the VStack's flexible distribution
+                        // starves it first (it's the only child with no
+                        // minHeight), squashing it down to a sliver that
+                        // Card's `.clipShape` then crops — see the "top of
+                        // the dashboard is clipped" grid-mode bug. Pin it so
+                        // any leftover overflow lands on the grid instead,
+                        // which degrades far more gracefully.
                         pairHeader(pair)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .layoutPriority(1)
                     }
                     if multiChart.layout == .single {
                         chartCard(pair)
+                            .transition(.opacity)
                     } else {
                         ChartGridView(layoutStore: multiChart, indicatorConfig: oscillatorConfig, drawingStore: drawingStore)
+                            .transition(.opacity)
                     }
                 } else {
                     emptyState
                 }
             }
             // Zero padding in fullscreen: chart edges align with the
-            // window edges so the chart truly fills the area.
+            // window edges so the chart truly fills the area. No local
+            // `.animation(value: isChartFull)` here — `RootView`'s HStack
+            // already applies one keyed on the same flag, and nesting a
+            // second implicit-animation transaction around this (heavy)
+            // chart subtree just doubles the layout-thrash during the
+            // transition. Let the outer one drive it.
             .padding(isChartFull ? 0 : Theme.Spacing.xl)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .animation(.easeInOut(duration: 0.2), value: isChartFull)
 
             if app.showAnalysisFullPage, let pair = pair {
                 AnalysisPage(
@@ -726,7 +744,9 @@ struct DashboardView: View {
                     // straight to a different layout from the menu —
                     // always land in a clean, non-fullscreen state.
                     app.isChartFullscreen = false
-                    multiChart.setLayout(layout, defaultPairID: pair.id)
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        multiChart.setLayout(layout, defaultPairID: pair.id)
+                    }
                 } label: {
                     Label(layout.label, systemImage: multiChart.layout == layout
                           ? "checkmark.circle.fill" : layout.icon)
@@ -773,18 +793,14 @@ struct DashboardView: View {
     // ── Chart card ─────────────────────────────────────────────────
     @ViewBuilder
     private func chartCard(_ pair: TradingPair) -> some View {
-        if isChartFull {
-            // Fullscreen: no Card chrome (rounded corners, shadow,
-            // surface fill, inner padding all gone). The chart sits
-            // directly on the canvas so its edges meet the window edges.
+        // A single, unconditional `Card` call — fullscreen is expressed
+        // as a value change (chromeless + smaller padding), not by
+        // switching between `Card { X }` and bare `X` in an `if/else`.
+        // The latter would make SwiftUI tear down and rebuild
+        // `chartCardContent`'s `ChartView` (and its `ChartDerivedCache`)
+        // on every fullscreen toggle — see `Card.chromeless`.
+        Card(padding: isChartFull ? Theme.Spacing.md : Theme.Spacing.xl, chromeless: isChartFull) {
             chartCardContent(pair)
-                .padding(.horizontal, Theme.Spacing.md)
-                .padding(.top, Theme.Spacing.md)
-                .padding(.bottom, Theme.Spacing.md)
-        } else {
-            Card {
-                chartCardContent(pair)
-            }
         }
     }
 
@@ -2454,6 +2470,13 @@ struct DashboardView: View {
             self.candles = result
             self.isLoading = false
             self.followLatestIfPinned(priorCount: priorCount, newCount: result.count)
+            // Alerts only make sense against live data — replay scrubs
+            // historical bars, so evaluating RSI crosses / OB events
+            // against them would fire confusing notifications for
+            // things that aren't actually happening "now", and would
+            // duplicate the OB/SOB compute `ChartDerivedCache` already
+            // runs for the chart's own overlays.
+            guard !replay.isActive else { return }
             // Recompute RSI on the freshly-loaded candles + feed
             // the alert evaluator. RSI alerts only fire on a
             // genuine cross between samples, so it's safe to
@@ -2705,6 +2728,16 @@ struct DashboardView: View {
     /// Snapping to the next *stored* bar (rather than blindly adding
     /// `tf.seconds`) skips COMEX weekend gaps cleanly. Returns false at
     /// the end of data so auto-play can stop itself.
+    ///
+    /// Splices the single revealed bar onto `candles` in memory instead
+    /// of calling `reloadCandles()`, which re-reads and re-folds the
+    /// *entire* stored series (`since: Date.distantPast`). That full
+    /// reload — run on every step, up to 4×/sec during auto-play, with
+    /// no cancellation of the previous one — was what made replay
+    /// stepping/auto-play laggy: it also busts every `ChartDerivedCache`
+    /// signature, forcing every enabled indicator to recompute over the
+    /// full history on every tick. This mirrors the cheap splice
+    /// `refreshTrailingCandles()` already uses for the live 1 Hz tick.
     @discardableResult
     private func advanceReplay() -> Bool {
         guard replay.isActive, let cursor = replay.cursor,
@@ -2713,8 +2746,26 @@ struct DashboardView: View {
             return false
         }
         replay.cursor = next.bucketStart
-        Task { await reloadCandles() }
+        appendReplayBar(next)
         return true
+    }
+
+    /// Incremental counterpart to `refreshTrailingCandles()`, scoped to
+    /// replay's single-bar advance: appends (or, on the rare chance the
+    /// bucket already matches, replaces) one bar without touching the
+    /// rest of the array. No alert/notification evaluation here —
+    /// `reloadCandles()` already skips that while replay is active, and
+    /// this path never runs outside replay.
+    private func appendReplayBar(_ bar: Candle) {
+        let priorCount = candles.count
+        var merged = candles
+        if let last = merged.last, last.bucketStart == bar.bucketStart {
+            merged[merged.count - 1] = bar
+        } else {
+            merged.append(bar)
+        }
+        candles = merged
+        followLatestIfPinned(priorCount: priorCount, newCount: merged.count)
     }
 
     /// Selectable date range for the replay date-jump picker, bounded
@@ -2747,12 +2798,22 @@ struct DashboardView: View {
     }
 
     /// Move the replay cursor back one bar of the current timeframe.
+    /// Pops the last revealed bar from `candles` in memory — the
+    /// step-back counterpart to `advanceReplay`'s append — instead of
+    /// reloading and re-folding the entire stored series.
     private func stepReplayBack() {
         guard replay.isActive, let cursor = replay.cursor,
               let pairID = app.selectedPairID,
               let prev = prevReplayBar(before: cursor, pairID: pairID, tf: timeframe)
         else { return }
         replay.cursor = prev.bucketStart
-        Task { await reloadCandles() }
+        if candles.last?.bucketStart == cursor {
+            candles.removeLast()
+        } else {
+            // In-memory candles don't line up with the cursor (shouldn't
+            // normally happen) — fall back to a full reload rather than
+            // leaving the chart out of sync.
+            Task { await reloadCandles() }
+        }
     }
 }

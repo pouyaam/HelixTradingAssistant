@@ -102,6 +102,7 @@ struct AnalysisPage: View {
     @AppStorage("ai.claude.effort") private var claudeEffort: String = ClaudeModelCatalog.defaultEffortID
     @AppStorage("ai.codex.model")   private var codexModel: String = CodexModelCatalog.defaultModelID
     @AppStorage("ai.codex.effort")  private var codexEffort: String = CodexModelCatalog.defaultEffortID
+    @AppStorage("ai.opencode.model") private var opencodeModel: String = OpenCodeModelCatalog.defaultModelID
 
     // ── Per-tab state proxies ──────────────────────────────────────
     // The source of truth is the current `AnalysisTab` in AppState,
@@ -759,6 +760,8 @@ struct AnalysisPage: View {
         case .codex:
             let base = "Codex · \(CodexModelCatalog.label(forModelID: codexModel)) · \(codexEffort) effort"
             return isComingSoon ? "\(base) — coming soon" : base
+        case .opencode:
+            return "OpenCode · \(OpenCodeModelCatalog.label(forModelID: opencodeModel))"
         }
     }
 
@@ -807,6 +810,8 @@ struct AnalysisPage: View {
                 model: $codexModel,
                 effort: $codexEffort
             )
+        case .opencode:
+            opencodeModelPopover
         }
     }
 
@@ -883,6 +888,89 @@ struct AnalysisPage: View {
                     .help(e.tooltip)
                 }
                 Spacer(minLength: 0)
+            }
+        }
+        .padding(Theme.Spacing.lg)
+        .frame(width: 340)
+    }
+
+    /// OpenCode model picker popover — free models listed first, then
+    /// paid. No effort slider (OpenCode doesn't expose reasoning effort
+    /// the same way Claude/Codex do).
+    private var opencodeModelPopover: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            Text("OPENCODE · MODEL")
+                .font(.system(size: 9, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+            VStack(spacing: 2) {
+                ForEach(OpenCodeModelCatalog.freeModels) { m in
+                    Button {
+                        opencodeModel = m.id
+                    } label: {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: opencodeModel == m.id ? "checkmark.circle.fill" : "circle")
+                                .font(.system(size: 12))
+                                .foregroundStyle(opencodeModel == m.id ? Theme.Color.accentStart : Theme.Color.textMuted)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(m.label)
+                                    .font(.system(size: 12, weight: opencodeModel == m.id ? .semibold : .regular))
+                                    .foregroundStyle(Theme.Color.textPrimary)
+                                Text(m.hint)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Theme.Color.textMuted)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(opencodeModel == m.id ? Theme.Color.surface : Color.clear)
+                        )
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Divider().background(Theme.Color.border)
+
+            Text("PAID MODELS")
+                .font(.system(size: 9, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+            VStack(spacing: 2) {
+                ForEach(OpenCodeModelCatalog.paidModels) { m in
+                    Button {
+                        opencodeModel = m.id
+                    } label: {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: opencodeModel == m.id ? "checkmark.circle.fill" : "circle")
+                                .font(.system(size: 12))
+                                .foregroundStyle(opencodeModel == m.id ? Theme.Color.accentStart : Theme.Color.textMuted)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(m.label)
+                                    .font(.system(size: 12, weight: opencodeModel == m.id ? .semibold : .regular))
+                                    .foregroundStyle(Theme.Color.textPrimary)
+                                Text(m.hint)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Theme.Color.textMuted)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(opencodeModel == m.id ? Theme.Color.surface : Color.clear)
+                        )
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         }
         .padding(Theme.Spacing.lg)
@@ -1313,6 +1401,7 @@ struct AnalysisPage: View {
             }
         }()
         journalDraft = JournalEntry(
+            journalID: journal.lastUsedJournalID,
             pairID: pair.id,
             pairName: pair.name,
             side: side,
@@ -1364,11 +1453,6 @@ struct AnalysisPage: View {
         case .confluenceScanner:
             return "Run **\(selectedEngine.label)** for **Confluence Trade Scanner** on \(pair.name) across 15m, 1h, and 4h — scans for impulsive breakouts that left an FVG, then frames an entry against the last opposite-direction candle."
         case .custom:
-            // The custom path uses CustomPromptEditor instead of
-            // the idle hint, but keep the string defined for
-            // exhaustiveness — and as a fallback if some other
-            // code path surfaces it (e.g. follow-up chat re-using
-            // the kind label).
             return "Write your own prompt in the editor and run it against **\(pair.name)** at \(timeframe.label)."
         case .full, .supportResistance, .fvg:
             return "Run **\(selectedEngine.label)** for **\(selectedKind.label)** on \(pair.name) at \(timeframe.label)."

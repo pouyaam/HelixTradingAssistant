@@ -18,10 +18,11 @@ struct JournalDayAISheet: View {
         let raw = UserDefaults.standard.string(forKey: "ai.journal.engine") ?? "claude"
         return AIEngineKind(rawValue: raw) ?? .claude
     }()
-    @State private var claudeModelID  = UserDefaults.standard.string(forKey: "ai.claude.model")  ?? ClaudeModelCatalog.defaultModelID
-    @State private var claudeEffortID = UserDefaults.standard.string(forKey: "ai.claude.effort") ?? ClaudeModelCatalog.defaultEffortID
-    @State private var codexModelID   = UserDefaults.standard.string(forKey: "ai.codex.model")   ?? CodexModelCatalog.defaultModelID
-    @State private var codexEffortID  = UserDefaults.standard.string(forKey: "ai.codex.effort")  ?? CodexModelCatalog.defaultEffortID
+    @State private var claudeModelID   = UserDefaults.standard.string(forKey: "ai.claude.model")   ?? ClaudeModelCatalog.defaultModelID
+    @State private var claudeEffortID  = UserDefaults.standard.string(forKey: "ai.claude.effort")  ?? ClaudeModelCatalog.defaultEffortID
+    @State private var codexModelID    = UserDefaults.standard.string(forKey: "ai.codex.model")    ?? CodexModelCatalog.defaultModelID
+    @State private var codexEffortID   = UserDefaults.standard.string(forKey: "ai.codex.effort")   ?? CodexModelCatalog.defaultEffortID
+    @State private var opencodeModelID = UserDefaults.standard.string(forKey: "ai.opencode.model") ?? OpenCodeModelCatalog.defaultModelID
 
     // ── Stream state ──────────────────────────────────────────────
     @State private var thinking   = ""
@@ -133,11 +134,13 @@ struct JournalDayAISheet: View {
                                   efforts: ClaudeModelCatalog.efforts,
                                   selectedModel: $claudeModelID,
                                   selectedEffort: $claudeEffortID)
-            } else {
+            } else if engineKind == .codex {
                 modelEffortPicker(models: CodexModelCatalog.models,
                                   efforts: CodexModelCatalog.efforts,
                                   selectedModel: $codexModelID,
                                   selectedEffort: $codexEffortID)
+            } else {
+                opencodeModelPicker
             }
             Spacer()
             HStack {
@@ -481,8 +484,7 @@ struct JournalDayAISheet: View {
         let available = engine.availability.canRun
         Button { if available { engineKind = kind } } label: {
             HStack(spacing: 5) {
-                Image(systemName: kind == .claude ? "brain" : "cpu")
-                    .font(.system(size: 10, weight: .semibold))
+                EngineGlyph(kind: kind, size: 12)
                 Text(kind.label)
                     .font(.system(size: 12, weight: selected ? .bold : .medium))
                 if !available {
@@ -537,18 +539,39 @@ struct JournalDayAISheet: View {
         }
     }
 
+    private var opencodeModelPicker: some View {
+        HStack(alignment: .top, spacing: Theme.Spacing.xl) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                sectionLabel("MODEL")
+                Picker("Model", selection: $opencodeModelID) {
+                    Section("FREE") {
+                        ForEach(OpenCodeModelCatalog.freeModels) { Text($0.label).tag($0.id) }
+                    }
+                    Section("PAID") {
+                        ForEach(OpenCodeModelCatalog.paidModels) { Text($0.label).tag($0.id) }
+                    }
+                }
+                .pickerStyle(.menu).labelsHidden()
+                .frame(maxWidth: 280, alignment: .leading)
+            }
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // MARK: – AI run + prompt
     // ═══════════════════════════════════════════════════════════════
 
     private func startAnalysis() {
         UserDefaults.standard.set(engineKind.rawValue, forKey: "ai.journal.engine")
-        if engineKind == .claude {
+        switch engineKind {
+        case .claude:
             UserDefaults.standard.set(claudeModelID,  forKey: "ai.claude.model")
             UserDefaults.standard.set(claudeEffortID, forKey: "ai.claude.effort")
-        } else {
+        case .codex:
             UserDefaults.standard.set(codexModelID,  forKey: "ai.codex.model")
             UserDefaults.standard.set(codexEffortID, forKey: "ai.codex.effort")
+        case .opencode:
+            UserDefaults.standard.set(opencodeModelID, forKey: "ai.opencode.model")
         }
         isRunning = true; error = nil; output = ""; thinking = ""; savedReview = false
         let engine = AIEngineFactory.make(engineKind)
@@ -661,9 +684,12 @@ struct JournalDayAISheet: View {
     /// the sheet is dismissed.
     private func saveReview() {
         guard !output.isEmpty else { return }
-        let modelLabel = engineKind == .claude
-            ? ClaudeModelCatalog.label(forModelID: claudeModelID)
-            : CodexModelCatalog.label(forModelID: codexModelID)
+        let modelLabel: String
+        switch engineKind {
+        case .claude:   modelLabel = ClaudeModelCatalog.label(forModelID: claudeModelID)
+        case .codex:    modelLabel = CodexModelCatalog.label(forModelID: codexModelID)
+        case .opencode: modelLabel = OpenCodeModelCatalog.label(forModelID: opencodeModelID)
+        }
         let review = DayReviewEntry(
             periodStart: entries.map(\.date).min() ?? day,
             periodTitle: periodTitle ?? Self.dayFmt.string(from: day),

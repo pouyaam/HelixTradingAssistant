@@ -405,7 +405,11 @@ final class AnalysisStore: ObservableObject {
     /// empty/idle session when the user hasn't run anything for that
     /// combination yet — keeps call sites null-free.
     func session(kind: AnalysisKind, pairID: String, tabID: UUID? = nil) -> Session {
-        sessions[SessionKey(pairID: pairID, kind: kind, tabID: tabID)] ?? Session()
+        let key = SessionKey(pairID: pairID, kind: kind, tabID: tabID)
+        if let existing = sessions[key] { return existing }
+        let s = Session()
+        sessions[key] = s
+        return s
     }
 
     private static let historyKey = "analysis.history.v1"
