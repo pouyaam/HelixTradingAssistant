@@ -63,18 +63,43 @@ struct ChartGridView: View {
             // collapsing the unused row/column to zero here hands that
             // reclaimed space back to the row/column that's actually in
             // use.
-            let showsBottomRow = layout == .twoRow || layout == .grid2x2
-            let showsRightColumn = layout == .twoColumn || layout == .grid2x2
-            VStack(spacing: showsBottomRow ? Theme.Spacing.md : 0) {
-                HStack(spacing: showsRightColumn ? Theme.Spacing.md : 0) {
-                    paneSlot(panes, slot: 0, layout: layout)
-                    paneSlot(panes, slot: 1, layout: layout)
+            //
+            // When a pane is fullscreen, the row/column it lives in must
+            // ALSO win the other row/column's space — not just hide the
+            // sibling ChartPaneViews inside their own cells (that alone
+            // still left the fullscreen pane confined to its 50%/50%
+            // grid cell). `fullscreenSlot` below locates which of the
+            // four cells is fullscreen (if any); `rowVisible`/
+            // `columnVisible` then collapse every row/column that isn't
+            // the fullscreen one, same mechanism as the unused-cell case.
+            let fullscreenSlot: Int? = fullscreenPaneID.flatMap { fsID in
+                (0..<4).first { slot in
+                    guard let idx = paneIndex(forSlot: slot, layout: layout), idx < panes.count
+                    else { return false }
+                    return panes[idx].id == fsID
+                }
+            }
+            let showsTopRow = rowVisible(0, layout: layout, fullscreenSlot: fullscreenSlot)
+            let showsBottomRow = rowVisible(1, layout: layout, fullscreenSlot: fullscreenSlot)
+            let showsLeftColumn = columnVisible(0, layout: layout, fullscreenSlot: fullscreenSlot)
+            let showsRightColumn = columnVisible(1, layout: layout, fullscreenSlot: fullscreenSlot)
+            let columnsSplit = showsLeftColumn && showsRightColumn
+            VStack(spacing: (showsTopRow && showsBottomRow) ? Theme.Spacing.md : 0) {
+                HStack(spacing: columnsSplit ? Theme.Spacing.md : 0) {
+                    paneSlot(panes, slot: 0, layout: layout, fullscreenSlot: fullscreenSlot)
+                        .frame(maxWidth: showsLeftColumn ? .infinity : 0)
+                        .opacity(showsLeftColumn ? 1 : 0)
+                    paneSlot(panes, slot: 1, layout: layout, fullscreenSlot: fullscreenSlot)
                         .frame(maxWidth: showsRightColumn ? .infinity : 0)
                         .opacity(showsRightColumn ? 1 : 0)
                 }
-                HStack(spacing: showsRightColumn ? Theme.Spacing.md : 0) {
-                    paneSlot(panes, slot: 2, layout: layout)
-                    paneSlot(panes, slot: 3, layout: layout)
+                .frame(maxHeight: showsTopRow ? .infinity : 0)
+                .opacity(showsTopRow ? 1 : 0)
+                HStack(spacing: columnsSplit ? Theme.Spacing.md : 0) {
+                    paneSlot(panes, slot: 2, layout: layout, fullscreenSlot: fullscreenSlot)
+                        .frame(maxWidth: showsLeftColumn ? .infinity : 0)
+                        .opacity(showsLeftColumn ? 1 : 0)
+                    paneSlot(panes, slot: 3, layout: layout, fullscreenSlot: fullscreenSlot)
                         .frame(maxWidth: showsRightColumn ? .infinity : 0)
                         .opacity(showsRightColumn ? 1 : 0)
                 }
@@ -144,6 +169,22 @@ struct ChartGridView: View {
 
     // MARK: - Pane slot (fixed grid cell)
 
+    /// Whether grid row `row` (0 = top, 1 = bottom) should get any
+    /// space. With no pane fullscreen this is just the layout's normal
+    /// row usage; with a pane fullscreen, only the row it lives in gets
+    /// space — the other row collapses to zero, same trick used for
+    /// unused rows in a non-fullscreen layout (see the caller).
+    private func rowVisible(_ row: Int, layout: ChartLayoutKind, fullscreenSlot: Int?) -> Bool {
+        if let fs = fullscreenSlot { return fs / 2 == row }
+        return row == 0 || layout == .twoRow || layout == .grid2x2
+    }
+
+    /// Column counterpart to `rowVisible` (0 = left, 1 = right).
+    private func columnVisible(_ col: Int, layout: ChartLayoutKind, fullscreenSlot: Int?) -> Bool {
+        if let fs = fullscreenSlot { return fs % 2 == col }
+        return col == 0 || layout == .twoColumn || layout == .grid2x2
+    }
+
     /// Maps a visual slot (0–3 in the 2×2 grid) to the pane index
     /// for the current layout. Returns nil when the slot is unused
     /// in the given layout (e.g. slot 1 in twoRow mode).
@@ -174,11 +215,12 @@ struct ChartGridView: View {
     /// exists but is hidden (another pane is fullscreen, or slot is
     /// unused), it collapses to zero size but stays mounted.
     @ViewBuilder
-    private func paneSlot(_ panes: [ChartPane], slot: Int, layout: ChartLayoutKind) -> some View {
+    private func paneSlot(_ panes: [ChartPane], slot: Int, layout: ChartLayoutKind, fullscreenSlot: Int?) -> some View {
         if let idx = paneIndex(forSlot: slot, layout: layout), idx < panes.count {
             let p = panes[idx]
             let isFullscreenSibling = fullscreenPaneID != nil && fullscreenPaneID != p.id
             let isHidden = isFullscreenSibling
+            let isThisPaneFullscreen = fullscreenSlot == slot
             ChartPaneView(
                 pane: p,
                 indicatorConfig: indicatorConfig,
@@ -190,8 +232,10 @@ struct ChartGridView: View {
                 // .twoRow / .grid2x2 stack two full pane rows, needing
                 // roughly double the vertical budget of a single row —
                 // trim each pane's minimums so both rows actually fit
-                // the window (see `ChartPaneView.isCompact`).
-                isCompact: layout == .twoRow || layout == .grid2x2
+                // the window (see `ChartPaneView.isCompact`). Doesn't
+                // apply once this pane is fullscreen — it then owns the
+                // whole grid area, same room a `.single`-layout pane has.
+                isCompact: !isThisPaneFullscreen && (layout == .twoRow || layout == .grid2x2)
             ) { updated in
                 layoutStore.updatePane(updated)
             }
