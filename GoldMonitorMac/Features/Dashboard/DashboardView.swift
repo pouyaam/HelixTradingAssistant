@@ -948,6 +948,8 @@ struct DashboardView: View {
                 // before `.clipped()` so the modifier's GeometryReader
                 // sees the chart's actual frame in global coords.
                 .scrollZoom(xDomain: $xDomain, totalCandles: candles.count)
+                // Delete selected drawing on Backspace/Forward-Delete.
+                .drawingDeleteKey(selectedDrawingID: $selectedDrawingID, drawingStore: drawingStore, pairID: pair.id)
                 // Belt-and-braces clip at the layout container so any
                 // mark Apple Charts renders past the chart frame still
                 // can't leak past the card content. The price tag now

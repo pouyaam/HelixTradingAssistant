@@ -152,6 +152,7 @@ struct ChartPaneView: View {
                 )
                 .frame(minHeight: isCompact ? 130 : 200, maxHeight: .infinity)
                 .clipped()
+                .drawingDeleteKey(selectedDrawingID: $selectedDrawingID, drawingStore: drawingStore, pairID: pane.pairID)
                 .contextMenu { optionsMenu }
 
                 if pane.showVolume {
