@@ -547,9 +547,13 @@ struct SettingsView: View {
                         Text(m.label).tag(m.id)
                     }
                 }
-                Section("PAID") {
-                    ForEach(OpenCodeModelCatalog.paidModels) { m in
-                        Text(m.label).tag(m.id)
+                ForEach(OpenCodeModelCatalog.providerOrder, id: \.self) { provider in
+                    if let group = OpenCodeModelCatalog.paidModelsByProvider.first(where: { $0.provider == provider }) {
+                        Section(provider) {
+                            ForEach(group.models) { m in
+                                Text(m.label).tag(m.id)
+                            }
+                        }
                     }
                 }
             }

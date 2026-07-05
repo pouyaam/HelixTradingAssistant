@@ -35,6 +35,16 @@ struct ChartPaneView: View {
     /// oscillator minimums and padding to help both rows actually fit
     /// the window instead of overflowing it.
     var isCompact: Bool = false
+    /// False while a *sibling* pane is fullscreen, collapsing this one
+    /// to zero size (see `ChartGridView.paneSlot`'s `isHidden`). The
+    /// view stays mounted either way — only the tick-driven candle
+    /// refresh pauses (see `body`'s `onReceive`). Skipping that refresh
+    /// while invisible avoids rebuilding this pane's `ChartView` (candle
+    /// marks, Order Block / Steroid OB scans, oscillators — the
+    /// expensive part) on every live price tick for a chart nobody can
+    /// see; a plain grid with N mounted panes was paying that cost N×
+    /// even with only one pane on screen.
+    var isVisible: Bool = true
     let onUpdate: (ChartPane) -> Void
 
     @State private var candles: [Candle] = []
@@ -62,10 +72,18 @@ struct ChartPaneView: View {
                     .compactMap { $0 }
                     .throttle(for: .seconds(1), scheduler: DispatchQueue.main, latest: true)
             ) { _ in
-                refreshTrailing()
+                guard isVisible else { return }
+                Task { await refreshTrailing() }
             }
             .onChange(of: yahoo.dataResetToken) { _ in
                 Task { await load() }
+            }
+            // Catch up on whatever ticks were skipped while a sibling
+            // pane was fullscreen — refreshTrailing's lookback window
+            // (`margin`) covers ordinary durations, so a cheap trailing
+            // refresh is enough rather than a full `load()`.
+            .onChange(of: isVisible) { visible in
+                if visible { Task { await refreshTrailing() } }
             }
     }
 
@@ -335,23 +353,21 @@ struct ChartPaneView: View {
         let pairID = pane.pairID
         let tf = pane.timeframe
         let respectsWeekend = app.pairs.first(where: { $0.id == pairID })?.category != .crypto
-        let result = OHLCCandleLoader.load(
+        let result = await OHLCCandleLoader.loadAsync(
             repo: db.ohlcRepo, pairID: pairID, tf: tf,
             since: .distantPast, until: Date(), dropClosedDays: respectsWeekend
         )
-        await MainActor.run {
-            self.candles = result
-            self.xDomain = nil
-            self.yDomain = nil
-            self.activeDrawingTool = .none
-            self.selectedDrawingID = nil
-        }
+        self.candles = result
+        self.xDomain = nil
+        self.yDomain = nil
+        self.activeDrawingTool = .none
+        self.selectedDrawingID = nil
     }
 
     /// Cheap trailing-window refresh on the same live-tick cadence the
     /// primary chart uses, so panes stay current without re-reading
     /// years of history every tick.
-    private func refreshTrailing() {
+    private func refreshTrailing() async {
         guard let db = app.database, !candles.isEmpty else { return }
         let pairID = pane.pairID
         let tf = pane.timeframe
@@ -359,7 +375,7 @@ struct ChartPaneView: View {
         let until = Date()
         let margin = Double(max(tf.seconds * 3, 6 * 3600))
         let since = until.addingTimeInterval(-margin)
-        let recent = OHLCCandleLoader.load(
+        let recent = await OHLCCandleLoader.loadAsync(
             repo: db.ohlcRepo, pairID: pairID, tf: tf,
             since: since, until: until, dropClosedDays: respectsWeekend
         )

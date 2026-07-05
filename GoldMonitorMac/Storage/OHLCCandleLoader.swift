@@ -56,4 +56,43 @@ enum OHLCCandleLoader {
             return []
         }
     }
+
+    /// Async version — uses the async `repo.read()` so the SQLite
+    /// work runs off the main thread. Call from `@MainActor` contexts
+    /// via `await` to keep the UI responsive during large reads.
+    /// (Data-fetching Performance Fix.)
+    static func loadAsync(
+        repo: OHLCRepo,
+        pairID: String,
+        tf: Timeframe,
+        since: Date,
+        until: Date,
+        dropClosedDays: Bool
+    ) async -> [Candle] {
+        let sourceTF = sourceTimeframeTag(for: tf)
+        let needsFold = sourceTF != tf.rawValue
+        do {
+            let bars = try await repo.read(
+                pairID: pairID,
+                timeframe: sourceTF,
+                since: since,
+                until: until,
+                dropClosedDays: dropClosedDays
+            )
+            if !bars.isEmpty {
+                return needsFold ? OHLCAggregator.fold(bars: bars, into: tf)
+                                 : bars.map { $0.toCandle() }
+            }
+            if sourceTF == "1h" || sourceTF == "1d" {
+                let fallback = try await repo.read(
+                    pairID: pairID, timeframe: "5m",
+                    since: since, until: until, dropClosedDays: dropClosedDays
+                )
+                return OHLCAggregator.fold(bars: fallback, into: tf)
+            }
+            return []
+        } catch {
+            return []
+        }
+    }
 }

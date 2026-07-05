@@ -235,7 +235,11 @@ struct ChartGridView: View {
                 // the window (see `ChartPaneView.isCompact`). Doesn't
                 // apply once this pane is fullscreen — it then owns the
                 // whole grid area, same room a `.single`-layout pane has.
-                isCompact: !isThisPaneFullscreen && (layout == .twoRow || layout == .grid2x2)
+                isCompact: !isThisPaneFullscreen && (layout == .twoRow || layout == .grid2x2),
+                // Pauses this pane's tick-driven candle refresh while
+                // it's collapsed behind a fullscreen sibling — see
+                // `ChartPaneView.isVisible`.
+                isVisible: !isHidden
             ) { updated in
                 layoutStore.updatePane(updated)
             }

@@ -547,8 +547,12 @@ struct JournalDayAISheet: View {
                     Section("FREE") {
                         ForEach(OpenCodeModelCatalog.freeModels) { Text($0.label).tag($0.id) }
                     }
-                    Section("PAID") {
-                        ForEach(OpenCodeModelCatalog.paidModels) { Text($0.label).tag($0.id) }
+                    ForEach(OpenCodeModelCatalog.providerOrder, id: \.self) { provider in
+                        if let group = OpenCodeModelCatalog.paidModelsByProvider.first(where: { $0.provider == provider }) {
+                            Section(provider) {
+                                ForEach(group.models) { Text($0.label).tag($0.id) }
+                            }
+                        }
                     }
                 }
                 .pickerStyle(.menu).labelsHidden()

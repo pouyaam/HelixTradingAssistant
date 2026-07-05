@@ -397,13 +397,29 @@ struct DashboardView: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .layoutPriority(1)
                     }
-                    if multiChart.layout == .single {
+                    // Both views stay mounted at all times — the inactive
+                    // one collapses to zero frame + zero opacity instead of
+                    // being torn down. Same trick ChartGridView uses for its
+                    // internal pane slots. This eliminates the expensive
+                    // teardown/rebuild cycle (destroying ChartView's
+                    // @StateObject cache + all @State, then building fresh
+                    // ChartPaneViews that reload candles from GRDB) that the
+                    // old if/else caused on every single↔grid switch.
+                    let showsSingle = multiChart.layout == .single
+                    ZStack {
                         chartCard(pair)
-                            .transition(.opacity)
-                    } else {
+                            .frame(maxWidth: showsSingle ? .infinity : 0,
+                                   maxHeight: showsSingle ? .infinity : 0)
+                            .opacity(showsSingle ? 1 : 0)
+                            .allowsHitTesting(showsSingle)
                         ChartGridView(layoutStore: multiChart, indicatorConfig: oscillatorConfig, drawingStore: drawingStore)
-                            .transition(.opacity)
+                            .frame(maxWidth: showsSingle ? 0 : .infinity,
+                                   maxHeight: showsSingle ? 0 : .infinity)
+                            .opacity(showsSingle ? 0 : 1)
+                            .allowsHitTesting(!showsSingle)
                     }
+                    .clipped()
+                    .animation(.easeInOut(duration: 0.25), value: multiChart.layout)
                 } else {
                     emptyState
                 }
@@ -418,7 +434,12 @@ struct DashboardView: View {
             .padding(isChartFull ? 0 : Theme.Spacing.xl)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-            if app.showAnalysisFullPage, let pair = pair {
+            // Analysis page stays mounted when closed — same
+            // frame/opacity collapse trick as the chart/grid switch.
+            // Tearing it down dropped its @State (running engine,
+            // accumulated markdown) on every close.
+            let showAnalysis = app.showAnalysisFullPage && pair != nil
+            if let pair = pair {
                 AnalysisPage(
                     pair: pair,
                     timeframe: timeframe,
@@ -435,11 +456,6 @@ struct DashboardView: View {
                     onApplyTAScenario:    { taScenario = $0 },
                     onApplyTAAltScenario: { taAltScenario = $0 },
                     onActivateTradeFromScenario: { scenario, entryID in
-                        // Defer the activation sheet by one render —
-                        // SwiftUI can race when one modal transition
-                        // hands off directly to another. Carries the
-                        // source entry ID so the resulting trade can
-                        // stamp its outcome back onto history.
                         pendingActivation = PendingActivation(
                             scenario: scenario,
                             sourceHistoryEntryID: entryID
@@ -452,7 +468,10 @@ struct DashboardView: View {
                     onRestoreTAAltScenario: { taAltScenario = $0 }
                 )
                 .environmentObject(analysisStore)
-                .transition(.opacity)
+                .frame(maxWidth: showAnalysis ? .infinity : 0,
+                       maxHeight: showAnalysis ? .infinity : 0)
+                .opacity(showAnalysis ? 1 : 0)
+                .allowsHitTesting(showAnalysis)
             }
         }
         .background(Theme.Color.canvas)
@@ -569,7 +588,7 @@ struct DashboardView: View {
                cur.usesLiveStream,
                !replay.isActive   // live ticks must not disturb a frozen replay view
             {
-                refreshTrailingCandles()
+                Task { await refreshTrailingCandles() }
             }
         }
         // Paper-trade evaluator: any live-stream pair's price tick
@@ -744,9 +763,7 @@ struct DashboardView: View {
                     // straight to a different layout from the menu —
                     // always land in a clean, non-fullscreen state.
                     app.isChartFullscreen = false
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        multiChart.setLayout(layout, defaultPairID: pair.id)
-                    }
+                    multiChart.setLayout(layout, defaultPairID: pair.id)
                 } label: {
                     Label(layout.label, systemImage: multiChart.layout == layout
                           ? "checkmark.circle.fill" : layout.icon)
@@ -2459,35 +2476,30 @@ struct DashboardView: View {
     }
 
     private func reloadCandles() async {
-        guard app.database != nil, let pairID = app.selectedPairID else {
+        guard let db = app.database, let pairID = app.selectedPairID else {
             candles = []
             return
         }
         isLoading = true
-        let result = candles(for: timeframe)
+        // Async read — SQLite work runs off the main thread.
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        let respectsWeekend = pair?.category != .crypto
+        let until = replay.cursor ?? Date()
+        let result = await OHLCCandleLoader.loadAsync(
+            repo: db.ohlcRepo, pairID: pairID, tf: timeframe,
+            since: Date.distantPast, until: until,
+            dropClosedDays: respectsWeekend
+        )
         let priorCount = candles.count
-        await MainActor.run {
-            self.candles = result
-            self.isLoading = false
-            self.followLatestIfPinned(priorCount: priorCount, newCount: result.count)
-            // Alerts only make sense against live data — replay scrubs
-            // historical bars, so evaluating RSI crosses / OB events
-            // against them would fire confusing notifications for
-            // things that aren't actually happening "now", and would
-            // duplicate the OB/SOB compute `ChartDerivedCache` already
-            // runs for the chart's own overlays.
-            guard !replay.isActive else { return }
-            // Recompute RSI on the freshly-loaded candles + feed
-            // the alert evaluator. RSI alerts only fire on a
-            // genuine cross between samples, so it's safe to
-            // call this on every reload — the evaluator's prior-
-            // sample memory gates duplicate fires.
-            if let r = Oscillators.rsi(result, period: oscillatorConfig.rsiPeriod).last?.value {
-                let livePeek = yahoo.latestPrices[pairID]
-                alertStore.evaluateRSI(r, pricePeek: livePeek, for: pairID)
-            }
-            notifyOrderBlockEvents(result, pairID: pairID)
+        self.candles = result
+        self.isLoading = false
+        self.followLatestIfPinned(priorCount: priorCount, newCount: result.count)
+        guard !replay.isActive else { return }
+        if let r = Oscillators.rsi(result, period: oscillatorConfig.rsiPeriod).last?.value {
+            let livePeek = yahoo.latestPrices[pairID]
+            alertStore.evaluateRSI(r, pricePeek: livePeek, for: pairID)
         }
+        notifyOrderBlockEvents(result, pairID: pairID)
     }
 
     /// Cheap live-tick path. The full `reloadCandles()` now re-reads the
@@ -2498,7 +2510,10 @@ struct DashboardView: View {
     /// gets its latest OHLC, and any bar that just rolled over is
     /// appended. The deep load stays reserved for pair / timeframe change
     /// and explicit refresh.
-    private func refreshTrailingCandles() {
+    ///
+    /// Now uses `loadAsync` so the SQLite read + fold runs off the main
+    /// thread. (Data-fetching Performance Fix.)
+    private func refreshTrailingCandles() async {
         guard let db = app.database, let pairID = app.selectedPairID else { return }
         let pair = app.pairs.first(where: { $0.id == pairID })
         let respectsWeekend = pair?.category != .crypto
@@ -2507,7 +2522,7 @@ struct DashboardView: View {
         // re-folding the tail reproduces the last bars exactly.
         let margin = Double(max(timeframe.seconds * 3, 6 * 3600))
         let since = until.addingTimeInterval(-margin)
-        let recent = loadOHLCCandles(
+        let recent = await OHLCCandleLoader.loadAsync(
             repo: db.ohlcRepo, pairID: pairID, tf: timeframe,
             since: since, until: until, dropClosedDays: respectsWeekend
         )

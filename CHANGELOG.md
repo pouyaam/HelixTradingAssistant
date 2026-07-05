@@ -4,6 +4,32 @@ All notable changes to Helix Trading App are documented here.
 
 ---
 
+## [v1.4 build 5] — 2026-07-05
+
+**Async data pipeline, incremental fetching, and streaming AI performance.**
+
+### Performance — Data Fetching
+
+- **All DB reads now off the main thread** — `OHLCCandleLoader.loadAsync()` uses GRDB's async `repo.read()` so SQLite work never blocks the UI. `DashboardView.reloadCandles()`, `refreshTrailingCandles()`, and `ChartPaneView` candle loading all route through it. The 1 Hz live-tick trailing refresh and pair/timeframe changes no longer cause visible hangs on large histories.
+- **Incremental Yahoo fetching** — periodic sync now checks `latestBucket` per timeframe and passes `period1` (Unix timestamp) to Yahoo's chart API, fetching only bars newer than what's stored. Eliminates re-downloading and re-upserting ~11,520 stale 1m bars every 60 seconds.
+- **Batched upserts** — `OHLCRepo._upsertMany()` now uses multi-row INSERT (124 rows per statement, 992 params) instead of individual INSERT per row. 11,520 bars go from ~11,520 SQL executions to ~93.
+- **Parallel bootstrap** — `bootstrapAndGapFill()` now uses `TaskGroup` to process all pairs concurrently (each pair's 4 timeframes already ran concurrently via `backfillAll`). Seed price reads also parallelized. Startup history fetch is no longer sequential across pairs.
+- **`@Published` cascade reduction** — `publishTick()` and `publishLastUpdate()` throttle `latestPrices` / `lastUpdateAt` / `activeLiveSource` writes to 1 Hz, so the entire DashboardView → ChartView → OscillatorPanel view tree re-evaluates at most once per second instead of on every live tick (5–20 Hz per symbol).
+
+### Performance — AI Analysis Streaming
+
+- **Conversation turn `Text()` fallback** — follow-up turns now render plain `Text()` while streaming (same optimization as the main report's trailing chunk), promoting to `Markdown()` only once the turn completes. Eliminates cmark re-parse + SwiftUI view tree rebuild on every 100 ms flush.
+- **Conversation turn flush no longer triggers store-level `@Published`** — removed `sessions[key] = sess` from the flush path. Session is a class, so the mutation is in-place; the `@ObservedObject` on the report column picks it up without cascading the store's `@Published` to the entire AnalysisPage.
+- **`stripStructuredBlocks` fast path** — a single `contains` check per marker returns the report unchanged when no `### *_JSON` markers are present. During streaming, markers only appear near the end, so the common path is O(1) instead of 7 marker scans + string rebuilding every 100 ms.
+- **`renderChunks()` throttled to 5 Hz** — the 100 ms chunk flush invalidates the cache every time, but the actual `stripStructuredBlocks` + `chunkAtH3` recomputation is deferred until at least 200 ms has elapsed. The stale cache is returned in the interim; the trailing `Text()` chunk covers the visual gap.
+
+### Bug Fixes
+
+- **Faraz WebSocket-fresh periods skip Yahoo sync entirely** — when Faraz is the active source, the periodic Yahoo history sync is now fully skipped (not just gated per-pair), avoiding redundant HTTP requests for pairs Faraz already serves.
+- **Twelve Data socket lifecycle matches source selection** — the socket is now opened/closed as a unit (`startTwelveDataStream` / `stopTwelveDataStream`) instead of being left open while Faraz ticks drop every incoming message. `switchGoldSource` toggles both sockets cleanly.
+
+---
+
 ## [v1.4] — 2026-07-04
 
 **Multiple journals, an in-app updater, the OpenCode engine, and a much faster chart.**

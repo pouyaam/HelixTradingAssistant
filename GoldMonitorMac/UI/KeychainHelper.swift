@@ -67,10 +67,12 @@ enum KeychainHelper {
         ]
         let attributes: [String: Any] = [
             kSecValueData as String: data,
-            // ThisDeviceOnly so syncing to iCloud Keychain is opt-in and
-            // doesn't leak the key to other Macs by default. Users wanting
-            // sync can change this in a future settings toggle.
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            // AfterFirstUnlock suppresses the repeated Keychain auth
+            // prompt that WhenUnlockedThisDeviceOnly triggers on
+            // every read.  The item is still device-only and
+            // encrypted at rest — it just doesn't re-prompt after
+            // the user has unlocked their Mac once.
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
 
         // Try update first; if the item doesn't exist, insert.
@@ -79,7 +81,7 @@ enum KeychainHelper {
         if updateStatus == errSecItemNotFound {
             var insertQuery = query
             insertQuery[kSecValueData as String] = data
-            insertQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            insertQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             let addStatus = SecItemAdd(insertQuery as CFDictionary, nil)
             return addStatus == errSecSuccess
         }

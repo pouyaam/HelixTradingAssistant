@@ -25,19 +25,37 @@ enum YahooGoldSource {
     /// into OHLCBars tagged with that pair's id. Pairs whose category
     /// has a fixed weekly close (e.g. COMEX gold) drop weekend bars;
     /// crypto pairs run 24/7 and keep every bar.
+    ///
+    /// When `since` is non-nil, uses `period1` (Unix timestamp) to
+    /// fetch only bars newer than that date — avoids re-downloading
+    /// and re-upserting thousands of bars we already have.
+    /// (Incremental-fetch Performance Fix.)
     static func fetchHistory(
         pairID: String,
         symbol: String,
         skipWeekends: Bool,
         range: String,
-        interval: String
+        interval: String,
+        since: Date? = nil
     ) async throws -> [OHLCBar] {
         var comps = URLComponents(string: "https://query2.finance.yahoo.com/v8/finance/chart/\(symbol)")!
-        comps.queryItems = [
-            .init(name: "range", value: range),
-            .init(name: "interval", value: interval),
-            .init(name: "includePrePost", value: "false"),
-        ]
+        if let since = since {
+            // Incremental: fetch only bars newer than `since`.
+            // Add a 1-minute buffer to avoid re-fetching the boundary bar.
+            let period1 = Int(since.timeIntervalSince1970) - 60
+            comps.queryItems = [
+                .init(name: "period1", value: "\(period1)"),
+                .init(name: "period2", value: "\(Int(Date().timeIntervalSince1970))"),
+                .init(name: "interval", value: interval),
+                .init(name: "includePrePost", value: "false"),
+            ]
+        } else {
+            comps.queryItems = [
+                .init(name: "range", value: range),
+                .init(name: "interval", value: interval),
+                .init(name: "includePrePost", value: "false"),
+            ]
+        }
         guard let url = comps.url else { throw YahooError.badURL }
 
         var req = URLRequest(url: url)

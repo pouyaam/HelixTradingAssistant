@@ -894,87 +894,79 @@ struct AnalysisPage: View {
         .frame(width: 340)
     }
 
-    /// OpenCode model picker popover — free models listed first, then
-    /// paid. No effort slider (OpenCode doesn't expose reasoning effort
-    /// the same way Claude/Codex do).
+    /// OpenCode model picker popover — grouped by provider with
+    /// collapsible DisclosureGroups inside a ScrollView so it stays
+    /// manageable at any size.
     private var opencodeModelPopover: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+        VStack(alignment: .leading, spacing: 0) {
             Text("OPENCODE · MODEL")
                 .font(.system(size: 9, weight: .bold))
                 .tracking(0.8)
                 .foregroundStyle(Theme.Color.textMuted)
-            VStack(spacing: 2) {
-                ForEach(OpenCodeModelCatalog.freeModels) { m in
-                    Button {
-                        opencodeModel = m.id
-                    } label: {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: opencodeModel == m.id ? "checkmark.circle.fill" : "circle")
-                                .font(.system(size: 12))
-                                .foregroundStyle(opencodeModel == m.id ? Theme.Color.accentStart : Theme.Color.textMuted)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(m.label)
-                                    .font(.system(size: 12, weight: opencodeModel == m.id ? .semibold : .regular))
-                                    .foregroundStyle(Theme.Color.textPrimary)
-                                Text(m.hint)
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(Theme.Color.textMuted)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(opencodeModel == m.id ? Theme.Color.surface : Color.clear)
-                        )
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
+                .padding(.horizontal, Theme.Spacing.lg)
+                .padding(.top, Theme.Spacing.lg)
+                .padding(.bottom, Theme.Spacing.sm)
 
-            Divider().background(Theme.Color.border)
-
-            Text("PAID MODELS")
-                .font(.system(size: 9, weight: .bold))
-                .tracking(0.8)
-                .foregroundStyle(Theme.Color.textMuted)
-            VStack(spacing: 2) {
-                ForEach(OpenCodeModelCatalog.paidModels) { m in
-                    Button {
-                        opencodeModel = m.id
-                    } label: {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: opencodeModel == m.id ? "checkmark.circle.fill" : "circle")
-                                .font(.system(size: 12))
-                                .foregroundStyle(opencodeModel == m.id ? Theme.Color.accentStart : Theme.Color.textMuted)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(m.label)
-                                    .font(.system(size: 12, weight: opencodeModel == m.id ? .semibold : .regular))
-                                    .foregroundStyle(Theme.Color.textPrimary)
-                                Text(m.hint)
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(Theme.Color.textMuted)
-                                    .fixedSize(horizontal: false, vertical: true)
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                    ForEach(OpenCodeModelCatalog.allModelsByProvider, id: \.provider) { group in
+                        DisclosureGroup {
+                            VStack(spacing: 2) {
+                                ForEach(group.models) { m in
+                                    opencodeModelRow(m)
+                                }
                             }
-                            Spacer(minLength: 0)
+                        } label: {
+                            opencodeSectionLabel(group.provider, count: group.models.count)
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(opencodeModel == m.id ? Theme.Color.surface : Color.clear)
-                        )
-                        .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
                 }
+                .padding(.horizontal, Theme.Spacing.lg)
+                .padding(.bottom, Theme.Spacing.lg)
             }
         }
-        .padding(Theme.Spacing.lg)
-        .frame(width: 340)
+        .frame(width: 340, height: 420)
+    }
+
+    private func opencodeSectionLabel(_ title: String, count: Int) -> some View {
+        HStack(spacing: 4) {
+            Text(title)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(Theme.Color.textSecondary)
+            Text("(\(count))")
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.Color.textMuted)
+        }
+    }
+
+    private func opencodeModelRow(_ m: OpenCodeModelCatalog.Model) -> some View {
+        Button {
+            opencodeModel = m.id
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: opencodeModel == m.id ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 12))
+                    .foregroundStyle(opencodeModel == m.id ? Theme.Color.accentStart : Theme.Color.textMuted)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(m.label)
+                        .font(.system(size: 12, weight: opencodeModel == m.id ? .semibold : .regular))
+                        .foregroundStyle(Theme.Color.textPrimary)
+                    Text(m.hint)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.Color.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(opencodeModel == m.id ? Theme.Color.surface : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var historyForKind: [AnalysisStore.HistoryEntry] {

@@ -1758,6 +1758,7 @@ struct ChartView: View {
         }
     }
 
+
     /// Indicator-computed FVG zones. Each gap is a translucent rectangle
     /// from the bar where it formed to the right edge of the chart
     /// (extending into the future so the user can watch price approach).

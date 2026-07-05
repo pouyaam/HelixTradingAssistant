@@ -181,12 +181,27 @@ struct OHLCRepo {
     // logic lives in exactly one place.
 
     private static func _upsertMany(_ bars: [OHLCBar], _ db: Database) throws {
-        for b in bars {
+        // Batched multi-row INSERT — 8 params per row, SQLite limit
+        // is 999 variables, so 124 rows per statement.
+        // (Batch-upsert Performance Fix.)
+        let chunkSize = 124
+        for chunkStart in stride(from: 0, to: bars.count, by: chunkSize) {
+            let end = min(chunkStart + chunkSize, bars.count)
+            let chunk = bars[chunkStart..<end]
+            var valueClauses: [String] = []
+            var args: [DatabaseValueConvertible] = []
+            for b in chunk {
+                valueClauses.append("(?, ?, ?, ?, ?, ?, ?, ?)")
+                args.append(contentsOf: [
+                    b.pairID, b.timeframe, Self.iso.string(from: b.bucketStart),
+                    b.open, b.high, b.low, b.close, b.volume as DatabaseValueConvertible,
+                ])
+            }
             try db.execute(
                 sql: """
                 INSERT INTO ohlc
                     (pair_id, timeframe, bucket_start, open, high, low, close, volume)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES \(valueClauses.joined(separator: ", "))
                 ON CONFLICT(pair_id, timeframe, bucket_start) DO UPDATE SET
                     open = excluded.open,
                     high = excluded.high,
@@ -194,13 +209,7 @@ struct OHLCRepo {
                     close = excluded.close,
                     volume = excluded.volume
                 """,
-                arguments: [
-                    b.pairID,
-                    b.timeframe,
-                    Self.iso.string(from: b.bucketStart),
-                    b.open, b.high, b.low, b.close,
-                    b.volume,
-                ]
+                arguments: StatementArguments(args)
             )
         }
     }

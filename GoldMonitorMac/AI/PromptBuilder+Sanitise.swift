@@ -14,10 +14,10 @@ extension PromptBuilder {
     /// so the streaming report doesn't flash a wall of raw JSON before
     /// the closing fence arrives).
     static func stripStructuredBlocks(_ markdown: String) -> String {
-        // Order matters: strip the longer "SCENARIOS_JSON" /
-        // "ALT_SCENARIO_JSON" markers before the shorter
-        // "SCENARIO_JSON" so a partial match can't leave a dangling
-        // "S" / "ALT_" prefix behind.
+        // Fast path: during streaming the report rarely contains any
+        // of the JSON markers — a single `contains` check per marker
+        // is O(n) but avoids the heavier `range` + string-rebuild
+        // loop on the common path. (Streaming Performance Fix.)
         let markers = [
             "### LEVELS_JSON",
             "### SCENARIOS_JSON",
@@ -27,6 +27,13 @@ extension PromptBuilder {
             "### SUPPLY_DEMAND_JSON",
             "### CLARIFY_JSON",
         ]
+        let hasAnyMarker = markers.contains { markdown.contains($0) }
+        guard hasAnyMarker else { return markdown }
+
+        // Order matters: strip the longer "SCENARIOS_JSON" /
+        // "ALT_SCENARIO_JSON" markers before the shorter
+        // "SCENARIO_JSON" so a partial match can't leave a dangling
+        // "S" / "ALT_" prefix behind.
         var result = markdown
         for marker in markers {
             // Loop in case the model emitted the same marker twice
