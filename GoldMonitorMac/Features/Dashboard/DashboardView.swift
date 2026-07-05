@@ -519,6 +519,9 @@ struct DashboardView: View {
             Task { await reloadCandles() }
             warmHistory()   // ensure this timeframe's deep series is filled
         }
+        // Cache totalVolume so the O(n) candle iteration only runs
+        // when candles change, not on every pan/zoom frame.
+        .onChange(of: candles.count) { _ in recomputeTotalVolume() }
         // Infinite scroll: when the user pans within a few bars of the
         // oldest stored candle, pull an older page from Twelve Data
         // (Yahoo caps 1m/5m at ~8d/~60d) and splice it onto the front.
@@ -999,7 +1002,7 @@ struct DashboardView: View {
                         .transition(.scale.combined(with: .opacity))
                     }
                 }
-                .animation(.spring(response: 0.3, dampingFraction: 0.75), value: isViewingLatest)
+                .animation(.easeOut(duration: 0.15), value: isViewingLatest)
                 // Replay transport — floats bottom-center while replay
                 // is active. Picking phase shows a hint; once anchored
                 // it's play/pause/step/speed + the cursor clock.
@@ -2256,7 +2259,7 @@ struct DashboardView: View {
             stat(label: "24H LOW", value: pair.low24h, color: Theme.Color.danger)
             Divider().background(Theme.Color.border).frame(height: 24)
             stat(label: "CHANGE", value: pair.change, color: pair.change >= 0 ? Theme.Color.success : Theme.Color.danger)
-            if let vol = totalVolume {
+            if let vol = cachedTotalVolume {
                 Divider().background(Theme.Color.border).frame(height: 24)
                 volumeStat(vol)
             }
@@ -2267,11 +2270,15 @@ struct DashboardView: View {
     /// Sum of `volume` across all visible candles. Returns nil when no
     /// candle has volume data — keeps the "VOLUME" stat hidden for pairs
     /// that don't report volume (everything except ounce, currently).
-    private var totalVolume: Double? {
+    /// Cached in `@State` so the O(n) candle iteration only runs when
+    /// `candles` actually changes, not on every pan/zoom frame.
+    /// (Pan/zoom performance fix.)
+    @State private var cachedTotalVolume: Double? = nil
+    private func recomputeTotalVolume() {
         let vols = candles.compactMap { $0.volume }
-        guard !vols.isEmpty else { return nil }
+        guard !vols.isEmpty else { cachedTotalVolume = nil; return }
         let sum = vols.reduce(0, +)
-        return sum > 0 ? sum : nil
+        cachedTotalVolume = sum > 0 ? sum : nil
     }
 
     /// Volume strip rendered just under the main price chart. Hidden when
@@ -2517,6 +2524,7 @@ struct DashboardView: View {
         )
         let priorCount = candles.count
         self.candles = result
+        recomputeTotalVolume()
         self.isLoading = false
         self.followLatestIfPinned(priorCount: priorCount, newCount: result.count)
         guard !replay.isActive else { return }
@@ -2557,6 +2565,7 @@ struct DashboardView: View {
         while let last = merged.last, last.bucketStart >= cutoff { merged.removeLast() }
         merged.append(contentsOf: recent)
         candles = merged
+        recomputeTotalVolume()
         followLatestIfPinned(priorCount: priorCount, newCount: merged.count)
         if let r = Oscillators.rsi(merged, period: oscillatorConfig.rsiPeriod).last?.value {
             alertStore.evaluateRSI(r, pricePeek: yahoo.latestPrices[pairID], for: pairID)

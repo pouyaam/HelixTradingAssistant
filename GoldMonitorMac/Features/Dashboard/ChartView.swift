@@ -237,8 +237,16 @@ struct ChartView: View {
                 // steal pan/hover from the main canvas.
                 .overlay(alignment: .trailing) { priceAxisScaleStrip }
                 .overlay(alignment: .topLeading) { hoverTooltip }
-                .animation(.easeOut(duration: 0.15), value: hovered)
-                .animation(.easeInOut(duration: 0.4), value: candles.count)
+                // No global .animation() modifiers here. Previously:
+                //   .animation(.easeOut(0.15), value: hovered)
+                //   .animation(.easeInOut(0.4), value: candles.count)
+                // Both wrapped the ENTIRE chart subtree (hundreds of
+                // marks + overlays), triggering animation transactions
+                // on every hover event and every 1 Hz tick. The hovered
+                // animation is now targeted to just the tooltip overlay;
+                // the candles-count animation was removed — instant bar
+                // appearance is fine (TradingView does the same).
+                // (Pan/zoom performance fix.)
         }
     }
 
@@ -2813,6 +2821,8 @@ struct ChartView: View {
             )
             .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
             .padding(12)
+            .transition(.opacity)
+            .animation(.easeOut(duration: 0.1), value: hovered != nil)
         }
     }
 
