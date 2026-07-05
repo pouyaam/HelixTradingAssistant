@@ -219,12 +219,37 @@ struct ChartPaneView: View {
                 armedToolBadge
             }
 
-            Text(pane.timeframe.label)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(Theme.Color.textMuted)
+            // Timeframe + chart type selectors — same controls as the
+            // single chart's toolbar, bound to this pane's state.
+            TimeframeSelector(selected: timeframeBinding)
+            ChartTypeToggle(selected: chartTypeBinding, isDisabled: false)
 
             fullscreenButton
         }
+    }
+
+    /// Binding for TimeframeSelector — reads from pane, writes via onUpdate.
+    private var timeframeBinding: Binding<Timeframe> {
+        Binding(
+            get: { pane.timeframe },
+            set: { newTF in
+                var updated = pane
+                updated.timeframe = newTF
+                onUpdate(updated)
+            }
+        )
+    }
+
+    /// Binding for ChartTypeToggle — reads from pane, writes via onUpdate.
+    private var chartTypeBinding: Binding<ChartType> {
+        Binding(
+            get: { pane.chartType },
+            set: { newCT in
+                var updated = pane
+                updated.chartType = newCT
+                onUpdate(updated)
+            }
+        )
     }
 
     /// Shown only while a drawing tool is armed — there's no persistent
