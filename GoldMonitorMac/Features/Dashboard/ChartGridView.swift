@@ -12,7 +12,7 @@ import SwiftUI
 /// the fullscreen toggle already uses. This means no
 /// `ChartPaneView` is ever torn down or rebuilt on a layout switch;
 /// only frame/opacity values change, which SwiftUI animates smoothly.
-struct ChartGridView: View {
+struct ChartGridView<FullscreenToolbar: View>: View {
     @EnvironmentObject private var app: AppState
     @ObservedObject var layoutStore: MultiChartLayoutStore
     let indicatorConfig: OscillatorConfig
@@ -21,6 +21,11 @@ struct ChartGridView: View {
     /// it in, so a line drawn in a grid pane shows up on the primary
     /// chart for that pair too, and vice versa.
     @ObservedObject var drawingStore: DrawingStore
+    /// Toolbar shown above the grid when a pane is fullscreen.
+    /// The parent (DashboardView) provides the content — it has
+    /// access to all the chart-control state (AI, indicators,
+    /// drawing tools, timeframe, chart type, etc.).
+    @ViewBuilder let fullscreenToolbar: () -> FullscreenToolbar
 
     /// Which pane (if any) a user has expanded to fullscreen. Only one
     /// pane can be fullscreen at a time — going fullscreen hides every
@@ -40,6 +45,19 @@ struct ChartGridView: View {
             // already owns the exit control then.
             if fullscreenPaneID == nil {
                 gridToolbar
+            }
+            // Fullscreen toolbar — slides in from the top when a pane
+            // goes fullscreen, giving access to all single-chart tools
+            // (AI, indicators, drawing, chart type, timeframe, etc.)
+            if fullscreenPaneID != nil {
+                fullscreenToolbar()
+                    .padding(.horizontal, Theme.Spacing.md)
+                    .padding(.vertical, Theme.Spacing.sm)
+                    .background(
+                        Rectangle()
+                            .fill(Theme.Color.surface.opacity(0.95))
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
             // Fixed 2×2 grid — the same container hierarchy every time.
             // Unused slots collapse to zero frame + zero opacity instead
@@ -115,6 +133,8 @@ struct ChartGridView: View {
         // SwiftUI smoothly resizes panes instead of cross-fading
         // between two entirely different container trees.
         .animation(.easeInOut(duration: 0.25), value: layoutStore.layout)
+        // Animate the fullscreen toolbar slide-in/out.
+        .animation(.easeInOut(duration: 0.25), value: fullscreenPaneID)
         // Keep the sidebar-collapse behavior in sync with pane
         // fullscreen the same way the primary chart's own maximise
         // button drives it (see `DashboardView.isChartFull` /

@@ -412,7 +412,9 @@ struct DashboardView: View {
                                    maxHeight: showsSingle ? .infinity : 0)
                             .opacity(showsSingle ? 1 : 0)
                             .allowsHitTesting(showsSingle)
-                        ChartGridView(layoutStore: multiChart, indicatorConfig: oscillatorConfig, drawingStore: drawingStore)
+                        ChartGridView(layoutStore: multiChart, indicatorConfig: oscillatorConfig, drawingStore: drawingStore) {
+                            gridFullscreenToolbar
+                        }
                             .frame(maxWidth: showsSingle ? 0 : .infinity,
                                    maxHeight: showsSingle ? 0 : .infinity)
                             .opacity(showsSingle ? 0 : 1)
@@ -2670,6 +2672,48 @@ struct DashboardView: View {
     private var isBackfillingCurrentTF: Bool {
         guard let pairID = app.selectedPairID else { return false }
         return yahoo.backfilling.contains("\(pairID)|\(sourceTimeframeTag(for: timeframe))")
+    }
+
+    // ── Grid fullscreen toolbar ────────────────────────────────────
+    /// Toolbar row shown at the top of the grid when a pane goes
+    /// fullscreen. Mirrors the single-chart header toolbar so every
+    /// tool (AI, indicators, drawing, chart type, timeframe, etc.)
+    /// is reachable without exiting fullscreen. Animates in from the
+    /// top with a slide + fade. (Grid fullscreen toolbar feature.)
+    private var gridFullscreenToolbar: some View {
+        HStack(spacing: Theme.Spacing.md) {
+            // Pair name for context
+            if let pairID = app.selectedPairID,
+               let pair = app.pairs.first(where: { $0.id == pairID }) {
+                Text(pair.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textPrimary)
+                Text(timeframe.label)
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(Theme.Color.textMuted)
+                toolbarDivider
+            }
+            HStack(spacing: 6) {
+                analyzeButton
+                replayButton
+                alertButton
+                riskCalcButton
+                autoTraderPill
+                toolbarDivider
+                indicatorMenu
+                indicatorSettingsButton
+                layersButton
+                drawingToolbar
+                toolbarDivider
+                ChartTypeToggle(
+                    selected: $userChartType,
+                    isDisabled: false
+                )
+                TimeframeSelector(selected: $timeframe)
+                toolbarDivider
+                debugButton
+            }
+        }
     }
 
     /// Pull deep history for the selected pair: the current timeframe's
