@@ -154,6 +154,26 @@ struct ChartPaneView: View {
                 .clipped()
                 .drawingDeleteKey(selectedDrawingID: $selectedDrawingID, drawingStore: drawingStore, pairID: pane.pairID)
                 .contextMenu { optionsMenu }
+                // Scroll-to-latest puck — same as the single chart's.
+                .overlay(alignment: .bottomLeading) {
+                    if !isViewingLatest {
+                        Button { scrollToLatest() } label: {
+                            Image(systemName: "forward.end.fill")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 32, height: 32)
+                                .background(Circle().fill(Theme.accentGradient))
+                                .overlay(Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 1))
+                                .shadow(color: .black.opacity(0.4), radius: 6, y: 2)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Scroll to latest")
+                        .padding(.leading, Theme.Spacing.sm)
+                        .padding(.bottom, Theme.Spacing.sm)
+                        .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                .animation(.easeOut(duration: 0.15), value: isViewingLatest)
 
                 if pane.showVolume {
                     VolumeBarsView(candles: candles, accent: pair.color, xDomain: xDomain)
@@ -404,5 +424,28 @@ struct ChartPaneView: View {
         while let last = merged.last, last.bucketStart >= cutoff { merged.removeLast() }
         merged.append(contentsOf: recent)
         candles = merged
+    }
+
+    // ── Scroll to latest ──────────────────────────────────────────
+
+    /// True when the visible window's right edge is at or past the
+    /// newest candle. Drives the scroll-to-latest puck's visibility.
+    private var isViewingLatest: Bool {
+        guard candles.count > 0, let d = xDomain else { return true }
+        return d.upperBound >= Double(candles.count - 1)
+    }
+
+    /// Slide the window so its right edge lands on the newest candle,
+    /// preserving the current zoom width. Matches DashboardView's
+    /// `scrollToLatest()`.
+    private func scrollToLatest() {
+        guard candles.count > 0 else { return }
+        let domain = xDomain ?? ChartWindow.defaultDomain(count: candles.count)
+        let span = domain.upperBound - domain.lowerBound
+        let upper = Double(candles.count - 1) + 0.5
+        let lower = max(-0.5, upper - span)
+        withAnimation(.easeInOut(duration: 0.25)) {
+            xDomain = lower ... upper
+        }
     }
 }
