@@ -864,6 +864,7 @@ struct DashboardView: View {
                         TimeframeSelector(selected: $timeframe)
                         toolbarDivider
                         debugButton
+                        singleChartFullscreenButton
                     }
                 }
 
@@ -1377,6 +1378,28 @@ struct DashboardView: View {
         .sheet(isPresented: $showDebugLogSheet) {
             DebugLogSheet()
         }
+    }
+
+    /// Fullscreen toggle button for the single chart view. Mirrors
+    /// the grid pane's fullscreen button (arrow icon). Toggles
+    /// `app.isChartFullscreen` which hides the sidebar and pair
+    /// header via RootView. (Single-chart fullscreen button feature.)
+    private var singleChartFullscreenButton: some View {
+        Button {
+            app.isChartFullscreen.toggle()
+        } label: {
+            Image(systemName: isChartFull
+                  ? "arrow.down.right.and.arrow.up.left"
+                  : "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .frame(width: 26, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(isChartFull ? "Exit fullscreen" : "Fullscreen")
     }
 
     /// Thin vertical separator between toolbar groups. 1pt wide,
@@ -2712,6 +2735,7 @@ struct DashboardView: View {
                 TimeframeSelector(selected: $timeframe)
                 toolbarDivider
                 debugButton
+                singleChartFullscreenButton
             }
         }
     }
