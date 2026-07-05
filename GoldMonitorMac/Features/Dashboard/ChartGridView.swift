@@ -21,6 +21,12 @@ struct ChartGridView<FullscreenToolbar: View>: View {
     /// it in, so a line drawn in a grid pane shows up on the primary
     /// chart for that pair too, and vice versa.
     @ObservedObject var drawingStore: DrawingStore
+    /// The active drawing tool, shared with the parent (DashboardView).
+    /// When a pane is fullscreen, its ChartView reads from this binding
+    /// instead of its own @State, so the fullscreen toolbar's drawing
+    /// picker and the pane's gesture handler use the same state.
+    /// (Grid fullscreen drawing fix.)
+    @Binding var activeDrawingTool: DrawingTool
     /// Toolbar shown above the grid when a pane is fullscreen.
     /// The parent (DashboardView) provides the content — it has
     /// access to all the chart-control state (AI, indicators,
@@ -259,7 +265,8 @@ struct ChartGridView<FullscreenToolbar: View>: View {
                 // Pauses this pane's tick-driven candle refresh while
                 // it's collapsed behind a fullscreen sibling — see
                 // `ChartPaneView.isVisible`.
-                isVisible: !isHidden
+                isVisible: !isHidden,
+                fullscreenDrawingTool: $activeDrawingTool
             ) { updated in
                 layoutStore.updatePane(updated)
             }

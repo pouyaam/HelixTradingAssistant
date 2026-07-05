@@ -45,6 +45,12 @@ struct ChartPaneView: View {
     /// see; a plain grid with N mounted panes was paying that cost N×
     /// even with only one pane on screen.
     var isVisible: Bool = true
+    /// External drawing tool binding from the parent (ChartGridView /
+    /// DashboardView). When the pane is fullscreen, this binding is
+    /// used instead of the internal @State so the fullscreen toolbar's
+    /// drawing picker and the pane's gesture handler share the same
+    /// state. (Grid fullscreen drawing fix.)
+    @Binding var fullscreenDrawingTool: DrawingTool
     let onUpdate: (ChartPane) -> Void
 
     @State private var candles: [Candle] = []
@@ -56,6 +62,19 @@ struct ChartPaneView: View {
     /// of to the whole dashboard.
     @State private var activeDrawingTool: DrawingTool = .none
     @State private var selectedDrawingID: UUID?
+
+    /// The active drawing tool — reads from the external binding when
+    /// fullscreen (so the fullscreen toolbar works), falls back to the
+    /// internal @State when not fullscreen.
+    private var effectiveDrawingTool: DrawingTool {
+        isFullscreen ? fullscreenDrawingTool : activeDrawingTool
+    }
+
+    /// Set the drawing tool on both internal state and external binding.
+    private func setDrawingTool(_ tool: DrawingTool) {
+        activeDrawingTool = tool
+        fullscreenDrawingTool = tool
+    }
 
     private var pair: TradingPair? { app.pairs.first(where: { $0.id == pane.pairID }) }
 
@@ -116,10 +135,10 @@ struct ChartPaneView: View {
                     indicators: pane.indicators,
                     indicatorConfig: indicatorConfig,
                     drawings: drawingStore.drawings(for: pane.pairID),
-                    activeTool: activeDrawingTool,
+                    activeTool: effectiveDrawingTool,
                     onCommitDrawing: { drawing in
                         drawingStore.add(drawing, for: pane.pairID)
-                        activeDrawingTool = .none
+                        setDrawingTool(.none)
                         selectedDrawingID = drawing.id
                     },
                     onMoveDrawing: { drawing in
@@ -175,7 +194,7 @@ struct ChartPaneView: View {
 
             Spacer()
 
-            if activeDrawingTool != .none {
+            if effectiveDrawingTool != .none {
                 armedToolBadge
             }
 
@@ -193,11 +212,11 @@ struct ChartPaneView: View {
     /// shape instead of panning. Tapping it disarms back to the cursor.
     private var armedToolBadge: some View {
         Button {
-            activeDrawingTool = .none
+            setDrawingTool(.none)
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: activeDrawingTool.systemImage)
-                Text(activeDrawingTool.label)
+                Image(systemName: effectiveDrawingTool.systemImage)
+                Text(effectiveDrawingTool.label)
             }
             .font(.system(size: 10, weight: .semibold))
             .foregroundStyle(.white)
@@ -299,9 +318,9 @@ struct ChartPaneView: View {
         Menu("Drawing Tool") {
             ForEach(DrawingTool.allCases) { tool in
                 Button {
-                    activeDrawingTool = tool
+                    setDrawingTool(tool)
                 } label: {
-                    Label(tool.label, systemImage: activeDrawingTool == tool
+                    Label(tool.label, systemImage: effectiveDrawingTool == tool
                           ? "checkmark.circle.fill" : tool.systemImage)
                 }
             }
@@ -360,7 +379,7 @@ struct ChartPaneView: View {
         self.candles = result
         self.xDomain = nil
         self.yDomain = nil
-        self.activeDrawingTool = .none
+        self.setDrawingTool(.none)
         self.selectedDrawingID = nil
     }
 

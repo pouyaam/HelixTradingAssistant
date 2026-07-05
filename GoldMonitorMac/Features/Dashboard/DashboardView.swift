@@ -412,7 +412,7 @@ struct DashboardView: View {
                                    maxHeight: showsSingle ? .infinity : 0)
                             .opacity(showsSingle ? 1 : 0)
                             .allowsHitTesting(showsSingle)
-                        ChartGridView(layoutStore: multiChart, indicatorConfig: oscillatorConfig, drawingStore: drawingStore) {
+                        ChartGridView(layoutStore: multiChart, indicatorConfig: oscillatorConfig, drawingStore: drawingStore, activeDrawingTool: $activeDrawingTool) {
                             gridFullscreenToolbar
                         }
                             .frame(maxWidth: showsSingle ? 0 : .infinity,
