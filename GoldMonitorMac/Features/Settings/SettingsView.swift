@@ -42,13 +42,16 @@ struct SettingsView: View {
     @AppStorage("ai.opencode.model") private var opencodeModel: String = OpenCodeModelCatalog.defaultModelID
 
     // OpenCode API key — loaded from / saved to Keychain.
-    @State private var opencodeAPIKey: String = KeychainHelper.get(.opencodeAPIKey) ?? ""
+    // Initialized empty; loaded once in .onAppear to avoid
+    // triggering a keychain password prompt on every SwiftUI
+    // body re-evaluation. (Keychain prompt fix.)
+    @State private var opencodeAPIKey: String = ""
     @State private var opencodeAPIKeyDirty: Bool = false
 
     // OpenCode remote server settings.
     @AppStorage("ai.opencode.useRemote") private var opencodeUseRemote: Bool = false
     @AppStorage("ai.opencode.serverURL") private var opencodeServerURL: String = ""
-    @State private var opencodeServerPassword: String = KeychainHelper.get(.opencodeServerPass) ?? ""
+    @State private var opencodeServerPassword: String = ""
     @State private var opencodeServerPasswordDirty: Bool = false
     @State private var opencodeServerTestState: TestState = .idle
 
@@ -67,6 +70,17 @@ struct SettingsView: View {
             content
         }
         .background(Theme.Color.canvas)
+        .onAppear {
+            // Load keychain values once on first appear, not in
+            // @State initializers (which re-run on every SwiftUI
+            // body re-evaluation and trigger password prompts).
+            if opencodeAPIKey.isEmpty {
+                opencodeAPIKey = KeychainHelper.get(.opencodeAPIKey) ?? ""
+            }
+            if opencodeServerPassword.isEmpty {
+                opencodeServerPassword = KeychainHelper.get(.opencodeServerPass) ?? ""
+            }
+        }
     }
 
     private var sidebar: some View {
