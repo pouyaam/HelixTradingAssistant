@@ -29,8 +29,24 @@ struct JournalDetailView: View {
     @State private var aiDayEntries: [JournalEntry]? = nil
     @State private var aiDayDate: Date? = nil
     @State private var aiPeriodTitle: String? = nil
+    /// Scope of the period handed to `JournalDayAISheet`. Set alongside
+    /// `aiDayEntries`; lets the day-AI prompt frame "today" vs "this week"
+    /// vs "all-time" instead of speaking of "this trading day" for every
+    /// run.
+    @State private var aiDayScope: JournalDayAISheet.PeriodScope = .day
+    /// Pre-computed heuristic behavioral flags passed into the AI prompt
+    /// as "corroborate or refute each" so the model's behavioural
+    /// analysis builds on the rules engine instead of redoing it blind.
+    @State private var aiDayHints: [String] = []
+    /// Selected journal entry for the side inspector (item 15). nil when
+    /// no entry is selected — the inspector pane collapses.
+    @State private var selectedEntryID: UUID? = nil
     @State private var showBehavioralWarnings: Bool = true
     @State private var showReviewHistory: Bool = false
+    /// Inline "AI Review History — this journal" collapsible section,
+    /// scoped to this journal's saved `DayReviewEntry`s (legacy nil-
+    /// journal reviews included so an upgrade doesn't hide prior history).
+    @State private var showInlineHistory: Bool = false
     /// Free-text search across title / notes / pair (case-insensitive).
     @State private var searchText: String = ""
     /// Row ordering for the flat (non-grouped) list.
@@ -60,6 +76,19 @@ struct JournalDetailView: View {
         case month = "This Month"
         case custom = "Custom"
         var id: String { rawValue }
+        /// Short label admired on the always-on "AI [period]" header
+        /// button (item 4/5). "All" gets a friendlier "All-Time" so the
+        /// button doesn't read "AI All".
+        var buttonLabelForAI: String {
+            switch self {
+            case .all:       return "All-Time"
+            case .today:     return "Today"
+            case .yesterday: return "Yesterday"
+            case .week:      return "This Week"
+            case .month:     return "This Month"
+            case .custom:    return "Custom"
+            }
+        }
     }
     @State private var datePreset: DatePreset = .all
     @State private var customStart: Date = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
@@ -78,28 +107,57 @@ struct JournalDetailView: View {
     private var scopedEntries: [JournalEntry] { journal.entries(in: journalID) }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xl) {
-                header
-                if scopedEntries.isEmpty {
-                    emptyState
-                } else {
-                    summaryCards
-                    metricsStrip
-                    analyticsSection
-                    behavioralWarningsSection
-                    filterRow
-                    if groupByDay {
-                        groupedList
+        HStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xl) {
+                    header
+                    if scopedEntries.isEmpty {
+                        emptyState
                     } else {
-                        entryList(filteredEntries)
+                        summaryCards
+                        metricsStrip
+                        analyticsSection
+                        behavioralWarningsSection
+                        inlineAIHistorySection
+                        filterRow
+                        if groupByDay {
+                            groupedList
+                        } else {
+                            entryList(filteredEntries)
+                        }
                     }
                 }
+                .padding(Theme.Spacing.xl)
             }
-            .padding(Theme.Spacing.xl)
+            // Side inspector pane (item 15). Shows only when an entry is
+            // selected; collapses with a slide transition otherwise.
+            if let selected = selectedEntry {
+                inspectorPane(for: selected)
+                    .frame(width: 288)
+                    .background(Theme.Color.surface)
+                    .overlay(Rectangle().fill(Theme.Color.border).frame(width: 1), alignment: .leading)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
         }
+        .animation(.easeInOut(duration: 0.18), value: selectedEntryID)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Theme.Color.canvas)
+        // Hidden keyboard-shortcut buttons (item 14) — invisible & non-
+        // hit-testing, but present in the responder chain so their
+        // shortcuts fire when the Journal detail screen is focused.
+        // ⌘N opens a new entry; ⌘⇧A opens the AI period review.
+        .background {
+            Color.clear
+                .overlay(alignment: .topLeading) {
+                    Button { sheetEntry = blankDraft() } label: { EmptyView() }
+                        .keyboardShortcut("n", modifiers: .command)
+                        .opacity(0).frame(width: 0, height: 0).allowsHitTesting(false)
+                    Button { openPeriodAI() } label: { EmptyView() }
+                        .keyboardShortcut("a", modifiers: [.command, .shift])
+                        .opacity(0).frame(width: 0, height: 0).allowsHitTesting(false)
+                }
+                .allowsHitTesting(false)
+        }
         .sheet(item: $sheetEntry) { draft in
             let isExisting = journal.entries.contains { $0.id == draft.id }
             JournalEntrySheet(
@@ -120,9 +178,16 @@ struct JournalDetailView: View {
             set: { if !$0 { aiDayEntries = nil; aiDayDate = nil; aiPeriodTitle = nil } }
         )) {
             if let entries = aiDayEntries, let day = aiDayDate {
-                JournalDayAISheet(entries: entries, day: day, periodTitle: aiPeriodTitle)
-                    .environmentObject(app)
-                    .environmentObject(dayReviewStore)
+                JournalDayAISheet(
+                    entries: entries,
+                    day: day,
+                    periodTitle: aiPeriodTitle,
+                    periodScope: aiDayScope,
+                    behavioralHints: aiDayHints,
+                    journalID: journalID
+                )
+                .environmentObject(app)
+                .environmentObject(dayReviewStore)
             }
         }
         .sheet(isPresented: $showReviewHistory) {
@@ -217,15 +282,24 @@ struct JournalDetailView: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .help("Import / export journal data")
-            // AI period analysis button (visible when a non-"all" period has entries)
-            if !rangeEntries.isEmpty && datePreset != .all {
+            // AI period analysis button — always visible when this scope has
+            // any entries (previously hidden for .all, which was the one
+            // period you most wanted a single review for). The label
+            // adapts to the chosen scope ("AI Today" / "AI This Week" /
+            // "AI All-Time" / "AI Custom"). For all-time we review every
+            // entry in this journal, not just rangeEntries (which the
+            // filter sliders narrow); that matches the user's mental
+            // model of an all-time retrospective.
+            if !aiScopeHasEntries {
+                EmptyView()
+            } else {
                 Button {
                     openPeriodAI()
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "sparkles")
                             .font(.system(size: 11, weight: .semibold))
-                        Text("AI \(datePreset.rawValue)")
+                        Text("AI \(currentPeriodButtonLabel)")
                             .font(.system(size: 12, weight: .semibold))
                     }
                     .foregroundStyle(.white)
@@ -233,7 +307,7 @@ struct JournalDetailView: View {
                     .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accentGradient))
                 }
                 .buttonStyle(.plain)
-                .help("Comprehensive AI review of all trades in this period")
+                .help("Comprehensive AI review of all trades in this period (⌘⇧A)")
             }
             // New entry
             Button {
@@ -250,25 +324,46 @@ struct JournalDetailView: View {
     }
 
     private func openPeriodAI() {
-        let entries = rangeEntries
+        let entries = aiScopeEntries
         guard !entries.isEmpty else { return }
-        let title: String
+        let (scope, title): (JournalDayAISheet.PeriodScope, String)
         switch datePreset {
-        case .today:     title = "Today — \(Self.dayFmt.string(from: Date()))"
+        case .today:
+            scope = .day; title = "Today — \(Self.dayFmt.string(from: Date()))"
         case .yesterday:
             let y = Calendar.current.date(byAdding: .day, value: -1, to: Date())!
-            title = "Yesterday — \(Self.dayFmt.string(from: y))"
-        case .week:      title = "This Week"
+            scope = .yesterday; title = "Yesterday — \(Self.dayFmt.string(from: y))"
+        case .week:
+            scope = .week; title = "This Week"
         case .month:
             let f = DateFormatter(); f.dateFormat = "MMMM yyyy"
-            title = f.string(from: Date())
+            scope = .month; title = f.string(from: Date())
         case .custom:
+            scope = .custom
             title = "\(Self.dayFmt.string(from: customStart)) → \(Self.dayFmt.string(from: customEnd))"
-        case .all:       title = "All Time"
+        case .all:
+            scope = .all; title = "\(journalName) — All Time"
         }
         aiDayEntries = entries
         aiDayDate = entries.first?.date ?? Date()
         aiPeriodTitle = title
+        aiDayScope = scope
+        aiDayHints = Self.hintLines(for: Self.computeWarnings(entries))
+    }
+
+    /// Entries the AI period review would actually cover — `rangeEntries`
+    /// for any non-All preset, every scoped entry for All-Time. Pre-computed
+    /// here so both the header button's visibility (item 4/5) and
+    /// `openPeriodAI()` agree on what's in scope without recomputing.
+    private var aiScopeEntries: [JournalEntry] {
+        datePreset == .all ? journal.sorted(in: journalID) : rangeEntries
+    }
+    private var aiScopeHasEntries: Bool { !aiScopeEntries.isEmpty }
+    /// Short label shown on the header's AI button — mirrors the
+    /// day-AI sheet's `PeriodScope.buttonLabel` so the button and the
+    /// eventual sheet title use the same vocabulary.
+    private var currentPeriodButtonLabel: String {
+        datePreset.buttonLabelForAI
     }
 
     private func blankDraft() -> JournalEntry {
@@ -284,6 +379,12 @@ struct JournalDetailView: View {
         let pairName = app.pairs.first { $0.id == pairID }?.name ?? ""
         let noon = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: day) ?? day
         return JournalEntry(date: noon, journalID: journalID, pairID: pairID, pairName: pairName)
+    }
+
+    /// Helper invoked by the group-by-day "Analyse Day" button — sets the
+    /// AI sheet's period title from the day-group's calendar day.
+    private func aiDayPeriodTitleForGroup(_ group: DayGroup) {
+        aiPeriodTitle = Self.dayFmt.string(from: group.day)
     }
 
     // ── Analytics section ─────────────────────────────────────────
@@ -316,7 +417,7 @@ struct JournalDetailView: View {
 
     // ── Behavioral warnings ───────────────────────────────────────
 
-    private struct BehaviorWarning: Identifiable {
+    fileprivate struct BehaviorWarning: Identifiable {
         let id: String
         let icon: String
         let color: Color
@@ -325,7 +426,16 @@ struct JournalDetailView: View {
     }
 
     private var behavioralWarnings: [BehaviorWarning] {
-        let sorted = rangeEntries.sorted { $0.date < $1.date }
+        Self.computeWarnings(rangeEntries)
+    }
+
+    /// Same heuristic the rules engine shows in the
+    /// "BEHAVIORAL PATTERNS" section — lifted into a static helper so
+    /// the AI prompt builder can run it on a *different* slice than
+    /// the one currently in view (e.g. the all-time period vs the
+    /// today-filtered list).
+    @MainActor fileprivate static func computeWarnings(_ entries: [JournalEntry]) -> [BehaviorWarning] {
+        let sorted = entries.sorted { $0.date < $1.date }
         guard sorted.count >= 2 else { return [] }
         var warnings: [BehaviorWarning] = []
 
@@ -408,6 +518,22 @@ struct JournalDetailView: View {
         }
 
         return warnings
+    }
+
+    /// One short line per warning, the form the model expects in its
+    /// "preliminary flags already detected by your rules engine" prompt
+    /// block. The model is asked to corroborate or refute each.
+    @MainActor fileprivate static func hintLines(for warnings: [BehaviorWarning]) -> [String] {
+        warnings.map { "\($0.title). \($0.detail)" }
+    }
+
+    /// Public-facing hook used by `JournalListView`'s all-time AI run:
+    /// runs the rules engine over the supplied entries and returns the
+    /// warning lines ready to feed into `JournalDayAISheet.behavioralHints`.
+    /// Kept `internal` so callers in other files don't need to know about
+    /// the private `BehaviorWarning` storage type.
+    @MainActor static func behavioralHints(for entries: [JournalEntry]) -> [String] {
+        hintLines(for: computeWarnings(entries))
     }
 
     @ViewBuilder
@@ -579,6 +705,125 @@ struct JournalDetailView: View {
         .padding(Theme.Spacing.md)
         .background(RoundedRectangle(cornerRadius: Theme.Radius.md).fill(Theme.Color.surface))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).strokeBorder(Theme.Color.border, lineWidth: 1))
+    }
+
+    // ── Inline AI review history (this journal) ─────────────────────
+
+    /// Collapsible list of saved AI reviews scoped to this journal — the
+    /// existing "AI Review History…" overflow menu surfaced *every*
+    /// saved review (regardless of journal). With per-journal
+    /// `DayReviewEntry.journalID`, we can scope this list down to "this
+    /// journal only" so a backtesting journal's gap-year retrospective
+    /// doesn't get mixed into the user's prop-firm reviews. Tapping a
+    /// row opens the existing `DayReviewHistoryView`-style detail.
+    @ViewBuilder
+    private var inlineAIHistorySection: some View {
+        let reviews = dayReviewStore.reviews(for: journalID)
+        if !reviews.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { showInlineHistory.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: showInlineHistory ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Theme.Color.accentStart)
+                        Text("AI REVIEW HISTORY — THIS JOURNAL")
+                            .font(.system(size: 9, weight: .heavy))
+                            .tracking(0.8)
+                            .foregroundStyle(Theme.Color.accentStart)
+                        Text("\(reviews.count)")
+                            .font(.system(size: 9, weight: .heavy))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Theme.Color.accentStart))
+                        Spacer()
+                    }
+                }
+                .buttonStyle(.plain)
+
+                if showInlineHistory {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(reviews.prefix(8)) { review in
+                            inlineHistoryRow(review)
+                        }
+                        if reviews.count > 8 {
+                            Button { showReviewHistory = true } label: {
+                                Text("See all \(reviews.count) reviews…")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(Theme.Color.accentStart)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .transition(AnyTransition.opacity.combined(with: AnyTransition.move(edge: .top)))
+                }
+            }
+        }
+    }
+
+    private func inlineHistoryRow(_ review: DayReviewEntry) -> some View {
+        HStack(spacing: Theme.Spacing.sm) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(review.periodTitle)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textPrimary)
+                HStack(spacing: 6) {
+                    Text("\(review.tradeCount) trades")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Theme.Color.textMuted)
+                    Text("· \(review.engineLabel) · \(review.modelLabel)")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Theme.Color.textMuted)
+                    Text("· \(Self.shortFmt.string(from: review.createdAt))")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Theme.Color.textMuted)
+                }
+            }
+            Spacer()
+            Text(String(format: "%+.2f", review.netPL))
+                .font(.system(size: 11, weight: .bold).monospacedDigit())
+                .foregroundStyle(review.netPL >= 0 ? Theme.Color.success : Theme.Color.danger)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Theme.Color.textMuted)
+        }
+        .padding(.horizontal, Theme.Spacing.md).padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Color.surface))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.Color.border, lineWidth: 1))
+        .contentShape(Rectangle())
+        .onTapGesture { showReviewHistory = true }
+    }
+
+    // ── Side inspector (item 15) ───────────────────────────────────
+
+    @ViewBuilder
+    private func inspectorPane(for id: UUID) -> some View {
+        if let entry = journal.entries.first(where: { $0.id == id }) {
+            EntryInspector(
+                entry: entry,
+                isChartActive: app.journalChartEntry?.id == entry.id,
+                onEdit: { sheetEntry = entry },
+                onChart: {
+                    if app.journalChartEntry?.id == entry.id { app.journalChartEntry = nil }
+                    else {
+                        app.selectedPairID = entry.pairID
+                        app.journalChartEntry = entry
+                        app.selectedSidebarItem = .dashboard
+                    }
+                },
+                onAI: { aiEntry = entry },
+                onClose: { selectedEntryID = nil }
+            )
+        } else {
+            EmptyView()
+        }
+    }
+
+    private var selectedEntry: UUID? {
+        guard let id = selectedEntryID,
+              journal.entries.contains(where: { $0.id == id }) else { return nil }
+        return id
     }
 
     // ── Filter ────────────────────────────────────────────────────
@@ -797,6 +1042,8 @@ struct JournalDetailView: View {
         JournalEntryRow(
             entry: entry,
             isChartActive: app.journalChartEntry?.id == entry.id,
+            isSelected: selectedEntryID == entry.id,
+            onSelect: { selectedEntryID = entry.id },
             onEdit: { sheetEntry = entry },
             onChart: {
                 if app.journalChartEntry?.id == entry.id {
@@ -861,6 +1108,9 @@ struct JournalDetailView: View {
                 Button {
                     aiDayEntries = group.entries
                     aiDayDate = group.day
+                    aiDayScope = .day
+                    aiDayPeriodTitleForGroup(group)
+                    aiDayHints = Self.hintLines(for: Self.computeWarnings(group.entries))
                 } label: {
                     HStack(spacing: 3) {
                         Image(systemName: "sparkles")
@@ -909,18 +1159,18 @@ struct JournalDetailView: View {
     // ── Empty state ───────────────────────────────────────────────
     private var emptyState: some View {
         VStack(spacing: Theme.Spacing.md) {
-            Spacer().frame(height: 60)
+            Spacer().frame(height: 80)
             Image(systemName: "book.closed")
-                .font(.system(size: 32))
+                .font(.system(size: 36))
                 .foregroundStyle(Theme.Color.textMuted)
-            Text("Your journal is empty.")
-                .font(.system(size: 13, weight: .semibold))
+            Text("Log your first trade.")
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(Theme.Color.textSecondary)
-            Text("Log a trade manually, import a cTrader statement CSV, or hit \"Add to journal\" on an AI analysis to capture the idea with its reasoning attached.")
+            Text("New entry, import a cTrader CSV, or hit \"Add to journal\" on an AI analysis.")
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.Color.textMuted)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 380)
+                .frame(maxWidth: 360)
             HStack(spacing: Theme.Spacing.sm) {
                 Button {
                     importCTraderCSV()
@@ -946,6 +1196,7 @@ struct JournalDetailView: View {
                         .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accentGradient))
                 }
                 .buttonStyle(.plain)
+                .keyboardShortcut(.defaultAction)
             }
             .padding(.top, Theme.Spacing.sm)
             Spacer()
@@ -1193,6 +1444,11 @@ struct JournalDetailView: View {
         f.dateFormat = "EEEE, MMM d, yyyy"
         return f
     }()
+
+    /// Compact MMd · HH:mm used by inline AI-history rows.
+    private static let shortFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MMM d · HH:mm"; return f
+    }()
 }
 
 // ── JournalEntryRow ───────────────────────────────────────────────────────────
@@ -1203,6 +1459,13 @@ struct JournalDetailView: View {
 private struct JournalEntryRow: View {
     let entry: JournalEntry
     var isChartActive: Bool
+    var isSelected: Bool
+    /// Primary row click → inspector pane (item 15). Previously a row
+    /// click opened the edit sheet directly, which left the row's
+    /// edit/chart/AI buttons redundantly fire-on-click; the inspector
+    /// is a less disruptive read-only look at the trade, with the
+    /// existing edit/chart/AI affordances still one click away.
+    var onSelect: () -> Void
     var onEdit: () -> Void
     var onChart: () -> Void
     var onAI: () -> Void
@@ -1211,13 +1474,14 @@ private struct JournalEntryRow: View {
 
     var body: some View {
         let hasLevels = entry.entry != nil || entry.takeProfit != nil || entry.stopLoss != nil
-        let trailingPad: CGFloat = hasLevels ? 124 : 62
+        let trailingPad: CGFloat = hasLevels ? 168 : 106
         return ZStack(alignment: .trailing) {
-            Button { onEdit() } label: {
+            Button { onSelect() } label: {
                 rowContent(extraTrailingPad: trailingPad)
             }
             .buttonStyle(.plain)
             HStack(spacing: 6) {
+                editButton
                 if hasLevels { chartButton }
                 aiButton
             }
@@ -1286,8 +1550,14 @@ private struct JournalEntryRow: View {
         .background(RoundedRectangle(cornerRadius: Theme.Radius.md)
             .fill(isHovered ? Theme.Color.surfaceHi : Theme.Color.surface))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md)
-            .strokeBorder(isHovered ? Theme.Color.accentStart.opacity(0.4) : Theme.Color.border, lineWidth: 1))
+            .strokeBorder(borderStroke, lineWidth: isSelected ? 1.6 : 1))
         .animation(.easeOut(duration: 0.12), value: isHovered)
+        .animation(.easeOut(duration: 0.12), value: isSelected)
+    }
+
+    private var borderStroke: Color {
+        if isSelected { return Theme.Color.accentStart }
+        return isHovered ? Theme.Color.accentStart.opacity(0.4) : Theme.Color.border
     }
 
     private var sideChip: some View {
@@ -1306,6 +1576,23 @@ private struct JournalEntryRow: View {
             .foregroundStyle(entry.result.color)
             .padding(.horizontal, 6).padding(.vertical, 2)
             .background(Capsule().fill(entry.result.color.opacity(0.18)))
+    }
+
+    private var editButton: some View {
+        Button { onEdit() } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 9, weight: .bold))
+                Text("Edit")
+                    .font(.system(size: 9, weight: .bold))
+            }
+            .foregroundStyle(Theme.Color.textSecondary)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(Capsule().fill(Theme.Color.surface))
+            .overlay(Capsule().strokeBorder(Theme.Color.border, lineWidth: 0.8))
+        }
+        .buttonStyle(.plain)
+        .help("Edit trade (opens the entry sheet)")
     }
 
     private var chartButton: some View {
@@ -1355,5 +1642,233 @@ private struct JournalEntryRow: View {
         v.truncatingRemainder(dividingBy: 1) == 0
             ? String(format: "%.0f", v)
             : String(format: "%.3f", v)
+    }
+}
+
+// MARK: – EntryInspector (item 15)
+
+/// Right-side read-only inspector for a selected `JournalEntry` (item 15).
+/// Lets the user click a row to see everything about the trade without
+/// leaving the journal screen or opening modal sheets — including a
+/// Quick-stub of the entry's last AI post-mortem excerpt and one-click
+/// actions to edit the trade, open it on the chart, or run an AI review.
+private struct EntryInspector: View {
+    let entry: JournalEntry
+    let isChartActive: Bool
+    var onEdit: () -> Void
+    var onChart: () -> Void
+    var onAI: () -> Void
+    var onClose: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                headerRow
+                Divider().background(Theme.Color.border)
+                snapshot
+                if entry.hasAIReference { aiExcerptCard }
+                notesCard
+                Spacer(minLength: 0)
+                actionsRow
+            }
+            .padding(Theme.Spacing.md)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Theme.Color.surface)
+    }
+
+    private var headerRow: some View {
+        HStack(spacing: Theme.Spacing.sm) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(entry.result.color.opacity(0.15))
+                    .frame(width: 32, height: 32)
+                Image(systemName: entry.result.icon)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(entry.result.color)
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(entry.title.isEmpty ? entry.pairName : entry.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textPrimary)
+                    .lineLimit(1)
+                Text(EntryInspector.timeFmt.string(from: entry.date))
+                    .font(.system(size: 9))
+                    .foregroundStyle(Theme.Color.textMuted)
+            }
+            Spacer()
+            Button { onClose() } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(Theme.Color.textMuted)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var snapshot: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                chip(text: entry.side.label.uppercased(),
+                     color: entry.side.color)
+                chip(text: entry.result.label.uppercased(),
+                     color: entry.result.color)
+                Spacer()
+                if entry.profitLoss != 0 || entry.result.isGraded {
+                    Text(String(format: "%+.2f", entry.profitLoss))
+                        .font(.system(size: 14, weight: .bold).monospacedDigit())
+                        .foregroundStyle(entry.profitLoss >= 0 ? Theme.Color.success : Theme.Color.danger)
+                }
+            }
+            metricRow("PAIR",   entry.pairName)
+            metricRow("SIDE",   entry.side.label)
+            metricRow("ENTRY",  entry.entry.map(Self.priceStr))
+            metricRow("TP",     entry.takeProfit.map(Self.priceStr))
+            metricRow("SL",     entry.stopLoss.map(Self.priceStr))
+            metricRow("CLOSE",  entry.closePrice.map(Self.priceStr))
+            metricRow("LOTS",   entry.lots.map { String(format: "%.2f L", $0) })
+            if let e = entry.entry, let sl = entry.stopLoss, let tp = entry.takeProfit {
+                let risk = abs(e - sl); let reward = abs(tp - e)
+                let rr = risk > 0 ? reward / risk : 0
+                metricRow("R:R", String(format: "1 : %.1f", rr))
+            }
+            if let open = entry.openDate {
+                metricRow("DURATION", EntryInspector.durationStr(entry.date.timeIntervalSince(open)))
+            }
+        }
+    }
+
+    private var aiExcerptCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.Color.accentStart)
+                Text("FROM AI ANALYSIS")
+                    .font(.system(size: 9, weight: .heavy))
+                    .tracking(0.8)
+                    .foregroundStyle(Theme.Color.textMuted)
+                Spacer()
+            }
+            if let label = entry.aiEngineLabel { chip(text: label, color: .gray.opacity(0.7)) }
+            if let label = entry.aiKindLabel { chip(text: label, color: .gray.opacity(0.7)) }
+            if let excerpt = entry.aiReportExcerpt, !excerpt.isEmpty {
+                ScrollView { Text(excerpt).font(.system(size: 10)).foregroundStyle(Theme.Color.textSecondary).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                    .frame(height: 96)
+                    .padding(Theme.Spacing.sm)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surfaceHi))
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.Color.border, lineWidth: 1))
+            }
+        }
+        .padding(Theme.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.md).fill(Theme.Color.accentStart.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).strokeBorder(Theme.Color.accentStart.opacity(0.25), lineWidth: 1))
+    }
+
+    private var notesCard: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("NOTES")
+                .font(.system(size: 9, weight: .heavy))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+            ScrollView {
+                Text(entry.notes.isEmpty ? "(none)" : entry.notes)
+                    .font(.system(size: 11))
+                    .foregroundStyle(entry.notes.isEmpty ? Theme.Color.textMuted : Theme.Color.textSecondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(height: 120)
+            .padding(Theme.Spacing.sm)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surfaceHi))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.Color.border, lineWidth: 1))
+        }
+    }
+
+    private var actionsRow: some View {
+        VStack(spacing: 6) {
+            primaryButton(label: isChartActive ? "Remove from chart" : "Open on chart",
+                           icon: isChartActive ? "eye.slash" : "chart.line.uptrend.xyaxis",
+                           action: onChart)
+            row(label: "Edit", icon: "square.and.pencil", action: onEdit)
+            row(label: "AI post-mortem", icon: "sparkles", action: onAI)
+        }
+    }
+
+    private func primaryButton(label: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(label, systemImage: icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 7)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accentGradient))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func row(label: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon).font(.system(size: 10, weight: .semibold))
+                Text(label).font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(Theme.Color.textMuted)
+            }
+            .foregroundStyle(Theme.Color.textSecondary)
+            .padding(.horizontal, Theme.Spacing.md).padding(.vertical, 7)
+            .frame(maxWidth: .infinity)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Color.surfaceHi))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.Color.border, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func chip(text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 8, weight: .heavy)).tracking(0.4)
+            .foregroundStyle(color)
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(Capsule().fill(color.opacity(0.16)))
+    }
+
+    private func metricRow(_ label: String, _ value: String?) -> some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 9, weight: .heavy)).tracking(0.5)
+                .foregroundStyle(Theme.Color.textMuted)
+            Spacer()
+            Text(value ?? "—")
+                .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                .foregroundStyle(value == nil ? Theme.Color.textMuted : Theme.Color.textPrimary)
+        }
+    }
+
+    private static let timeFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MMM d, yyyy · HH:mm"; return f
+    }()
+
+    private static func priceStr(_ v: Double) -> String {
+        v.truncatingRemainder(dividingBy: 1) == 0 ? String(format: "%.0f", v) : String(format: "%.3f", v)
+    }
+
+    private static func durationStr(_ secs: TimeInterval) -> String {
+        let s = Int(secs)
+        if s < 60    { return "\(s)s" }
+        if s < 3600  { return "\(s / 60)m" }
+        if s < 86400 { return "\(s / 3600)h \((s % 3600) / 60)m" }
+        return "\(s / 86400)d \((s % 86400) / 3600)h"
+    }
+}
+
+private extension JournalEntry.Result {
+    var icon: String {
+        switch self {
+        case .win:       return "trophy.fill"
+        case .loss:      return "arrow.down.circle.fill"
+        case .breakeven: return "equal.circle.fill"
+        case .open:      return "clock.fill"
+        }
     }
 }

@@ -420,7 +420,13 @@ struct DashboardView: View {
                             .opacity(showsSingle ? 0 : 1)
                             .allowsHitTesting(!showsSingle)
                     }
-                    .clipped()
+                .clipped()
+                // Right-click context menu — same options as the grid
+                // pane's context menu, adapted for the single chart's
+                // state model. Plus Scroll to Latest and Reset Chart.
+                .contextMenu {
+                    chartContextMenu(pair: pair)
+                }
                     .animation(.easeInOut(duration: 0.25), value: multiChart.layout)
                 } else {
                     emptyState
@@ -2425,6 +2431,106 @@ struct DashboardView: View {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 350_000_000)
             yDomain = nil
+        }
+    }
+
+    // ── Chart context menu ────────────────────────────────────────
+    /// Right-click menu with all chart options. Mirrors the grid
+    /// pane's `optionsMenu` for feature parity across modes, plus
+    /// Scroll to Latest and Reset Chart actions.
+    @ViewBuilder
+    private func chartContextMenu(pair: TradingPair) -> some View {
+        Menu("Timeframe") {
+            ForEach(Timeframe.allCases) { tf in
+                Button {
+                    timeframe = tf
+                } label: {
+                    Label(tf.label, systemImage: tf == timeframe ? "checkmark.circle.fill" : "circle")
+                }
+            }
+        }
+        Menu("Chart type") {
+            ForEach(ChartType.allCases) { ct in
+                Button {
+                    userChartType = ct
+                } label: {
+                    Label(ct.label, systemImage: ct == userChartType ? "checkmark.circle.fill" : "circle")
+                }
+            }
+        }
+        Menu("Indicators") {
+            ForEach(IndicatorKind.allCases) { kind in
+                Button {
+                    setIndicator(kind, enabled: !enabledIndicators.contains(kind))
+                } label: {
+                    Label(kind.label, systemImage: enabledIndicators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                }
+            }
+        }
+        Menu("Oscillators") {
+            ForEach(OscillatorKind.allCases) { kind in
+                Button {
+                    setOscillator(kind, enabled: !enabledOscillators.contains(kind))
+                } label: {
+                    Label(kind.label, systemImage: enabledOscillators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                }
+            }
+        }
+        Button {
+            showVolume.toggle()
+        } label: {
+            Label("Volume", systemImage: showVolume ? "checkmark.circle.fill" : "circle")
+        }
+        Divider()
+        Menu("Drawing Tool") {
+            ForEach(DrawingTool.allCases) { tool in
+                Button {
+                    activeDrawingTool = tool
+                } label: {
+                    Label(tool.label, systemImage: activeDrawingTool == tool
+                          ? "checkmark.circle.fill" : tool.systemImage)
+                }
+            }
+        }
+        if selectedDrawingID != nil {
+            Button(role: .destructive) {
+                if let id = selectedDrawingID {
+                    drawingStore.remove(id: id, for: pair.id)
+                    selectedDrawingID = nil
+                }
+            } label: {
+                Label("Delete Selected Drawing", systemImage: "trash")
+            }
+        }
+        if !drawingStore.drawings(for: pair.id).isEmpty {
+            Button(role: .destructive) {
+                drawingStore.clear(for: pair.id)
+                selectedDrawingID = nil
+            } label: {
+                Label("Clear Drawings", systemImage: "trash.slash")
+            }
+        }
+        Divider()
+        if !isViewingLatest {
+            Button {
+                scrollToLatest()
+            } label: {
+                Label("Scroll to Latest", systemImage: "forward.end.fill")
+            }
+        }
+        Button {
+            resetChart()
+        } label: {
+            Label("Reset Chart", systemImage: "arrow.counterclockwise")
+        }
+        Divider()
+        Button {
+            app.isChartFullscreen.toggle()
+        } label: {
+            Label(isChartFull ? "Exit Fullscreen" : "Fullscreen",
+                  systemImage: isChartFull
+                  ? "arrow.down.right.and.arrow.up.left"
+                  : "arrow.up.left.and.arrow.down.right")
         }
     }
 

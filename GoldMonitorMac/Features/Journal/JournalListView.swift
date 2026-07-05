@@ -80,7 +80,10 @@ private struct JournalListView: View {
             JournalDayAISheet(
                 entries: entries,
                 day: entries.first?.date ?? Date(),
-                periodTitle: "\(j.name) — All Time"
+                periodTitle: "\(j.name) — All Time",
+                periodScope: .all,
+                behavioralHints: JournalDetailView.behavioralHints(for: entries),
+                journalID: j.id
             )
             .environmentObject(app)
             .environmentObject(dayReviewStore)
