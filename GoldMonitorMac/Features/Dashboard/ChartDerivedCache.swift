@@ -415,4 +415,137 @@ final class ChartDerivedCache: ObservableObject {
             }
         }
     }
+
+    // ── Overlay Y extremes (S/R, FVG, OB, drawings, trades, etc.) ──
+    //
+    // The `autoYDomain` computed property in ChartView needs to fold
+    // every overlay's price extremes into the Y axis so nothing clips
+    // off-screen. Most overlays don't depend on the visible window —
+    // they're global arrays that only change on data reload or AI
+    // result arrival. Scanning them on every pan/zoom frame was a
+    // primary source of lag. Here we cache the min/max across all
+    // such overlays; the per-frame work reduces to just the visible
+    // candle + indicator point scan. (Pan/zoom Performance Fix.)
+
+    /// A generic overlay zone with just price bounds.
+    struct OverlayBounds {
+        let low: Double
+        let high: Double
+    }
+
+    /// A generic point with a price value.
+    struct PricePoint {
+        let price: Double
+    }
+
+    private struct OverlayYExtremesSig: Equatable {
+        // S/R levels — count + boundary values
+        let srSupportCount: Int
+        let srResistanceCount: Int
+        let srMin: Double
+        let srMax: Double
+        // Overlay zone bounds (all zones merged — counts tracked via
+        // the bounds themselves changing)
+        let zoneCount: Int
+        let zoneMin: Double
+        let zoneMax: Double
+        // Scenarios
+        let scenarioEntry: Double?
+        let scenarioTP: Double
+        let scenarioSL: Double
+        let altScenarioEntry: Double?
+        let altScenarioTP: Double
+        let altScenarioSL: Double
+        // Drawings
+        let drawingCount: Int
+        let drawingMin: Double
+        let drawingMax: Double
+        // Trades
+        let tradeCount: Int
+        let tradeMin: Double
+        let tradeMax: Double
+        // Journal entries
+        let journalCount: Int
+        let journalMin: Double
+        let journalMax: Double
+    }
+
+    private let overlayYExtremesSlot = Slot<OverlayYExtremesSig, (lo: Double, hi: Double)?>((lo: Double.greatestFiniteMagnitude, hi: -Double.greatestFiniteMagnitude))
+
+    /// Cached min/max price across all overlays that don't depend on
+    /// the visible window. Returns nil when there are no overlays.
+    func overlayYExtremes(
+        srLevels: PromptBuilder.SRLevels,
+        overlayZones: [OverlayBounds],
+        scenario: (entry: Double?, takeProfit: Double, stopLoss: Double)?,
+        altScenario: (entry: Double?, takeProfit: Double, stopLoss: Double)?,
+        drawings: [PricePoint],
+        trades: [PricePoint],
+        journalEntries: [PricePoint]
+    ) -> (lo: Double, hi: Double)? {
+        let allSR = srLevels.support + srLevels.resistance
+
+        let sig = OverlayYExtremesSig(
+            srSupportCount: srLevels.support.count,
+            srResistanceCount: srLevels.resistance.count,
+            srMin: allSR.min() ?? 0,
+            srMax: allSR.max() ?? 0,
+            zoneCount: overlayZones.count,
+            zoneMin: overlayZones.map(\.low).min() ?? 0,
+            zoneMax: overlayZones.map(\.high).max() ?? 0,
+            scenarioEntry: scenario?.entry,
+            scenarioTP: scenario?.takeProfit ?? 0,
+            scenarioSL: scenario?.stopLoss ?? 0,
+            altScenarioEntry: altScenario?.entry,
+            altScenarioTP: altScenario?.takeProfit ?? 0,
+            altScenarioSL: altScenario?.stopLoss ?? 0,
+            drawingCount: drawings.count,
+            drawingMin: drawings.map(\.price).min() ?? 0,
+            drawingMax: drawings.map(\.price).max() ?? 0,
+            tradeCount: trades.count,
+            tradeMin: trades.map(\.price).min() ?? 0,
+            tradeMax: trades.map(\.price).max() ?? 0,
+            journalCount: journalEntries.count,
+            journalMin: journalEntries.map(\.price).min() ?? 0,
+            journalMax: journalEntries.map(\.price).max() ?? 0
+        )
+        return resolve(overlayYExtremesSlot, signature: sig) {
+            var lo = Double.greatestFiniteMagnitude
+            var hi = -Double.greatestFiniteMagnitude
+            for v in allSR {
+                if v < lo { lo = v }
+                if v > hi { hi = v }
+            }
+            for zone in overlayZones {
+                if zone.low  < lo { lo = zone.low }
+                if zone.high > hi { hi = zone.high }
+            }
+            if let scenario {
+                for v in [scenario.takeProfit, scenario.stopLoss] + [scenario.entry].compactMap({ $0 }) {
+                    if v < lo { lo = v }
+                    if v > hi { hi = v }
+                }
+            }
+            if let altScenario {
+                for v in [altScenario.takeProfit, altScenario.stopLoss] + [altScenario.entry].compactMap({ $0 }) {
+                    if v < lo { lo = v }
+                    if v > hi { hi = v }
+                }
+            }
+            for p in drawings {
+                if p.price < lo { lo = p.price }
+                if p.price > hi { hi = p.price }
+            }
+            for p in trades {
+                if p.price < lo { lo = p.price }
+                if p.price > hi { hi = p.price }
+            }
+            for p in journalEntries {
+                if p.price < lo { lo = p.price }
+                if p.price > hi { hi = p.price }
+            }
+            guard lo <= hi else { return nil }
+            return (lo, hi)
+        }
+    }
 }

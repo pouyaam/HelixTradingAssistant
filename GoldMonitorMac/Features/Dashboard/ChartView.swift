@@ -2999,6 +2999,12 @@ struct ChartView: View {
     /// at 0, which compresses million-toman prices into a single pixel.
     /// Also folds in indicator/overlay extremes so e.g. the upper
     /// Bollinger band doesn't get clipped off the top.
+    ///
+    /// Overlay extremes (S/R, FVG, OB, drawings, trades, journal) are
+    /// cached in ChartDerivedCache — they don't depend on the visible
+    /// window, so the expensive multi-loop scan only runs when overlay
+    /// data actually changes (AI result, trade edit, drawing add), not
+    /// on every pan/zoom frame. (Pan/zoom Performance Fix.)
     private var autoYDomain: ClosedRange<Double> {
         // Fit Y to only the *visible* bar window — otherwise the axis
         // hugs the entire (possibly multi-year) range and the recent
@@ -3041,119 +3047,44 @@ struct ChartView: View {
                 if v > hi { hi = v }
             }
         }
-        // S/R levels from the AI: keep them on-screen even when the
-        // identified level sits beyond the visible candles.
-        if !srLevels.support.isEmpty || !srLevels.resistance.isEmpty {
-            for v in srLevels.support + srLevels.resistance {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
+        // All overlay extremes (S/R, FVG, OB, sessions, scenarios,
+        // drawings, trades, journal) are cached — the scan only runs
+        // when overlay data changes, not on every pan/zoom frame.
+        let allZones: [ChartDerivedCache.OverlayBounds] =
+            fvgZones.map { .init(low: $0.low, high: $0.high) }
+            + supplyDemandZones.map { .init(low: $0.low, high: $0.high) }
+            + indicatorFvgZones.map { .init(low: $0.low, high: $0.high) }
+            + orderBlockZones.map { .init(low: $0.low, high: $0.high) }
+            + steroidOrderBlockZones.map { .init(low: $0.low, high: $0.high) }
+            + sessionRuns.map { .init(low: $0.low, high: $0.high) }
+            + nySetupResults.map { .init(low: $0.orLow, high: $0.orHigh) }
+        let drawingPoints: [ChartDerivedCache.PricePoint] = drawings
+            .filter(\.visible)
+            .flatMap { d -> [ChartDerivedCache.PricePoint] in
+                var pts: [ChartDerivedCache.PricePoint] = [.init(price: d.start.price)]
+                if let e = d.end { pts.append(.init(price: e.price)) }
+                return pts
             }
+        let tradePoints: [ChartDerivedCache.PricePoint] = trades.flatMap { t in
+            [t.entry, t.takeProfit, t.stopLoss, t.fillPrice ?? t.entry]
+                .map { .init(price: $0) }
         }
-        // FVG zones — fold both edges so a gap above/below the visible
-        // range still shows up at the chart border.
-        if !fvgZones.isEmpty {
-            for zone in fvgZones {
-                if zone.low  < lo { lo = zone.low }
-                if zone.high > hi { hi = zone.high }
+        let journalPoints: [ChartDerivedCache.PricePoint] = journalEntries
+            .flatMap { je in
+                [je.entry, je.takeProfit, je.stopLoss].compactMap { $0 }
             }
-        }
-        // Supply / Demand zones — same treatment so a zone above or
-        // below the visible candles still draws against the chart
-        // edge (typical with strong moves that left a big base
-        // behind).
-        if !supplyDemandZones.isEmpty {
-            for zone in supplyDemandZones {
-                if zone.low  < lo { lo = zone.low }
-                if zone.high > hi { hi = zone.high }
-            }
-        }
-        // Indicator FVG zones — fold both edges into the Y domain.
-        if !indicatorFvgZones.isEmpty {
-            for zone in indicatorFvgZones {
-                if zone.low  < lo { lo = zone.low }
-                if zone.high > hi { hi = zone.high }
-            }
-        }
-        // Order Block zones — fold both edges so a block above/below the
-        // visible candles still draws against the chart border.
-        if !orderBlockZones.isEmpty {
-            for zone in orderBlockZones {
-                if zone.low  < lo { lo = zone.low }
-                if zone.high > hi { hi = zone.high }
-            }
-        }
-        // Steroid Order Block zones — fold both edges.
-        if !steroidOrderBlockZones.isEmpty {
-            for zone in steroidOrderBlockZones {
-                if zone.low  < lo { lo = zone.low }
-                if zone.high > hi { hi = zone.high }
-            }
-        }
-        // Trading-session boxes — fold their high/low so a box edge isn't
-        // clipped. Matters mainly in Heikin-Ashi mode, where the raw
-        // session extremes can sit just outside the HA candle range the
-        // visible-candle fit above is based on.
-        if !sessionRuns.isEmpty {
-            for run in sessionRuns {
-                if run.low  < lo { lo = run.low }
-                if run.high > hi { hi = run.high }
-            }
-        }
-        // NY Open Setup — fold the OR box and the plan's SL/TP so the
-        // breakout target/stop stay on-screen even when they sit beyond
-        // the visible candles.
-        if !nySetupResults.isEmpty {
-            for r in nySetupResults {
-                if r.orLow  < lo { lo = r.orLow }
-                if r.orHigh > hi { hi = r.orHigh }
-                for v in [r.fvgLow, r.fvgHigh, r.entry, r.stopLoss, r.takeProfit].compactMap({ $0 }) {
-                    if v < lo { lo = v }
-                    if v > hi { hi = v }
-                }
-            }
-        }
-
-        // Scenario entry / TP / SL — same treatment. Entry can be nil
-        // for legacy history entries; skip it then. Alt scenario folds
-        // in the same way so its lines stay on-screen too.
-        if taScenario != nil || taAltScenario != nil {
-            for scenario in [taScenario, taAltScenario].compactMap({ $0 }) {
-                var values = [scenario.takeProfit, scenario.stopLoss]
-                if let entry = scenario.entry { values.append(entry) }
-                for v in values {
-                    if v < lo { lo = v }
-                    if v > hi { hi = v }
-                }
-            }
-        }
-        // User drawings — a horizontal line above the highest candle
-        // would clip off-screen without this, defeating its purpose.
-        if drawings.contains(where: \.visible) {
-            for d in drawings where d.visible {
-                if d.start.price < lo { lo = d.start.price }
-                if d.start.price > hi { hi = d.start.price }
-                if let e = d.end {
-                    if e.price < lo { lo = e.price }
-                    if e.price > hi { hi = e.price }
-                }
-            }
-        }
-        // Paper trades — fold in entry / TP / SL / fillPrice so an
-        // out-of-range trade line still renders inside the visible
-        // plot. fillPrice diverges from entry only on market orders.
-        for t in trades {
-            for v in [t.takeProfit, t.stopLoss, t.entry, t.fillPrice ?? t.entry] {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
-            }
-        }
-        // Journal overlays — fold entry, TP, SL so the lines stay
-        // on-screen even when the position sits beyond visible candles.
-        for je in journalEntries {
-            for v in [je.entry, je.takeProfit, je.stopLoss].compactMap({ $0 }) {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
-            }
+            .map { .init(price: $0) }
+        if let ext = derived.overlayYExtremes(
+            srLevels: srLevels,
+            overlayZones: allZones,
+            scenario: taScenario.map { (entry: $0.entry, takeProfit: $0.takeProfit, stopLoss: $0.stopLoss) },
+            altScenario: taAltScenario.map { (entry: $0.entry, takeProfit: $0.takeProfit, stopLoss: $0.stopLoss) },
+            drawings: drawingPoints,
+            trades: tradePoints,
+            journalEntries: journalPoints
+        ) {
+            if ext.lo < lo { lo = ext.lo }
+            if ext.hi > hi { hi = ext.hi }
         }
         guard visibleCandles.isEmpty == false else { return 0...1 }
         let span = hi - lo
