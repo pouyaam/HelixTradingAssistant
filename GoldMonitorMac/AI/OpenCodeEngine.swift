@@ -20,25 +20,37 @@ struct OpenCodeEngine: AIEngine {
     static let stallTimeoutSeconds: TimeInterval = 120
 
     var isAvailable: Bool {
+        #if os(iOS)
+        return Self.remoteServerURL != nil
+        #else
         if Self.isRemoteMode {
             return Self.remoteServerURL != nil
         }
         return Self.locateBinary() != nil
+        #endif
     }
 
     var availability: EngineAvailability {
         if isAvailable { return .ready }
+        #if os(iOS)
+        return .notReady(hint: "OpenCode server URL not configured. Set it in Settings.")
+        #else
         if Self.isRemoteMode {
             return .notReady(hint: "OpenCode server URL not configured. Set it in Settings → AI → OpenCode.")
         }
         return .notReady(hint: "OpenCode CLI not found. Install with `curl -fsSL https://opencode.ai/install | bash`, then restart Helix Trading.")
+        #endif
     }
 
     func run(system: String, user: String) -> AsyncThrowingStream<AIStreamEvent, Error> {
+        #if os(iOS)
+        return runRemote(system: system, user: user)
+        #else
         if Self.isRemoteMode {
             return runRemote(system: system, user: user)
         }
         return runLocal(system: system, user: user)
+        #endif
     }
 
     // MARK: - Remote Mode Configuration
@@ -100,6 +112,7 @@ struct OpenCodeEngine: AIEngine {
 
     // MARK: - Local CLI Engine
 
+    #if !os(iOS)
     private func runLocal(system: String, user: String) -> AsyncThrowingStream<AIStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             guard let binary = Self.locateBinary() else {
@@ -289,6 +302,7 @@ struct OpenCodeEngine: AIEngine {
         }
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
+    #endif
 }
 
 // MARK: - Remote OpenCode Session

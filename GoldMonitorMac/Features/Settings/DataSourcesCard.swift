@@ -115,7 +115,11 @@ struct DataSourcesCard: View {
                 Spacer()
                 Button("Get a free key →") {
                     if let url = URL(string: "https://twelvedata.com/pricing") {
+                        #if os(iOS)
+                        UIApplication.shared.open(url)
+                        #else
                         NSWorkspace.shared.open(url)
+                        #endif
                     }
                 }
                 .buttonStyle(.plain)

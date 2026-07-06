@@ -33,7 +33,11 @@ struct JournalDetailView: View {
     /// `aiDayEntries`; lets the day-AI prompt frame "today" vs "this week"
     /// vs "all-time" instead of speaking of "this trading day" for every
     /// run.
+    #if !os(iOS)
     @State private var aiDayScope: JournalDayAISheet.PeriodScope = .day
+    #else
+    @State private var aiDayScope: String = "day"
+    #endif
     /// Pre-computed heuristic behavioral flags passed into the AI prompt
     /// as "corroborate or refute each" so the model's behavioural
     /// analysis builds on the rules engine instead of redoing it blind.
@@ -168,6 +172,7 @@ struct JournalDetailView: View {
             )
             .environmentObject(app)
         }
+        #if !os(iOS)
         .sheet(item: $aiEntry) { entry in
             JournalAISheet(entry: entry)
                 .environmentObject(journal)
@@ -190,6 +195,7 @@ struct JournalDetailView: View {
                 .environmentObject(dayReviewStore)
             }
         }
+        #endif
         .sheet(isPresented: $showReviewHistory) {
             DayReviewHistoryView()
                 .environmentObject(dayReviewStore)
@@ -323,6 +329,7 @@ struct JournalDetailView: View {
         }
     }
 
+    #if !os(iOS)
     private func openPeriodAI() {
         let entries = aiScopeEntries
         guard !entries.isEmpty else { return }
@@ -350,6 +357,11 @@ struct JournalDetailView: View {
         aiDayScope = scope
         aiDayHints = Self.hintLines(for: Self.computeWarnings(entries))
     }
+    #else
+    private func openPeriodAI() {
+        // AI period reviews not available on iPad (requires Claude/Codex)
+    }
+    #endif
 
     /// Entries the AI period review would actually cover — `rangeEntries`
     /// for any non-All preset, every scoped entry for All-Time. Pre-computed
@@ -1108,7 +1120,9 @@ struct JournalDetailView: View {
                 Button {
                     aiDayEntries = group.entries
                     aiDayDate = group.day
+                    #if !os(iOS)
                     aiDayScope = .day
+                    #endif
                     aiDayPeriodTitleForGroup(group)
                     aiDayHints = Self.hintLines(for: Self.computeWarnings(group.entries))
                 } label: {
@@ -1208,6 +1222,7 @@ struct JournalDetailView: View {
     // ── CSV export ────────────────────────────────────────────────
 
     private func exportCSV() {
+        #if !os(iOS)
         let panel = NSSavePanel()
         panel.title = "Export Journal"
         panel.nameFieldStringValue = "journal_export.csv"
@@ -1216,6 +1231,7 @@ struct JournalDetailView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let csv = buildExportCSV(journal.sorted(in: journalID))
         try? csv.write(to: url, atomically: true, encoding: .utf8)
+        #endif
     }
 
     private func buildExportCSV(_ entries: [JournalEntry]) -> String {
@@ -1250,6 +1266,7 @@ struct JournalDetailView: View {
     /// same statement, or a fresh export that overlaps a previous
     /// one, only adds the genuinely new rows).
     private func importCTraderCSV() {
+        #if !os(iOS)
         let panel = NSOpenPanel()
         panel.title = "Import cTrader Statement"
         panel.message = "Select a cTrader CSV statement file"
@@ -1294,6 +1311,7 @@ struct JournalDetailView: View {
         } catch {
             importError = error.localizedDescription
         }
+        #endif
     }
 
     /// Parses a cTrader statement CSV into JournalEntry values.

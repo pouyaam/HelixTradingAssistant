@@ -75,6 +75,7 @@ private struct JournalListView: View {
                 Text("This deletes \"\(j.name)\" and its \(count) trade\(count == 1 ? "" : "s"). This can't be undone.")
             }
         }
+        #if !os(iOS)
         .sheet(item: $aiJournal) { j in
             let entries = journal.sorted(in: j.id)
             JournalDayAISheet(
@@ -88,6 +89,7 @@ private struct JournalListView: View {
             .environmentObject(app)
             .environmentObject(dayReviewStore)
         }
+        #endif
     }
 
     // ── Header ────────────────────────────────────────────────────

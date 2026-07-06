@@ -256,10 +256,17 @@ extension ColorRGBA {
     /// default stroke when the color can't be resolved (e.g. dynamic
     /// system colors that don't expose components).
     init(_ color: Color) {
+        #if os(iOS)
+        let uiColor = UIColor(color)
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        uiColor.getRed(&r, green: &g, blue: &b, alpha: &a)
+        self.init(red: Double(r), green: Double(g), blue: Double(b), alpha: Double(a))
+        #else
         let ns = NSColor(color).usingColorSpace(.sRGB) ?? NSColor(color)
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         ns.getRed(&r, green: &g, blue: &b, alpha: &a)
         self.init(red: Double(r), green: Double(g), blue: Double(b), alpha: Double(a))
+        #endif
     }
 }
 

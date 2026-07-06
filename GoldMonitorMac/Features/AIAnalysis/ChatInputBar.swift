@@ -1,5 +1,12 @@
 import SwiftUI
 
+/// Standalone input chip for chat suggestions.
+struct ChatInputChip: Hashable, Identifiable {
+    let id: String
+    let label: String
+    let body: String
+}
+
 /// Self-contained chat input. Owns its own `draft: @State` so a
 /// keystroke only invalidates this view's body — not the parent
 /// AnalysisReportColumn (which renders potentially-long Markdown
@@ -14,7 +21,7 @@ import SwiftUI
 /// just dims the controls.
 struct ChatInputBar: View {
     let placeholder: String
-    let chips: [AnalysisReportColumn.InputChip]
+    let chips: [ChatInputChip]
     let isBusy: Bool
     var onSubmit: (String) -> Void
 

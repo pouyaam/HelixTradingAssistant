@@ -126,33 +126,65 @@ struct ChartPaneView: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             header
             if let pair {
-                ChartView(
-                    candles: candles,
-                    chartType: pane.chartType,
-                    accent: pair.color,
-                    xDomain: $xDomain,
-                    yDomain: $yDomain,
-                    indicators: pane.indicators,
-                    indicatorConfig: indicatorConfig,
-                    drawings: drawingStore.drawings(for: pane.pairID),
-                    activeTool: effectiveDrawingTool,
-                    onCommitDrawing: { drawing in
-                        drawingStore.add(drawing, for: pane.pairID)
-                        setDrawingTool(.none)
-                        selectedDrawingID = drawing.id
-                    },
-                    onMoveDrawing: { drawing in
-                        drawingStore.update(drawing, for: pane.pairID)
-                    },
-                    selectedDrawingID: selectedDrawingID,
-                    onSelectDrawing: { id in
-                        selectedDrawingID = id
-                    },
-                    livePrice: yahoo.latestPrices[pane.pairID]
-                )
-                .frame(minHeight: isCompact ? 130 : 200, maxHeight: .infinity)
-                .clipped()
+                let chartContent = Group {
+                    #if os(iOS)
+                    ChartViewiPad(
+                        candles: candles,
+                        chartType: pane.chartType,
+                        accent: pair.color,
+                        xDomain: $xDomain,
+                        yDomain: $yDomain,
+                        indicators: pane.indicators,
+                        indicatorConfig: indicatorConfig,
+                        drawings: drawingStore.drawings(for: pane.pairID),
+                        activeTool: effectiveDrawingTool,
+                        onCommitDrawing: { drawing in
+                            drawingStore.add(drawing, for: pane.pairID)
+                            setDrawingTool(.none)
+                            selectedDrawingID = drawing.id
+                        },
+                        onMoveDrawing: { drawing in
+                            drawingStore.update(drawing, for: pane.pairID)
+                        },
+                        selectedDrawingID: selectedDrawingID,
+                        onSelectDrawing: { id in
+                            selectedDrawingID = id
+                        },
+                        livePrice: yahoo.latestPrices[pane.pairID]
+                    )
+                    #else
+                    ChartView(
+                        candles: candles,
+                        chartType: pane.chartType,
+                        accent: pair.color,
+                        xDomain: $xDomain,
+                        yDomain: $yDomain,
+                        indicators: pane.indicators,
+                        indicatorConfig: indicatorConfig,
+                        drawings: drawingStore.drawings(for: pane.pairID),
+                        activeTool: effectiveDrawingTool,
+                        onCommitDrawing: { drawing in
+                            drawingStore.add(drawing, for: pane.pairID)
+                            setDrawingTool(.none)
+                            selectedDrawingID = drawing.id
+                        },
+                        onMoveDrawing: { drawing in
+                            drawingStore.update(drawing, for: pane.pairID)
+                        },
+                        selectedDrawingID: selectedDrawingID,
+                        onSelectDrawing: { id in
+                            selectedDrawingID = id
+                        },
+                        livePrice: yahoo.latestPrices[pane.pairID]
+                    )
+                    #endif
+                }
+                chartContent
+                    .frame(minHeight: isCompact ? 130 : 200, maxHeight: .infinity)
+                    .clipped()
+                #if !os(iOS)
                 .drawingDeleteKey(selectedDrawingID: $selectedDrawingID, drawingStore: drawingStore, pairID: pane.pairID)
+                #endif
                 .contextMenu { optionsMenu }
                 // Scroll-to-latest puck — same as the single chart's.
                 .overlay(alignment: .bottomLeading) {

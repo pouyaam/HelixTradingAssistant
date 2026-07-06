@@ -46,7 +46,7 @@ struct AnalysisTab: Identifiable, Equatable {
         kind: AnalysisKind = .combined,
         aspectsCSV: String = "technical,levels,scenarios",
         profile: StrategyProfile = .swing,
-        engine: AIEngineKind = .claude,
+        engine: AIEngineKind = .opencode,
         customTitle: String? = nil
     ) {
         self.id = id

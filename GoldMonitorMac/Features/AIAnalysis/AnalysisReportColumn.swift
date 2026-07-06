@@ -59,11 +59,7 @@ struct AnalysisReportColumn: View {
     var clarify: PromptBuilder.ClarifyRequest? = nil
     var onClarifyPick: ((String) -> Void)? = nil
 
-    struct InputChip: Hashable, Identifiable {
-        let label: String
-        let body: String
-        var id: String { label }
-    }
+    typealias InputChip = ChatInputChip
 
     /// Disclosure state for the Thinking section. Defaults to nil so
     /// the view can pick a sensible auto-expansion (open while
