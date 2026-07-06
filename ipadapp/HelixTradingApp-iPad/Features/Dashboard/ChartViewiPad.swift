@@ -259,14 +259,36 @@ struct ChartViewiPad: View {
             }
             .chartOverlay { proxy in
                 GeometryReader { geo in
+                    let plotFrame = geo[proxy.plotAreaFrame]
                     Rectangle()
                         .fill(Color.clear)
                         .contentShape(Rectangle())
-                        .gesture(ipadCrosshairGesture(proxy: proxy, geo: geo))
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                let x = location.x - plotFrame.origin.x
+                                let y = location.y - plotFrame.origin.y
+                                guard plotFrame.size.width > 0,
+                                      x >= 0, x <= plotFrame.size.width,
+                                      y >= 0, y <= plotFrame.size.height,
+                                      let xValue: Double = proxy.value(atX: x)
+                                else { return }
+                                let idx = max(0, min(candles.count - 1, Int(xValue.rounded())))
+                                let yPrice: Double = proxy.value(atY: y) ?? candles[idx].close
+                                hovered = HoverState(
+                                    candle: candles[idx],
+                                    index: idx,
+                                    cursor: location,
+                                    cursorPrice: yPrice
+                                )
+                            case .ended:
+                                hovered = nil
+                            }
+                        }
                         .simultaneousGesture(ipadDragGesture(
-                            plotWidth: geo[proxy.plotAreaFrame].size.width,
-                            plotHeight: geo[proxy.plotAreaFrame].size.height,
-                            plotOrigin: geo[proxy.plotAreaFrame].origin,
+                            plotWidth: plotFrame.size.width,
+                            plotHeight: plotFrame.size.height,
+                            plotOrigin: plotFrame.origin,
                             proxy: proxy
                         ))
                         .simultaneousGesture(magnificationGesture())
@@ -279,38 +301,6 @@ struct ChartViewiPad: View {
         }
     }
 
-    // MARK: - iPad crosshair (long-press + drag)
-
-    private func ipadCrosshairGesture(proxy: ChartProxy, geo: GeometryProxy) -> some Gesture {
-        LongPressGesture(minimumDuration: 0.3)
-            .sequenced(before: DragGesture(minimumDistance: 0))
-            .onChanged { value in
-                switch value {
-                case .second(true, let drag):
-                    if let location = drag?.location {
-                        let origin = geo[proxy.plotAreaFrame].origin
-                        let x = location.x - origin.x
-                        let y = location.y - origin.y
-                        if let xValue: Double = proxy.value(atX: x) {
-                            let idx = max(0, min(candles.count - 1, Int(xValue.rounded())))
-                            let yPrice: Double = proxy.value(atY: y) ?? candles[idx].close
-                            hovered = HoverState(
-                                candle: candles[idx],
-                                index: idx,
-                                cursor: location,
-                                cursorPrice: yPrice
-                            )
-                        }
-                    }
-                default:
-                    break
-                }
-            }
-            .onEnded { _ in
-                hovered = nil
-            }
-    }
-
     // MARK: - iPad drag (pan + draw)
 
     private func ipadDragGesture(
@@ -319,21 +309,30 @@ struct ChartViewiPad: View {
         plotOrigin: CGPoint,
         proxy: ChartProxy
     ) -> some Gesture {
-        DragGesture(minimumDistance: 10)
+        DragGesture(minimumDistance: 5)
             .onChanged { value in
                 if dragStartDomain == nil {
                     dragStartDomain = effectiveXDomain
                     dragStartYDomain = effectiveYDomain
                     panLockedY = false
                     hovered = nil
+                    dragHadMovement = false
                 }
+                let movedFar = abs(value.translation.width) > 3 || abs(value.translation.height) > 3
+                if movedFar { dragHadMovement = true }
+                guard dragHadMovement else { return }
                 guard let start = dragStartDomain, plotWidth > 0 else { return }
+
                 let span = start.upperBound - start.lowerBound
                 let unitsPerPoint = span / Double(plotWidth)
-                let delta = Double(value.translation.width) * unitsPerPoint
-                xDomain = (start.lowerBound - delta) ... (start.upperBound - delta)
+                let deltaX = Double(value.translation.width) * unitsPerPoint
 
-                if !panLockedY, abs(value.translation.height) > 3 { panLockedY = true }
+                // Batch xDomain + yDomain into one update to avoid double recompute
+                let newXLower = start.lowerBound - deltaX
+                let newXUpper = start.upperBound - deltaX
+                xDomain = newXLower ... newXUpper
+
+                if !panLockedY, abs(value.translation.height) > 6 { panLockedY = true }
                 if panLockedY, let startY = dragStartYDomain, plotHeight > 0 {
                     let ySpan = startY.upperBound - startY.lowerBound
                     let pricePerPoint = ySpan / Double(plotHeight)
@@ -348,10 +347,10 @@ struct ChartViewiPad: View {
             }
     }
 
-    // MARK: - Pinch-to-zoom
+    // MARK: - Pinch-to-zoom (throttled)
 
     private func magnificationGesture() -> some Gesture {
-        MagnificationGesture(minimumScaleDelta: 0.01)
+        MagnificationGesture(minimumScaleDelta: 0.02)
             .onChanged { value in
                 if magnifyStartDomain == nil {
                     magnifyStartDomain = effectiveXDomain
@@ -360,7 +359,7 @@ struct ChartViewiPad: View {
                 guard let start = magnifyStartDomain else { return }
                 let center = (start.lowerBound + start.upperBound) / 2
                 let halfSpan = (start.upperBound - start.lowerBound) / 2
-                let scale = max(0.05, min(50, Double(value)))
+                let scale = max(0.1, min(20, Double(value)))
                 let zoomedHalf = halfSpan / scale
                 xDomain = (center - zoomedHalf) ... (center + zoomedHalf)
             }

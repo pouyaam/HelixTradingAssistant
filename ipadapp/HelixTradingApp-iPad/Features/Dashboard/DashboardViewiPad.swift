@@ -36,6 +36,7 @@ struct DashboardViewiPad: View {
     @State private var scenarioVisible: Bool = true
     @State private var altScenarioVisible: Bool = true
     @State private var showAnalysis: Bool = false
+    @State private var showDebugLogSheet: Bool = false
 
     // Phase 2: Drawing tools
     @StateObject private var drawingStore = DrawingStore()
@@ -121,7 +122,8 @@ struct DashboardViewiPad: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    let showsGrid = multiChart.layout != .single
+                    let showsGrid = multiChart.layout != .single && !app.isChartFullscreen
+                    let isFull = app.isChartFullscreen
                     ZStack {
                         chartCard(pair)
                             .frame(maxWidth: showsGrid ? 0 : .infinity,
@@ -132,8 +134,8 @@ struct DashboardViewiPad: View {
                             layoutStore: multiChart,
                             indicatorConfig: oscillatorConfig,
                             drawingStore: drawingStore,
-                            activeDrawingTool: .constant(.none)
-                        ) { EmptyView() }
+                            activeDrawingTool: $activeDrawingTool
+                        ) { gridFullscreenToolbar }
                         .environmentObject(app)
                         .environmentObject(yahoo)
                         .frame(maxWidth: showsGrid ? .infinity : 0,
@@ -143,14 +145,14 @@ struct DashboardViewiPad: View {
                     }
                     .clipped()
 
-                    if !showsGrid {
+                    if !showsGrid && !isFull {
                         statsRow(pair)
                     }
                 } else {
                     emptyState
                 }
             }
-            .padding(Theme.Spacing.xl)
+            .padding(app.isChartFullscreen ? 0 : 16)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             // Phase 2: Analysis overlay
@@ -185,22 +187,26 @@ struct DashboardViewiPad: View {
         }
         .background(Theme.Color.canvas)
         .task(id: app.selectedPairID) {
-            xDomain = nil
-            yDomain = nil
-            srLevels = .init(support: [], resistance: [])
-            fvgZones = []
-            supplyDemandZones = []
-            taScenario = nil
-            taAltScenario = nil
-            selectedDrawingID = nil
-            alertStore.timeframeLabel = timeframe.rawValue
+            await MainActor.run {
+                xDomain = nil
+                yDomain = nil
+                srLevels = .init(support: [], resistance: [])
+                fvgZones = []
+                supplyDemandZones = []
+                taScenario = nil
+                taAltScenario = nil
+                selectedDrawingID = nil
+                alertStore.timeframeLabel = timeframe.rawValue
+            }
             await reloadCandles()
         }
         .onChange(of: timeframe) { _ in
-            xDomain = nil
-            yDomain = nil
-            alertStore.timeframeLabel = timeframe.rawValue
-            Task { await reloadCandles() }
+            Task { @MainActor in
+                xDomain = nil
+                yDomain = nil
+                alertStore.timeframeLabel = timeframe.rawValue
+                await reloadCandles()
+            }
         }
         .onReceive(
             yahoo.$lastUpdateAt
@@ -229,6 +235,9 @@ struct DashboardViewiPad: View {
                 .environmentObject(alertStore)
             }
         }
+        .sheet(isPresented: $showDebugLogSheet) {
+            DebugLogSheetiPad()
+        }
         .sheet(item: $pendingActivation) { mode in
             ActivateTradeSheet(
                 scenario: mode.scenario,
@@ -247,16 +256,32 @@ struct DashboardViewiPad: View {
 
     private func pairHeader(_ pair: TradingPair) -> some View {
         HStack(spacing: Theme.Spacing.md) {
-            Circle()
-                .fill(pair.color)
-                .frame(width: 12, height: 12)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(pair.name)
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(Theme.Color.textPrimary)
-                Text(pair.symbol)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.Color.textMuted)
+            // Pair selector dropdown
+            Menu {
+                ForEach(app.pairs) { p in
+                    Button {
+                        app.selectedPairID = p.id
+                    } label: {
+                        Label(p.name, systemImage: p.id == app.selectedPairID ? "checkmark.circle.fill" : "circle")
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(pair.color)
+                        .frame(width: 12, height: 12)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(pair.name)
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundStyle(Theme.Color.textPrimary)
+                        Text(pair.symbol)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.Color.textMuted)
+                    }
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.Color.textMuted)
+                }
             }
             Spacer()
 
@@ -377,19 +402,17 @@ struct DashboardViewiPad: View {
                     Image(systemName: "chart.line.uptrend.xyaxis")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(Theme.Color.textSecondary)
-                        .frame(width: 44, height: 44)
-                        .background(Circle().fill(Theme.Color.surface))
+                        .frame(width: 32, height: 32)
                 }
 
                 // Phase 2: Layers popover
                 Menu {
                     layersMenuContent
                 } label: {
-                    Image(systemName: "layers")
+                    Image(systemName: "square.3.layers.3d")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(Theme.Color.textSecondary)
-                        .frame(width: 44, height: 44)
-                        .background(Circle().fill(Theme.Color.surface))
+                        .frame(width: 32, height: 32)
                 }
 
                 // Phase 2: Alerts button
@@ -397,8 +420,7 @@ struct DashboardViewiPad: View {
                     Image(systemName: "bell")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(Theme.Color.textSecondary)
-                        .frame(width: 44, height: 44)
-                        .background(Circle().fill(Theme.Color.surface))
+                        .frame(width: 32, height: 32)
                 }
 
                 // AI Analyze button
@@ -416,6 +438,34 @@ struct DashboardViewiPad: View {
                     .padding(.vertical, 8)
                     .background(Capsule().fill(Theme.accentGradient))
                 }
+
+                // Network debug button
+                Button {
+                    showDebugLogSheet = true
+                } label: {
+                    Image(systemName: "ladybug.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(NetworkLog.shared.isEnabled
+                                         ? Theme.Color.warn
+                                         : Theme.Color.textSecondary)
+                        .frame(width: 32, height: 32)
+                }
+                .help(NetworkLog.shared.isEnabled
+                      ? "Network debug · capturing"
+                      : "Network debug")
+
+                // Fullscreen toggle
+                Button {
+                    app.isChartFullscreen.toggle()
+                } label: {
+                    Image(systemName: app.isChartFullscreen
+                          ? "arrow.down.right.and.arrow.up.left"
+                          : "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Theme.Color.textSecondary)
+                        .frame(width: 32, height: 32)
+                }
+                .help(app.isChartFullscreen ? "Exit fullscreen" : "Fullscreen")
             }
             .padding(.horizontal, Theme.Spacing.lg)
             .padding(.vertical, 8)
@@ -484,14 +534,15 @@ struct DashboardViewiPad: View {
             }
         }
         .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.lg, style: .continuous)
-                .fill(Theme.Color.surfaceHi)
+            RoundedRectangle(cornerRadius: app.isChartFullscreen ? 0 : Theme.Radius.lg, style: .continuous)
+                .fill(app.isChartFullscreen ? Color.clear : Theme.Color.surfaceHi)
                 .overlay(
+                    app.isChartFullscreen ? nil :
                     RoundedRectangle(cornerRadius: Theme.Radius.lg, style: .continuous)
                         .strokeBorder(Theme.Color.border, lineWidth: 1)
                 )
         )
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.lg, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: app.isChartFullscreen ? 0 : Theme.Radius.lg, style: .continuous))
         .frame(maxHeight: .infinity)
     }
 
@@ -615,6 +666,142 @@ struct DashboardViewiPad: View {
                 } label: {
                     Label("Clear All Drawings", systemImage: "trash")
                 }
+            }
+        }
+    }
+
+    // MARK: - Grid fullscreen toolbar
+
+    private var gridFullscreenToolbar: some View {
+        HStack(spacing: Theme.Spacing.md) {
+            if let pairID = app.selectedPairID,
+               let pair = app.pairs.first(where: { $0.id == pairID }) {
+                Text(pair.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textPrimary)
+                Text(timeframe.label)
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(Theme.Color.textMuted)
+                Divider().frame(height: 20).background(Theme.Color.border)
+            }
+            HStack(spacing: 6) {
+                // AI Analyze
+                Button { showAnalysis = true } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 12, weight: .bold))
+                        Text("Analyze")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(Theme.accentGradient))
+                }
+
+                // Replay
+                if replay.isActive {
+                    HStack(spacing: 4) {
+                        Button { replay.exit() } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 14))
+                                .foregroundStyle(Theme.Color.danger)
+                        }
+                        Text("REPLAY")
+                            .font(.system(size: 9, weight: .heavy))
+                            .foregroundStyle(Theme.Color.warn)
+                    }
+                } else {
+                    Button { replay.arm() } label: {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Theme.Color.textSecondary)
+                            .frame(width: 32, height: 32)
+                    }
+                }
+
+                // Alerts
+                Button { showAlertSheet = true } label: {
+                    Image(systemName: "bell")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.Color.textSecondary)
+                        .frame(width: 32, height: 32)
+                }
+
+                Divider().frame(height: 20).background(Theme.Color.border)
+
+                // Indicators
+                Menu {
+                    ForEach(IndicatorKind.allCases) { kind in
+                        Button {
+                            setIndicator(kind, enabled: !enabledIndicators.contains(kind))
+                        } label: {
+                            Label(kind.label,
+                                  systemImage: enabledIndicators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                        }
+                    }
+                    Divider()
+                    ForEach(OscillatorKind.allCases) { kind in
+                        Button {
+                            setOscillator(kind, enabled: !enabledOscillators.contains(kind))
+                        } label: {
+                            Label(kind.label,
+                                  systemImage: enabledOscillators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                        }
+                    }
+                    Divider()
+                    Button { showIndicatorSettings = true } label: {
+                        Label("Indicator Settings...", systemImage: "slider.horizontal.3")
+                    }
+                } label: {
+                    Image(systemName: "chart.line.uptrend.xyaxis")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.Color.textSecondary)
+                        .frame(width: 32, height: 32)
+                }
+
+                // Layers
+                Menu {
+                    layersMenuContent
+                } label: {
+                    Image(systemName: "square.3.layers.3d")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.Color.textSecondary)
+                        .frame(width: 32, height: 32)
+                }
+
+                // Drawing tools
+                drawingToolbar
+
+                Divider().frame(height: 20).background(Theme.Color.border)
+
+                ChartTypeToggle(selected: $userChartType, isDisabled: false)
+                TimeframeSelector(selected: $timeframe)
+
+                Divider().frame(height: 20).background(Theme.Color.border)
+
+                // Debug
+                Button {
+                    showDebugLogSheet = true
+                } label: {
+                    Image(systemName: "ladybug.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(NetworkLog.shared.isEnabled
+                                         ? Theme.Color.warn
+                                         : Theme.Color.textSecondary)
+                        .frame(width: 32, height: 32)
+                }
+
+                // Fullscreen
+                Button {
+                    app.isChartFullscreen = false
+                } label: {
+                    Image(systemName: "arrow.down.right.and.arrow.up.left")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.Color.textSecondary)
+                        .frame(width: 32, height: 32)
+                }
+                .help("Exit fullscreen")
             }
         }
     }

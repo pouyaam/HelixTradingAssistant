@@ -148,6 +148,11 @@ struct ChartGridView<FullscreenToolbar: View>: View {
         .onChange(of: fullscreenPaneID) { id in
             app.isChartFullscreen = id != nil
         }
+        // When the chartCard's fullscreen button exits fullscreen,
+        // clear the local pane fullscreen state so the grid restores.
+        .onChange(of: app.isChartFullscreen) { isFull in
+            if !isFull { fullscreenPaneID = nil }
+        }
         // A layout change (e.g. 2×2 → 2 columns) can drop the
         // fullscreen pane entirely — always land back in the grid
         // rather than showing a stale, now-nonexistent pane.
@@ -165,32 +170,11 @@ struct ChartGridView<FullscreenToolbar: View>: View {
         }
     }
 
-    /// Whole-grid fullscreen toggle — distinct from a single pane's own
-    /// fullscreen (`fullscreenPaneID`): this hides the sidebar and pair
-    /// header while leaving every pane visible, so the full 2×2 (or
-    /// 2-up) layout gets the extra room instead of just one chart.
+    /// Whole-grid fullscreen toggle — hidden; individual panes have
+    /// their own fullscreen buttons. Kept as an empty view so the
+    /// layout doesn't change.
     private var gridToolbar: some View {
-        HStack {
-            Spacer()
-            Button {
-                app.isChartFullscreen.toggle()
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: app.isChartFullscreen
-                          ? "arrow.down.right.and.arrow.up.left"
-                          : "arrow.up.left.and.arrow.down.right")
-                    Text(app.isChartFullscreen ? "Exit Fullscreen" : "Fullscreen Grid")
-                }
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.Color.textSecondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(Theme.Color.surfaceHi))
-                .overlay(Capsule().strokeBorder(Theme.Color.border, lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-            .help(app.isChartFullscreen ? "Exit fullscreen" : "Fullscreen the whole grid")
-        }
+        EmptyView()
     }
 
     // MARK: - Pane slot (fixed grid cell)

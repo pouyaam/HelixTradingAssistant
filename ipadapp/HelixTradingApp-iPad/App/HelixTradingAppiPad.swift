@@ -58,9 +58,14 @@ struct HelixTradingAppiPad: App {
                         ctrader.start(database: db) { [weak yahoo] price, pairID, source in
                             yahoo?.applyExternalTick(price: price, pairID: pairID, source: source)
                         }
+                        // iPad: only sync the selected pair to reduce CPU
+                        yahoo.focusedPairID = appState.selectedPairID
                     }
 
                     seedOpenCodeRemoteIfNeeded()
+                }
+                .onChange(of: appState.selectedPairID) { newID in
+                    yahoo.focusedPairID = newID
                 }
         }
     }
@@ -71,12 +76,7 @@ struct HelixTradingAppiPad: App {
         let defaults = UserDefaults.standard
         if !defaults.bool(forKey: "opencode.seeded") {
             defaults.set(true, forKey: "ai.opencode.useRemote")
-            defaults.set("http://ntsn.teleincognito.com:4096", forKey: "ai.opencode.serverURL")
-            defaults.set("mimo-v2.5-free", forKey: "ai.opencode.model")
             defaults.set(true, forKey: "opencode.seeded")
-        }
-        if KeychainHelper.get(.opencodeServerPass) == nil {
-            KeychainHelper.set(.opencodeServerPass, "Akiaher890")
         }
     }
 }

@@ -81,6 +81,7 @@ struct ChartPaneView: View {
     var body: some View {
         content
             .task(id: "\(pane.pairID)|\(pane.timeframe.rawValue)") {
+                guard isVisible else { return }
                 await load()
             }
             .onReceive(

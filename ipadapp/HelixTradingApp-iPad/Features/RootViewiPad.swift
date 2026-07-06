@@ -7,32 +7,16 @@ struct RootViewiPad: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $app.selectedSidebarItem) {
-                Section("Navigation") {
-                    ForEach(SidebarItem.allCases) { item in
-                        Label(item.label, systemImage: item.symbol)
-                            .tag(item)
-                    }
-                }
-                Section("Pairs") {
-                    ForEach(app.pairs) { pair in
-                        PairRowiPad(
-                            pair: pair,
-                            isSelected: app.selectedPairID == pair.id,
-                            livePrice: yahoo.latestPrices[pair.id]
-                        )
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            app.selectedPairID = pair.id
-                            app.selectedSidebarItem = .dashboard
-                        }
-                        .tag(pair.id)
-                    }
+                ForEach(SidebarItem.allCases) { item in
+                    Label(item.label, systemImage: item.symbol)
+                        .tag(item)
                 }
             }
             .listStyle(.sidebar)
             .navigationTitle("Helix Trading")
         } detail: {
             detailView
+                .navigationBarHidden(true)
         }
     }
 

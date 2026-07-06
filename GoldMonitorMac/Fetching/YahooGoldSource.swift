@@ -72,12 +72,12 @@ enum YahooGoldSource {
             (data, response) = try await URLSession.shared.data(for: req)
         } catch {
             await logYahoo(url: url, status: nil, durationMs: Date().timeIntervalSince(start) * 1000,
-                           response: nil, error: error)
+                           response: nil, error: error, headers: req.allHTTPHeaderFields)
             throw error
         }
         let durationMs = Date().timeIntervalSince(start) * 1000
         let status = (response as? HTTPURLResponse)?.statusCode
-        await logYahoo(url: url, status: status, durationMs: durationMs, response: data, error: nil)
+        await logYahoo(url: url, status: status, durationMs: durationMs, response: data, error: nil, headers: req.allHTTPHeaderFields)
 
         guard let http = response as? HTTPURLResponse else { throw YahooError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else {
@@ -122,13 +122,13 @@ enum YahooGoldSource {
             (data, response) = try await URLSession.shared.data(for: req)
         } catch {
             await logYahoo(url: url, status: nil, durationMs: Date().timeIntervalSince(start) * 1000,
-                           response: nil, error: error)
+                           response: nil, error: error, headers: req.allHTTPHeaderFields)
             throw error
         }
         let status = (response as? HTTPURLResponse)?.statusCode
         await logYahoo(url: url, status: status,
                        durationMs: Date().timeIntervalSince(start) * 1000,
-                       response: data, error: nil)
+                       response: data, error: nil, headers: req.allHTTPHeaderFields)
         guard let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode) else {
             throw YahooError.invalidResponse
@@ -144,7 +144,8 @@ enum YahooGoldSource {
     /// `yahoo` so the bug-icon view can group/filter by source.
     /// Dispatches to the main actor since NetworkLog is @MainActor.
     private static func logYahoo(
-        url: URL, status: Int?, durationMs: Double, response: Data?, error: Error?
+        url: URL, status: Int?, durationMs: Double, response: Data?, error: Error?,
+        headers: [String: String]? = nil
     ) async {
         await MainActor.run {
             NetworkLog.shared.record(
@@ -154,7 +155,8 @@ enum YahooGoldSource {
                 status: status,
                 durationMs: durationMs,
                 response: response,
-                error: error
+                error: error,
+                headers: headers
             )
         }
     }
