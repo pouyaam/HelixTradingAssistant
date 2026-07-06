@@ -139,14 +139,33 @@ final class AnalysisStore: ObservableObject {
 
         private var renderCacheValid = false
         private var renderCacheValue = RenderChunks()
+        /// Throttle for renderChunks() recomputation during streaming.
+        /// The 100 ms chunk flush invalidates the cache every time,
+        /// but the actual stripStructuredBlocks + chunkAtH3 work is
+        /// deferred until at least `renderThrottleMS` has elapsed
+        /// since the last computation. The stale cache is returned
+        /// in the interim — the trailing `Text()` chunk handles the
+        /// visual gap, so a 200 ms lag on the completed-chunk
+        /// promotion is imperceptible. (Streaming Performance Fix.)
+        private var renderLastComputedAt: Date = .distantPast
+        private static let renderThrottleMS: TimeInterval = 0.2
 
         /// Memoised, structured-block-stripped + H3-chunked view of
         /// `report`. O(1) when the report hasn't changed since the
         /// last call; recomputes only after a `report` mutation.
+        /// During streaming, recomputation is throttled to at most
+        /// once per 200 ms even though `report` mutates every 100 ms.
         func renderChunks() -> RenderChunks {
             if renderCacheValid { return renderCacheValue }
+            let now = Date()
+            if now.timeIntervalSince(renderLastComputedAt) < Self.renderThrottleMS {
+                // Too soon — return the stale cache. The trailing
+                // Text() chunk covers the visual gap.
+                return renderCacheValue
+            }
             renderCacheValue = Self.computeRenderChunks(report)
             renderCacheValid = true
+            renderLastComputedAt = now
             return renderCacheValue
         }
 
@@ -405,7 +424,11 @@ final class AnalysisStore: ObservableObject {
     /// empty/idle session when the user hasn't run anything for that
     /// combination yet — keeps call sites null-free.
     func session(kind: AnalysisKind, pairID: String, tabID: UUID? = nil) -> Session {
-        sessions[SessionKey(pairID: pairID, kind: kind, tabID: tabID)] ?? Session()
+        let key = SessionKey(pairID: pairID, kind: kind, tabID: tabID)
+        if let existing = sessions[key] { return existing }
+        let s = Session()
+        sessions[key] = s
+        return s
     }
 
     private static let historyKey = "analysis.history.v1"
@@ -862,14 +885,15 @@ final class AnalysisStore: ObservableObject {
             guard let sess = sessions[sessionKey],
                   let idx = sess.conversation.firstIndex(where: { $0.id == turnID })
             else { return }
-            var changed = false
             if !text.isEmpty {
                 sess.conversation[idx].assistant.append(text)
-                changed = true
             }
-            if changed {
-                sessions[sessionKey] = sess
-            }
+            // No `sessions[sessionKey] = sess` — Session is a class
+            // so the mutation is in-place. The @Published var
+            // conversation fires on the session itself; the report
+            // column observes it via @ObservedObject. Re-assigning
+            // the dict subscript here would trigger the store-level
+            // @Published cascade (Performance Fix 7).
         }
     }
 

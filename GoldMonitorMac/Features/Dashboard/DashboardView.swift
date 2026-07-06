@@ -383,24 +383,71 @@ struct DashboardView: View {
                     // is opened via a button on the chart header
                     // regardless of mode.
                     if !isChartFull {
+                        // Grid mode stacks two full-height pane rows below
+                        // this, which can demand more vertical space than
+                        // the window has. Without pinning the header to its
+                        // intrinsic size, the VStack's flexible distribution
+                        // starves it first (it's the only child with no
+                        // minHeight), squashing it down to a sliver that
+                        // Card's `.clipShape` then crops — see the "top of
+                        // the dashboard is clipped" grid-mode bug. Pin it so
+                        // any leftover overflow lands on the grid instead,
+                        // which degrades far more gracefully.
                         pairHeader(pair)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .layoutPriority(1)
                     }
-                    if multiChart.layout == .single {
+                    // Both views stay mounted at all times — the inactive
+                    // one collapses to zero frame + zero opacity instead of
+                    // being torn down. Same trick ChartGridView uses for its
+                    // internal pane slots. This eliminates the expensive
+                    // teardown/rebuild cycle (destroying ChartView's
+                    // @StateObject cache + all @State, then building fresh
+                    // ChartPaneViews that reload candles from GRDB) that the
+                    // old if/else caused on every single↔grid switch.
+                    let showsSingle = multiChart.layout == .single
+                    ZStack {
                         chartCard(pair)
-                    } else {
-                        ChartGridView(layoutStore: multiChart, indicatorConfig: oscillatorConfig, drawingStore: drawingStore)
+                            .frame(maxWidth: showsSingle ? .infinity : 0,
+                                   maxHeight: showsSingle ? .infinity : 0)
+                            .opacity(showsSingle ? 1 : 0)
+                            .allowsHitTesting(showsSingle)
+                        ChartGridView(layoutStore: multiChart, indicatorConfig: oscillatorConfig, drawingStore: drawingStore, activeDrawingTool: $activeDrawingTool) {
+                            gridFullscreenToolbar
+                        }
+                            .frame(maxWidth: showsSingle ? 0 : .infinity,
+                                   maxHeight: showsSingle ? 0 : .infinity)
+                            .opacity(showsSingle ? 0 : 1)
+                            .allowsHitTesting(!showsSingle)
                     }
+                .clipped()
+                // Right-click context menu — same options as the grid
+                // pane's context menu, adapted for the single chart's
+                // state model. Plus Scroll to Latest and Reset Chart.
+                .contextMenu {
+                    chartContextMenu(pair: pair)
+                }
+                    .animation(.easeInOut(duration: 0.25), value: multiChart.layout)
                 } else {
                     emptyState
                 }
             }
             // Zero padding in fullscreen: chart edges align with the
-            // window edges so the chart truly fills the area.
+            // window edges so the chart truly fills the area. No local
+            // `.animation(value: isChartFull)` here — `RootView`'s HStack
+            // already applies one keyed on the same flag, and nesting a
+            // second implicit-animation transaction around this (heavy)
+            // chart subtree just doubles the layout-thrash during the
+            // transition. Let the outer one drive it.
             .padding(isChartFull ? 0 : Theme.Spacing.xl)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .animation(.easeInOut(duration: 0.2), value: isChartFull)
 
-            if app.showAnalysisFullPage, let pair = pair {
+            // Analysis page stays mounted when closed — same
+            // frame/opacity collapse trick as the chart/grid switch.
+            // Tearing it down dropped its @State (running engine,
+            // accumulated markdown) on every close.
+            let showAnalysis = app.showAnalysisFullPage && pair != nil
+            if let pair = pair {
                 AnalysisPage(
                     pair: pair,
                     timeframe: timeframe,
@@ -417,11 +464,6 @@ struct DashboardView: View {
                     onApplyTAScenario:    { taScenario = $0 },
                     onApplyTAAltScenario: { taAltScenario = $0 },
                     onActivateTradeFromScenario: { scenario, entryID in
-                        // Defer the activation sheet by one render —
-                        // SwiftUI can race when one modal transition
-                        // hands off directly to another. Carries the
-                        // source entry ID so the resulting trade can
-                        // stamp its outcome back onto history.
                         pendingActivation = PendingActivation(
                             scenario: scenario,
                             sourceHistoryEntryID: entryID
@@ -434,7 +476,10 @@ struct DashboardView: View {
                     onRestoreTAAltScenario: { taAltScenario = $0 }
                 )
                 .environmentObject(analysisStore)
-                .transition(.opacity)
+                .frame(maxWidth: showAnalysis ? .infinity : 0,
+                       maxHeight: showAnalysis ? .infinity : 0)
+                .opacity(showAnalysis ? 1 : 0)
+                .allowsHitTesting(showAnalysis)
             }
         }
         .background(Theme.Color.canvas)
@@ -480,6 +525,9 @@ struct DashboardView: View {
             Task { await reloadCandles() }
             warmHistory()   // ensure this timeframe's deep series is filled
         }
+        // Cache totalVolume so the O(n) candle iteration only runs
+        // when candles change, not on every pan/zoom frame.
+        .onChange(of: candles.count) { _ in recomputeTotalVolume() }
         // Infinite scroll: when the user pans within a few bars of the
         // oldest stored candle, pull an older page from Twelve Data
         // (Yahoo caps 1m/5m at ~8d/~60d) and splice it onto the front.
@@ -551,7 +599,7 @@ struct DashboardView: View {
                cur.usesLiveStream,
                !replay.isActive   // live ticks must not disturb a frozen replay view
             {
-                refreshTrailingCandles()
+                Task { await refreshTrailingCandles() }
             }
         }
         // Paper-trade evaluator: any live-stream pair's price tick
@@ -773,18 +821,14 @@ struct DashboardView: View {
     // ── Chart card ─────────────────────────────────────────────────
     @ViewBuilder
     private func chartCard(_ pair: TradingPair) -> some View {
-        if isChartFull {
-            // Fullscreen: no Card chrome (rounded corners, shadow,
-            // surface fill, inner padding all gone). The chart sits
-            // directly on the canvas so its edges meet the window edges.
+        // A single, unconditional `Card` call — fullscreen is expressed
+        // as a value change (chromeless + smaller padding), not by
+        // switching between `Card { X }` and bare `X` in an `if/else`.
+        // The latter would make SwiftUI tear down and rebuild
+        // `chartCardContent`'s `ChartView` (and its `ChartDerivedCache`)
+        // on every fullscreen toggle — see `Card.chromeless`.
+        Card(padding: isChartFull ? Theme.Spacing.md : Theme.Spacing.xl, chromeless: isChartFull) {
             chartCardContent(pair)
-                .padding(.horizontal, Theme.Spacing.md)
-                .padding(.top, Theme.Spacing.md)
-                .padding(.bottom, Theme.Spacing.md)
-        } else {
-            Card {
-                chartCardContent(pair)
-            }
         }
     }
 
@@ -829,6 +873,7 @@ struct DashboardView: View {
                         TimeframeSelector(selected: $timeframe)
                         toolbarDivider
                         debugButton
+                        singleChartFullscreenButton
                     }
                 }
 
@@ -909,6 +954,8 @@ struct DashboardView: View {
                 // before `.clipped()` so the modifier's GeometryReader
                 // sees the chart's actual frame in global coords.
                 .scrollZoom(xDomain: $xDomain, totalCandles: candles.count)
+                // Delete selected drawing on Backspace/Forward-Delete.
+                .drawingDeleteKey(selectedDrawingID: $selectedDrawingID, drawingStore: drawingStore, pairID: pair.id)
                 // Belt-and-braces clip at the layout container so any
                 // mark Apple Charts renders past the chart frame still
                 // can't leak past the card content. The price tag now
@@ -963,7 +1010,7 @@ struct DashboardView: View {
                         .transition(.scale.combined(with: .opacity))
                     }
                 }
-                .animation(.spring(response: 0.3, dampingFraction: 0.75), value: isViewingLatest)
+                .animation(.easeOut(duration: 0.15), value: isViewingLatest)
                 // Replay transport — floats bottom-center while replay
                 // is active. Picking phase shows a hint; once anchored
                 // it's play/pause/step/speed + the cursor clock.
@@ -1342,6 +1389,28 @@ struct DashboardView: View {
         .sheet(isPresented: $showDebugLogSheet) {
             DebugLogSheet()
         }
+    }
+
+    /// Fullscreen toggle button for the single chart view. Mirrors
+    /// the grid pane's fullscreen button (arrow icon). Toggles
+    /// `app.isChartFullscreen` which hides the sidebar and pair
+    /// header via RootView. (Single-chart fullscreen button feature.)
+    private var singleChartFullscreenButton: some View {
+        Button {
+            app.isChartFullscreen.toggle()
+        } label: {
+            Image(systemName: isChartFull
+                  ? "arrow.down.right.and.arrow.up.left"
+                  : "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .frame(width: 26, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(isChartFull ? "Exit fullscreen" : "Fullscreen")
     }
 
     /// Thin vertical separator between toolbar groups. 1pt wide,
@@ -2198,7 +2267,7 @@ struct DashboardView: View {
             stat(label: "24H LOW", value: pair.low24h, color: Theme.Color.danger)
             Divider().background(Theme.Color.border).frame(height: 24)
             stat(label: "CHANGE", value: pair.change, color: pair.change >= 0 ? Theme.Color.success : Theme.Color.danger)
-            if let vol = totalVolume {
+            if let vol = cachedTotalVolume {
                 Divider().background(Theme.Color.border).frame(height: 24)
                 volumeStat(vol)
             }
@@ -2209,11 +2278,15 @@ struct DashboardView: View {
     /// Sum of `volume` across all visible candles. Returns nil when no
     /// candle has volume data — keeps the "VOLUME" stat hidden for pairs
     /// that don't report volume (everything except ounce, currently).
-    private var totalVolume: Double? {
+    /// Cached in `@State` so the O(n) candle iteration only runs when
+    /// `candles` actually changes, not on every pan/zoom frame.
+    /// (Pan/zoom performance fix.)
+    @State private var cachedTotalVolume: Double? = nil
+    private func recomputeTotalVolume() {
         let vols = candles.compactMap { $0.volume }
-        guard !vols.isEmpty else { return nil }
+        guard !vols.isEmpty else { cachedTotalVolume = nil; return }
         let sum = vols.reduce(0, +)
-        return sum > 0 ? sum : nil
+        cachedTotalVolume = sum > 0 ? sum : nil
     }
 
     /// Volume strip rendered just under the main price chart. Hidden when
@@ -2361,6 +2434,106 @@ struct DashboardView: View {
         }
     }
 
+    // ── Chart context menu ────────────────────────────────────────
+    /// Right-click menu with all chart options. Mirrors the grid
+    /// pane's `optionsMenu` for feature parity across modes, plus
+    /// Scroll to Latest and Reset Chart actions.
+    @ViewBuilder
+    private func chartContextMenu(pair: TradingPair) -> some View {
+        Menu("Timeframe") {
+            ForEach(Timeframe.allCases) { tf in
+                Button {
+                    timeframe = tf
+                } label: {
+                    Label(tf.label, systemImage: tf == timeframe ? "checkmark.circle.fill" : "circle")
+                }
+            }
+        }
+        Menu("Chart type") {
+            ForEach(ChartType.allCases) { ct in
+                Button {
+                    userChartType = ct
+                } label: {
+                    Label(ct.label, systemImage: ct == userChartType ? "checkmark.circle.fill" : "circle")
+                }
+            }
+        }
+        Menu("Indicators") {
+            ForEach(IndicatorKind.allCases) { kind in
+                Button {
+                    setIndicator(kind, enabled: !enabledIndicators.contains(kind))
+                } label: {
+                    Label(kind.label, systemImage: enabledIndicators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                }
+            }
+        }
+        Menu("Oscillators") {
+            ForEach(OscillatorKind.allCases) { kind in
+                Button {
+                    setOscillator(kind, enabled: !enabledOscillators.contains(kind))
+                } label: {
+                    Label(kind.label, systemImage: enabledOscillators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                }
+            }
+        }
+        Button {
+            showVolume.toggle()
+        } label: {
+            Label("Volume", systemImage: showVolume ? "checkmark.circle.fill" : "circle")
+        }
+        Divider()
+        Menu("Drawing Tool") {
+            ForEach(DrawingTool.allCases) { tool in
+                Button {
+                    activeDrawingTool = tool
+                } label: {
+                    Label(tool.label, systemImage: activeDrawingTool == tool
+                          ? "checkmark.circle.fill" : tool.systemImage)
+                }
+            }
+        }
+        if selectedDrawingID != nil {
+            Button(role: .destructive) {
+                if let id = selectedDrawingID {
+                    drawingStore.remove(id: id, for: pair.id)
+                    selectedDrawingID = nil
+                }
+            } label: {
+                Label("Delete Selected Drawing", systemImage: "trash")
+            }
+        }
+        if !drawingStore.drawings(for: pair.id).isEmpty {
+            Button(role: .destructive) {
+                drawingStore.clear(for: pair.id)
+                selectedDrawingID = nil
+            } label: {
+                Label("Clear Drawings", systemImage: "trash.slash")
+            }
+        }
+        Divider()
+        if !isViewingLatest {
+            Button {
+                scrollToLatest()
+            } label: {
+                Label("Scroll to Latest", systemImage: "forward.end.fill")
+            }
+        }
+        Button {
+            resetChart()
+        } label: {
+            Label("Reset Chart", systemImage: "arrow.counterclockwise")
+        }
+        Divider()
+        Button {
+            app.isChartFullscreen.toggle()
+        } label: {
+            Label(isChartFull ? "Exit Fullscreen" : "Fullscreen",
+                  systemImage: isChartFull
+                  ? "arrow.down.right.and.arrow.up.left"
+                  : "arrow.up.left.and.arrow.down.right")
+        }
+    }
+
     /// Specialized stat tile for volume — wider precision, compact K/M/B
     /// formatter rather than the price formatter.
     private func volumeStat(_ v: Double) -> some View {
@@ -2443,28 +2616,31 @@ struct DashboardView: View {
     }
 
     private func reloadCandles() async {
-        guard app.database != nil, let pairID = app.selectedPairID else {
+        guard let db = app.database, let pairID = app.selectedPairID else {
             candles = []
             return
         }
         isLoading = true
-        let result = candles(for: timeframe)
+        // Async read — SQLite work runs off the main thread.
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        let respectsWeekend = pair?.category != .crypto
+        let until = replay.cursor ?? Date()
+        let result = await OHLCCandleLoader.loadAsync(
+            repo: db.ohlcRepo, pairID: pairID, tf: timeframe,
+            since: Date.distantPast, until: until,
+            dropClosedDays: respectsWeekend
+        )
         let priorCount = candles.count
-        await MainActor.run {
-            self.candles = result
-            self.isLoading = false
-            self.followLatestIfPinned(priorCount: priorCount, newCount: result.count)
-            // Recompute RSI on the freshly-loaded candles + feed
-            // the alert evaluator. RSI alerts only fire on a
-            // genuine cross between samples, so it's safe to
-            // call this on every reload — the evaluator's prior-
-            // sample memory gates duplicate fires.
-            if let r = Oscillators.rsi(result, period: oscillatorConfig.rsiPeriod).last?.value {
-                let livePeek = yahoo.latestPrices[pairID]
-                alertStore.evaluateRSI(r, pricePeek: livePeek, for: pairID)
-            }
-            notifyOrderBlockEvents(result, pairID: pairID)
+        self.candles = result
+        recomputeTotalVolume()
+        self.isLoading = false
+        self.followLatestIfPinned(priorCount: priorCount, newCount: result.count)
+        guard !replay.isActive else { return }
+        if let r = Oscillators.rsi(result, period: oscillatorConfig.rsiPeriod).last?.value {
+            let livePeek = yahoo.latestPrices[pairID]
+            alertStore.evaluateRSI(r, pricePeek: livePeek, for: pairID)
         }
+        notifyOrderBlockEvents(result, pairID: pairID)
     }
 
     /// Cheap live-tick path. The full `reloadCandles()` now re-reads the
@@ -2475,7 +2651,10 @@ struct DashboardView: View {
     /// gets its latest OHLC, and any bar that just rolled over is
     /// appended. The deep load stays reserved for pair / timeframe change
     /// and explicit refresh.
-    private func refreshTrailingCandles() {
+    ///
+    /// Now uses `loadAsync` so the SQLite read + fold runs off the main
+    /// thread. (Data-fetching Performance Fix.)
+    private func refreshTrailingCandles() async {
         guard let db = app.database, let pairID = app.selectedPairID else { return }
         let pair = app.pairs.first(where: { $0.id == pairID })
         let respectsWeekend = pair?.category != .crypto
@@ -2484,7 +2663,7 @@ struct DashboardView: View {
         // re-folding the tail reproduces the last bars exactly.
         let margin = Double(max(timeframe.seconds * 3, 6 * 3600))
         let since = until.addingTimeInterval(-margin)
-        let recent = loadOHLCCandles(
+        let recent = await OHLCCandleLoader.loadAsync(
             repo: db.ohlcRepo, pairID: pairID, tf: timeframe,
             since: since, until: until, dropClosedDays: respectsWeekend
         )
@@ -2494,6 +2673,7 @@ struct DashboardView: View {
         while let last = merged.last, last.bucketStart >= cutoff { merged.removeLast() }
         merged.append(contentsOf: recent)
         candles = merged
+        recomputeTotalVolume()
         followLatestIfPinned(priorCount: priorCount, newCount: merged.count)
         if let r = Oscillators.rsi(merged, period: oscillatorConfig.rsiPeriod).last?.value {
             alertStore.evaluateRSI(r, pricePeek: yahoo.latestPrices[pairID], for: pairID)
@@ -2634,6 +2814,49 @@ struct DashboardView: View {
         return yahoo.backfilling.contains("\(pairID)|\(sourceTimeframeTag(for: timeframe))")
     }
 
+    // ── Grid fullscreen toolbar ────────────────────────────────────
+    /// Toolbar row shown at the top of the grid when a pane goes
+    /// fullscreen. Mirrors the single-chart header toolbar so every
+    /// tool (AI, indicators, drawing, chart type, timeframe, etc.)
+    /// is reachable without exiting fullscreen. Animates in from the
+    /// top with a slide + fade. (Grid fullscreen toolbar feature.)
+    private var gridFullscreenToolbar: some View {
+        HStack(spacing: Theme.Spacing.md) {
+            // Pair name for context
+            if let pairID = app.selectedPairID,
+               let pair = app.pairs.first(where: { $0.id == pairID }) {
+                Text(pair.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textPrimary)
+                Text(timeframe.label)
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(Theme.Color.textMuted)
+                toolbarDivider
+            }
+            HStack(spacing: 6) {
+                analyzeButton
+                replayButton
+                alertButton
+                riskCalcButton
+                autoTraderPill
+                toolbarDivider
+                indicatorMenu
+                indicatorSettingsButton
+                layersButton
+                drawingToolbar
+                toolbarDivider
+                ChartTypeToggle(
+                    selected: $userChartType,
+                    isDisabled: false
+                )
+                TimeframeSelector(selected: $timeframe)
+                toolbarDivider
+                debugButton
+                singleChartFullscreenButton
+            }
+        }
+    }
+
     /// Pull deep history for the selected pair: the current timeframe's
     /// series first (so its skeleton resolves fastest), then warm the
     /// remaining native series in the background. Each `ensureDeepHistory`
@@ -2705,6 +2928,16 @@ struct DashboardView: View {
     /// Snapping to the next *stored* bar (rather than blindly adding
     /// `tf.seconds`) skips COMEX weekend gaps cleanly. Returns false at
     /// the end of data so auto-play can stop itself.
+    ///
+    /// Splices the single revealed bar onto `candles` in memory instead
+    /// of calling `reloadCandles()`, which re-reads and re-folds the
+    /// *entire* stored series (`since: Date.distantPast`). That full
+    /// reload — run on every step, up to 4×/sec during auto-play, with
+    /// no cancellation of the previous one — was what made replay
+    /// stepping/auto-play laggy: it also busts every `ChartDerivedCache`
+    /// signature, forcing every enabled indicator to recompute over the
+    /// full history on every tick. This mirrors the cheap splice
+    /// `refreshTrailingCandles()` already uses for the live 1 Hz tick.
     @discardableResult
     private func advanceReplay() -> Bool {
         guard replay.isActive, let cursor = replay.cursor,
@@ -2713,8 +2946,26 @@ struct DashboardView: View {
             return false
         }
         replay.cursor = next.bucketStart
-        Task { await reloadCandles() }
+        appendReplayBar(next)
         return true
+    }
+
+    /// Incremental counterpart to `refreshTrailingCandles()`, scoped to
+    /// replay's single-bar advance: appends (or, on the rare chance the
+    /// bucket already matches, replaces) one bar without touching the
+    /// rest of the array. No alert/notification evaluation here —
+    /// `reloadCandles()` already skips that while replay is active, and
+    /// this path never runs outside replay.
+    private func appendReplayBar(_ bar: Candle) {
+        let priorCount = candles.count
+        var merged = candles
+        if let last = merged.last, last.bucketStart == bar.bucketStart {
+            merged[merged.count - 1] = bar
+        } else {
+            merged.append(bar)
+        }
+        candles = merged
+        followLatestIfPinned(priorCount: priorCount, newCount: merged.count)
     }
 
     /// Selectable date range for the replay date-jump picker, bounded
@@ -2747,12 +2998,22 @@ struct DashboardView: View {
     }
 
     /// Move the replay cursor back one bar of the current timeframe.
+    /// Pops the last revealed bar from `candles` in memory — the
+    /// step-back counterpart to `advanceReplay`'s append — instead of
+    /// reloading and re-folding the entire stored series.
     private func stepReplayBack() {
         guard replay.isActive, let cursor = replay.cursor,
               let pairID = app.selectedPairID,
               let prev = prevReplayBar(before: cursor, pairID: pairID, tf: timeframe)
         else { return }
         replay.cursor = prev.bucketStart
-        Task { await reloadCandles() }
+        if candles.last?.bucketStart == cursor {
+            candles.removeLast()
+        } else {
+            // In-memory candles don't line up with the cursor (shouldn't
+            // normally happen) — fall back to a full reload rather than
+            // leaving the chart out of sync.
+            Task { await reloadCandles() }
+        }
     }
 }

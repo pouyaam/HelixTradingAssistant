@@ -25,19 +25,37 @@ enum YahooGoldSource {
     /// into OHLCBars tagged with that pair's id. Pairs whose category
     /// has a fixed weekly close (e.g. COMEX gold) drop weekend bars;
     /// crypto pairs run 24/7 and keep every bar.
+    ///
+    /// When `since` is non-nil, uses `period1` (Unix timestamp) to
+    /// fetch only bars newer than that date — avoids re-downloading
+    /// and re-upserting thousands of bars we already have.
+    /// (Incremental-fetch Performance Fix.)
     static func fetchHistory(
         pairID: String,
         symbol: String,
         skipWeekends: Bool,
         range: String,
-        interval: String
+        interval: String,
+        since: Date? = nil
     ) async throws -> [OHLCBar] {
         var comps = URLComponents(string: "https://query2.finance.yahoo.com/v8/finance/chart/\(symbol)")!
-        comps.queryItems = [
-            .init(name: "range", value: range),
-            .init(name: "interval", value: interval),
-            .init(name: "includePrePost", value: "false"),
-        ]
+        if let since = since {
+            // Incremental: fetch only bars newer than `since`.
+            // Add a 1-minute buffer to avoid re-fetching the boundary bar.
+            let period1 = Int(since.timeIntervalSince1970) - 60
+            comps.queryItems = [
+                .init(name: "period1", value: "\(period1)"),
+                .init(name: "period2", value: "\(Int(Date().timeIntervalSince1970))"),
+                .init(name: "interval", value: interval),
+                .init(name: "includePrePost", value: "false"),
+            ]
+        } else {
+            comps.queryItems = [
+                .init(name: "range", value: range),
+                .init(name: "interval", value: interval),
+                .init(name: "includePrePost", value: "false"),
+            ]
+        }
         guard let url = comps.url else { throw YahooError.badURL }
 
         var req = URLRequest(url: url)
@@ -54,12 +72,12 @@ enum YahooGoldSource {
             (data, response) = try await URLSession.shared.data(for: req)
         } catch {
             await logYahoo(url: url, status: nil, durationMs: Date().timeIntervalSince(start) * 1000,
-                           response: nil, error: error)
+                           response: nil, error: error, headers: req.allHTTPHeaderFields)
             throw error
         }
         let durationMs = Date().timeIntervalSince(start) * 1000
         let status = (response as? HTTPURLResponse)?.statusCode
-        await logYahoo(url: url, status: status, durationMs: durationMs, response: data, error: nil)
+        await logYahoo(url: url, status: status, durationMs: durationMs, response: data, error: nil, headers: req.allHTTPHeaderFields)
 
         guard let http = response as? HTTPURLResponse else { throw YahooError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else {
@@ -104,13 +122,13 @@ enum YahooGoldSource {
             (data, response) = try await URLSession.shared.data(for: req)
         } catch {
             await logYahoo(url: url, status: nil, durationMs: Date().timeIntervalSince(start) * 1000,
-                           response: nil, error: error)
+                           response: nil, error: error, headers: req.allHTTPHeaderFields)
             throw error
         }
         let status = (response as? HTTPURLResponse)?.statusCode
         await logYahoo(url: url, status: status,
                        durationMs: Date().timeIntervalSince(start) * 1000,
-                       response: data, error: nil)
+                       response: data, error: nil, headers: req.allHTTPHeaderFields)
         guard let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode) else {
             throw YahooError.invalidResponse
@@ -126,7 +144,8 @@ enum YahooGoldSource {
     /// `yahoo` so the bug-icon view can group/filter by source.
     /// Dispatches to the main actor since NetworkLog is @MainActor.
     private static func logYahoo(
-        url: URL, status: Int?, durationMs: Double, response: Data?, error: Error?
+        url: URL, status: Int?, durationMs: Double, response: Data?, error: Error?,
+        headers: [String: String]? = nil
     ) async {
         await MainActor.run {
             NetworkLog.shared.record(
@@ -136,7 +155,8 @@ enum YahooGoldSource {
                 status: status,
                 durationMs: durationMs,
                 response: response,
-                error: error
+                error: error,
+                headers: headers
             )
         }
     }

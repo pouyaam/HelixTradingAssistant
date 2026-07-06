@@ -11,16 +11,31 @@ struct JournalAISheet: View {
 
     // ── Candle data for the price ruler ──────────────────────────
     @State private var tradingCandles: [OHLCBar] = []
+    /// Cached (lo, hi) for the price ruler. Recomputed once on entry
+    /// appearance and again after candles finish loading — previously the
+    /// ruler did an O(n) min/max pass over every candle *and* every level
+    /// on every SwiftUI body recompute, which made the GeometryReader
+    /// inside the ScrollView inside a Sheet noticeably jittery on each
+    /// streaming-token refresh.
+    @State private var rulerLo: Double = 0
+    @State private var rulerHi: Double = 1
 
     // ── Engine / model / effort ───────────────────────────────────
+    // Defaults are seeded from the *global* journal keys so legacy installs
+    // keep their last selection. On `.task` we re-read per-journal keys
+    // (`ai.journal.<journalID>.<suffix>`) and override — a single trade on
+    // a "Prop firm challenge" journal can use Codex Opus while the user's
+    // "Personal account" defaults to Claude Sonnet without fighting each
+    // other over the same global slot.
     @State private var engineKind: AIEngineKind = {
         let raw = UserDefaults.standard.string(forKey: "ai.journal.engine") ?? "claude"
         return AIEngineKind(rawValue: raw) ?? .claude
     }()
     @State private var claudeModelID  = UserDefaults.standard.string(forKey: "ai.claude.model")  ?? ClaudeModelCatalog.defaultModelID
     @State private var claudeEffortID = UserDefaults.standard.string(forKey: "ai.claude.effort") ?? ClaudeModelCatalog.defaultEffortID
-    @State private var codexModelID   = UserDefaults.standard.string(forKey: "ai.codex.model")   ?? CodexModelCatalog.defaultModelID
-    @State private var codexEffortID  = UserDefaults.standard.string(forKey: "ai.codex.effort")  ?? CodexModelCatalog.defaultEffortID
+    @State private var codexModelID    = UserDefaults.standard.string(forKey: "ai.codex.model")    ?? CodexModelCatalog.defaultModelID
+    @State private var codexEffortID   = UserDefaults.standard.string(forKey: "ai.codex.effort")   ?? CodexModelCatalog.defaultEffortID
+    @State private var opencodeModelID = UserDefaults.standard.string(forKey: "ai.opencode.model") ?? OpenCodeModelCatalog.defaultModelID
 
     // ── Stream state ──────────────────────────────────────────────
     @State private var thinking   = ""
@@ -30,6 +45,10 @@ struct JournalAISheet: View {
     @State private var streamTask: Task<Void, Never>? = nil
     @State private var showThinking = false
     @State private var savedToJournal = false
+    /// True once the model has emitted at least one `## ` header — used to
+    /// decide when to switch from raw "receiving…" streaming text over to
+    /// the parsed section-card layout.
+    @State private var firstHeaderArrived = false
 
     // ── Layout ────────────────────────────────────────────────────
     var body: some View {
@@ -45,7 +64,12 @@ struct JournalAISheet: View {
         .frame(width: 740, height: 660)
         .background(Theme.Color.canvas)
         .onDisappear { streamTask?.cancel() }
-        .task { await loadTradingCandles() }
+        .task {
+            applyPerJournalDefaults()
+            recomputeRuler()
+            await loadTradingCandles()
+            recomputeRuler()
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -123,11 +147,13 @@ struct JournalAISheet: View {
                                   efforts: ClaudeModelCatalog.efforts,
                                   selectedModel: $claudeModelID,
                                   selectedEffort: $claudeEffortID)
-            } else {
+            } else if engineKind == .codex {
                 modelEffortPicker(models: CodexModelCatalog.models,
                                   efforts: CodexModelCatalog.efforts,
                                   selectedModel: $codexModelID,
                                   selectedEffort: $codexEffortID)
+            } else {
+                opencodeModelPicker
             }
             Spacer()
             HStack {
@@ -170,6 +196,8 @@ struct JournalAISheet: View {
 
                 if isRunning && output.isEmpty {
                     analyzingSpinner
+                } else if isRunning && !firstHeaderArrived {
+                    liveRawText
                 } else {
                     parsedSections
                 }
@@ -216,18 +244,25 @@ struct JournalAISheet: View {
         return levels
     }
 
-    private var rulerRange: (lo: Double, hi: Double) {
+    /// Live view of the cached range. Reading state here keeps the previous
+    /// O(n) min/max out of every SwiftUI body pass — `recomputeRuler()`
+    /// refreshes `(rulerLo, rulerHi)` on candle load and on entry change.
+    private var rulerRange: (lo: Double, hi: Double) { (rulerLo, rulerHi) }
+
+    /// Recompute and stash the ruler's price range. Cheap to call, idempotent,
+    /// safe to invoke before candles have loaded (falls back to the levels'
+    /// own min/max with a guaranteed ≥1-pip spread).
+    private func recomputeRuler() {
         var prices = priceLevels.map(\.price)
-        // Include candle extremes so bars don't overflow the ruler
         if !tradingCandles.isEmpty {
             prices += tradingCandles.map(\.low) + tradingCandles.map(\.high)
         }
         let lo = prices.min() ?? 0
         let hi = prices.max() ?? 1
-        // Always guarantee a visible spread of at least 1 pip (for single-level or collapsed entries)
         let span = max(hi - lo, max(lo * 0.001, 1.0))
         let pad  = span * 0.12
-        return (lo - pad, hi + pad)
+        rulerLo = lo - pad
+        rulerHi = hi + pad
     }
 
     private func yFraction(_ price: Double) -> Double {
@@ -463,36 +498,47 @@ struct JournalAISheet: View {
         let accentColor: Color
     }
 
-    private var sectionMeta: [(icon: String, color: Color)] {[
-        ("waveform.path.ecg",           Theme.Color.warn),       // Why
-        ("checkmark.seal.fill",         Theme.Color.success),    // What Went Right
-        ("arrow.triangle.2.circlepath", Theme.Color.info),       // What Could Have Been Better
-        ("lightbulb.fill",              Theme.Color.accentStart),// What You Should Have Done
-        ("sparkles",                    Theme.Color.textSecondary), // Key Takeaway
-    ]}
+    /// Resolve a section header → (icon, color) **by name** (rather than by
+    /// array index). If the model paraphrases a header ("Why This Trade
+    /// Handled Poorly" instead of "What Could Have Been Better"), the
+    /// subtitle match in `AISectionParse.match` still picks a sensible
+    /// glyph; truly unknown headers fall back to a neutral marker.
+    private func meta(forTitle title: String) -> (icon: String, color: Color) {
+        let t = title.lowercased()
+        if t.hasPrefix("why this trade") {
+            // The system prompt's header includes the outcome word ("Won"/"Lost")
+            if t.contains("won") { return ("waveform.path.ecg", Theme.Color.success) }
+            if t.contains("lost") { return ("waveform.path.ecg", Theme.Color.danger) }
+            if t.contains("breakeven") { return ("waveform.path.ecg", Theme.Color.warn) }
+            return ("waveform.path.ecg", Theme.Color.warn)
+        }
+        let known = ["What Went Right",
+                     "What Could Have Been Better",
+                     "What You Should Have Done",
+                     "Key Takeaway",
+                     "Summary"]
+        let idx = AISectionParse.match(title, against: known)
+        switch idx {
+        case 0:  return ("checkmark.seal.fill",         Theme.Color.success)
+        case 1:  return ("arrow.triangle.2.circlepath", Theme.Color.info)
+        case 2:  return ("lightbulb.fill",              Theme.Color.accentStart)
+        case 3:  return ("sparkles",                    Theme.Color.textSecondary)
+        case 4:  return ("line.3.horizontal",           Theme.Color.textSecondary)
+        default: return ("line.3.horizontal",            Theme.Color.textSecondary)
+        }
+    }
 
     private func parseOutput(_ raw: String) -> [AISection] {
-        let lines = raw.components(separatedBy: "\n")
-        var buckets: [(header: String, lines: [String])] = []
-        var current: (header: String, lines: [String])?
-
-        for line in lines {
-            if line.hasPrefix("## ") {
-                if let c = current { buckets.append(c) }
-                current = (String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces), [])
-            } else if current != nil {
-                current!.lines.append(line)
-            }
-        }
-        if let c = current { buckets.append(c) }
-        guard !buckets.isEmpty else { return [] }
-
+        let buckets = AISectionParse.sections(from: raw)
         return buckets.enumerated().map { i, bucket in
-            let body = bucket.lines.joined(separator: "\n")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let meta = sectionMeta[min(i, sectionMeta.count - 1)]
-            return AISection(id: "\(i)", icon: meta.icon, title: bucket.header,
-                             body: body, accentColor: meta.color)
+            let m = meta(forTitle: bucket.title)
+            return AISection(
+                id: "\(i)",
+                icon: m.icon,
+                title: bucket.title.isEmpty ? "Summary" : bucket.title,
+                body: bucket.body,
+                accentColor: m.color
+            )
         }
     }
 
@@ -529,35 +575,14 @@ struct JournalAISheet: View {
                 Text(section.title)
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(Theme.Color.textPrimary)
-
-                let bodyLines = section.body.components(separatedBy: "\n")
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(Array(bodyLines.enumerated()), id: \.offset) { _, line in
-                        let trimmed = line.trimmingCharacters(in: .whitespaces)
-                        if trimmed.hasPrefix("- ") || trimmed.hasPrefix("• ") {
-                            HStack(alignment: .top, spacing: 6) {
-                                Circle()
-                                    .fill(section.accentColor.opacity(0.75))
-                                    .frame(width: 4, height: 4)
-                                    .padding(.top, 5)
-                                // Strip inline **bold** markers for display
-                                Text(stripBold(trimmed.hasPrefix("- ")
-                                     ? String(trimmed.dropFirst(2))
-                                     : String(trimmed.dropFirst(2))))
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(Theme.Color.textSecondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        } else if trimmed == "---" || trimmed.isEmpty {
-                            EmptyView()
-                        } else {
-                            Text(stripBold(trimmed))
-                                .font(.system(size: 12))
-                                .foregroundStyle(Theme.Color.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
+                // Renders `- …` bullets and `**bold**` emphasis inline,
+                // preserving the model's intended emphasis instead of
+                // silently discarding it.
+                AIMarkdownLines(
+                    bodyText: section.body,
+                    accentColor: section.accentColor,
+                    bodyColor: Theme.Color.textSecondary
+                )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -571,11 +596,6 @@ struct JournalAISheet: View {
                 .frame(width: 3)
                 .padding(.vertical, 8)
         }
-    }
-
-    /// Remove **text** markers so they don't appear verbatim in the card body.
-    private func stripBold(_ s: String) -> String {
-        s.replacingOccurrences(of: "**", with: "")
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -622,6 +642,34 @@ struct JournalAISheet: View {
             .strokeBorder(Theme.Color.border, lineWidth: 1))
     }
 
+    /// Mid-stream raw text shown until the model emits its first `## ` header.
+    /// Lets the user watch the model "speak" instead of staring at a frozen
+    /// spinner after the first token; switches to the parsed section cards
+    /// as soon as a header arrives so the rest streams into place.
+    private var liveRawText: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini).tint(Theme.Color.accentStart)
+                Text("Receiving…")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textMuted)
+                Spacer()
+            }
+            ScrollView {
+                Text(output.isEmpty ? "…" : output)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(Theme.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.md).fill(Theme.Color.surface))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md)
+            .strokeBorder(Theme.Color.border, lineWidth: 1))
+    }
+
     private var actionRow: some View {
         HStack(spacing: Theme.Spacing.sm) {
             if isRunning {
@@ -636,7 +684,7 @@ struct JournalAISheet: View {
                 }
                 .buttonStyle(.plain)
             } else {
-                Button { thinking = ""; output = ""; error = nil; savedToJournal = false } label: {
+                Button { thinking = ""; output = ""; error = nil; savedToJournal = false; firstHeaderArrived = false } label: {
                     Label("Re-run", systemImage: "arrow.counterclockwise")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.Color.textSecondary)
@@ -650,8 +698,12 @@ struct JournalAISheet: View {
                 if !output.isEmpty {
                     // Copy
                     Button {
+                        #if os(iOS)
+                        UIPasteboard.general.string = output
+                        #else
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(output, forType: .string)
+                        #endif
                     } label: {
                         Label("Copy", systemImage: "doc.on.doc")
                             .font(.system(size: 11, weight: .semibold))
@@ -710,8 +762,7 @@ struct JournalAISheet: View {
         let available = engine.availability.canRun
         Button { if available { engineKind = kind } } label: {
             HStack(spacing: 5) {
-                Image(systemName: kind == .claude ? "brain" : "cpu")
-                    .font(.system(size: 10, weight: .semibold))
+                EngineGlyph(kind: kind, size: 12)
                 Text(kind.label)
                     .font(.system(size: 12, weight: selected ? .bold : .medium))
                 if !available {
@@ -766,28 +817,63 @@ struct JournalAISheet: View {
         }
     }
 
+    private var opencodeModelPicker: some View {
+        HStack(alignment: .top, spacing: Theme.Spacing.xl) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                sectionLabel("MODEL")
+                Picker("Model", selection: $opencodeModelID) {
+                    ForEach(OpenCodeModelCatalog.allModelsByProvider, id: \.provider) { group in
+                        Section(group.provider) {
+                            ForEach(group.models) { Text($0.label).tag($0.id) }
+                        }
+                    }
+                }
+                .pickerStyle(.menu).labelsHidden()
+                .frame(maxWidth: 280, alignment: .leading)
+            }
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // MARK: – AI run + prompt
     // ═══════════════════════════════════════════════════════════════
 
     private func startAnalysis() {
+        // Persist current selection both globally (legacy / fallback for
+        // other entry points) and scoped to this entry's journal so its
+        // own next run defaults to the same engine without fighting a
+        // different journal's last selection.
         UserDefaults.standard.set(engineKind.rawValue, forKey: "ai.journal.engine")
-        if engineKind == .claude {
+        switch engineKind {
+        case .claude:
             UserDefaults.standard.set(claudeModelID,  forKey: "ai.claude.model")
             UserDefaults.standard.set(claudeEffortID, forKey: "ai.claude.effort")
-        } else {
+        case .codex:
             UserDefaults.standard.set(codexModelID,  forKey: "ai.codex.model")
             UserDefaults.standard.set(codexEffortID, forKey: "ai.codex.effort")
+        case .opencode:
+            UserDefaults.standard.set(opencodeModelID, forKey: "ai.opencode.model")
         }
-        isRunning = true; error = nil; output = ""; thinking = ""; savedToJournal = false
+        persistPerJournalSettings(.engine)
+        persistPerJournalSettings(.model)
+        persistPerJournalSettings(.effort)
+        isRunning = true; error = nil
+        output = ""; thinking = ""; savedToJournal = false
+        firstHeaderArrived = false
         let engine = AIEngineFactory.make(engineKind)
         let (sys, usr) = buildPrompt()
         streamTask = Task { @MainActor in
             do {
                 for try await event in engine.run(system: sys, user: usr) {
                     switch event {
-                    case .text(let c):     output   += c
-                    case .thinking(let c): thinking += c
+                    case .text(let c):
+                        output += c
+                        if !firstHeaderArrived,
+                           output.range(of: "(?m)^## ", options: .regularExpression) != nil {
+                            firstHeaderArrived = true
+                        }
+                    case .thinking(let c):
+                        thinking += c
                     }
                 }
             } catch is CancellationError {
@@ -859,6 +945,57 @@ struct JournalAISheet: View {
     // MARK: – Save to journal
     // ═══════════════════════════════════════════════════════════════
 
+    // ═══════════════════════════════════════════════════════════════
+    // MARK: – Per-journal engine / model persistence
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Per-journal scope key for one engine/model/effort slot. The journal
+    /// owns the slot so two journals ("Prop firm challenge" vs "Personal
+    /// account") can default to different engines without clobbering each
+    /// other through the shared global key.
+    private enum JournalPrefSlot: String { case engine, model, effort }
+
+    private func journalPrefKey(_ slot: JournalPrefSlot) -> String {
+        "ai.journal.\(entry.journalID.uuidString).\(slot.rawValue)"
+    }
+
+    /// On appear, override the seeded (global-default) selections with this
+    /// *journal's* most recently-used settings if any were ever persisted.
+    /// Silently no-ops when per-journal keys are missing — the global
+    /// defaults stay in play, preserving legacy behaviour.
+    private func applyPerJournalDefaults() {
+        if let raw = UserDefaults.standard.string(forKey: journalPrefKey(.engine)),
+           let kind = AIEngineKind(rawValue: raw) {
+            engineKind = kind
+        }
+        switch engineKind {
+        case .claude:
+            if let m  = UserDefaults.standard.string(forKey: journalPrefKey(.model))  { claudeModelID  = m }
+            if let ef = UserDefaults.standard.string(forKey: journalPrefKey(.effort)) { claudeEffortID = ef }
+        case .codex:
+            if let m  = UserDefaults.standard.string(forKey: journalPrefKey(.model))  { codexModelID   = m }
+            if let ef = UserDefaults.standard.string(forKey: journalPrefKey(.effort)) { codexEffortID  = ef }
+        case .opencode:
+            if let m = UserDefaults.standard.string(forKey: journalPrefKey(.model)) { opencodeModelID = m }
+        }
+    }
+
+    /// Persist the current selection into this journal's scoped slot. Called
+    /// from `startAnalysis` so the next run from the same journal reuses the
+    /// engine/model the user just picked.
+    private func persistPerJournalSettings(_ slot: JournalPrefSlot) {
+        let key = journalPrefKey(slot)
+        switch (slot, engineKind) {
+        case (.engine, _):                    UserDefaults.standard.set(engineKind.rawValue, forKey: key)
+        case (.model, .claude):               UserDefaults.standard.set(claudeModelID, forKey: key)
+        case (.effort, .claude):              UserDefaults.standard.set(claudeEffortID, forKey: key)
+        case (.model, .codex):                UserDefaults.standard.set(codexModelID, forKey: key)
+        case (.effort, .codex):               UserDefaults.standard.set(codexEffortID, forKey: key)
+        case (.model, .opencode):             UserDefaults.standard.set(opencodeModelID, forKey: key)
+        case (.effort, .opencode):            UserDefaults.standard.removeObject(forKey: key) // opencode has no effort knob
+        }
+    }
+
     private func saveReportToJournal() {
         guard !output.isEmpty else { return }
         var updated = entry
@@ -881,13 +1018,21 @@ struct JournalAISheet: View {
         let openDate  = entry.openDate ?? entry.date.addingTimeInterval(-3600)
         let closeDate = entry.date
         let duration  = closeDate.timeIntervalSince(openDate)
-        // Pick a timeframe that gives ~40–80 candles over the trade span
+        // Pick a timeframe that gives ~40–80 candles over the trade span.
+        // The old heuristic jumped straight from 1h to 4h once a trade crossed
+        // 24h, which made the price ruler useless for evaluating entry timing
+        // on multi-day swing trades — too coarse to see what actually
+        // happened around entry. The finer buckets below keep ~50–80 candle
+        // resolution across the realistic range of trade durations.
         let tf: String
         switch duration {
-        case ..<600:      tf = "1m"
-        case ..<7200:     tf = "5m"
-        case ..<86400:    tf = "1h"
-        default:          tf = "4h"
+        case ..<600:     tf = "1m"   // <10m → 1m bars
+        case ..<3600:    tf = "1m"   // <1h  → 1m bars (covers scalps)
+        case ..<10800:   tf = "5m"   // <3h
+        case ..<21600:   tf = "15m"  // <6h
+        case ..<86400:   tf = "1h"   // <1d
+        case ..<259200:  tf = "4h"   // <3d
+        default:         tf = "1d"   // multi-day swing
         }
         // Load candles from 2 candle-widths before entry to 2 after close
         let padding  = max(duration * 0.5, 3600)
@@ -897,7 +1042,10 @@ struct JournalAISheet: View {
             let bars = try await db.ohlcRepo.read(pairID: entry.pairID,
                                                   timeframe: tf,
                                                   since: since, until: until)
-            await MainActor.run { tradingCandles = bars }
+            await MainActor.run {
+                tradingCandles = bars
+                recomputeRuler()
+            }
         } catch {
             // Silently fall back — price ruler still works without candles
         }

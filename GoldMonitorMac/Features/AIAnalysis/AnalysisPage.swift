@@ -102,6 +102,7 @@ struct AnalysisPage: View {
     @AppStorage("ai.claude.effort") private var claudeEffort: String = ClaudeModelCatalog.defaultEffortID
     @AppStorage("ai.codex.model")   private var codexModel: String = CodexModelCatalog.defaultModelID
     @AppStorage("ai.codex.effort")  private var codexEffort: String = CodexModelCatalog.defaultEffortID
+    @AppStorage("ai.opencode.model") private var opencodeModel: String = OpenCodeModelCatalog.defaultModelID
 
     // ── Per-tab state proxies ──────────────────────────────────────
     // The source of truth is the current `AnalysisTab` in AppState,
@@ -759,6 +760,8 @@ struct AnalysisPage: View {
         case .codex:
             let base = "Codex · \(CodexModelCatalog.label(forModelID: codexModel)) · \(codexEffort) effort"
             return isComingSoon ? "\(base) — coming soon" : base
+        case .opencode:
+            return "OpenCode · \(OpenCodeModelCatalog.label(forModelID: opencodeModel))"
         }
     }
 
@@ -807,6 +810,8 @@ struct AnalysisPage: View {
                 model: $codexModel,
                 effort: $codexEffort
             )
+        case .opencode:
+            opencodeModelPopover
         }
     }
 
@@ -889,6 +894,81 @@ struct AnalysisPage: View {
         .frame(width: 340)
     }
 
+    /// OpenCode model picker popover — grouped by provider with
+    /// collapsible DisclosureGroups inside a ScrollView so it stays
+    /// manageable at any size.
+    private var opencodeModelPopover: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("OPENCODE · MODEL")
+                .font(.system(size: 9, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+                .padding(.horizontal, Theme.Spacing.lg)
+                .padding(.top, Theme.Spacing.lg)
+                .padding(.bottom, Theme.Spacing.sm)
+
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                    ForEach(OpenCodeModelCatalog.allModelsByProvider, id: \.provider) { group in
+                        DisclosureGroup {
+                            VStack(spacing: 2) {
+                                ForEach(group.models) { m in
+                                    opencodeModelRow(m)
+                                }
+                            }
+                        } label: {
+                            opencodeSectionLabel(group.provider, count: group.models.count)
+                        }
+                    }
+                }
+                .padding(.horizontal, Theme.Spacing.lg)
+                .padding(.bottom, Theme.Spacing.lg)
+            }
+        }
+        .frame(width: 340, height: 420)
+    }
+
+    private func opencodeSectionLabel(_ title: String, count: Int) -> some View {
+        HStack(spacing: 4) {
+            Text(title)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(Theme.Color.textSecondary)
+            Text("(\(count))")
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.Color.textMuted)
+        }
+    }
+
+    private func opencodeModelRow(_ m: OpenCodeModelCatalog.Model) -> some View {
+        Button {
+            opencodeModel = m.id
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: opencodeModel == m.id ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 12))
+                    .foregroundStyle(opencodeModel == m.id ? Theme.Color.accentStart : Theme.Color.textMuted)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(m.label)
+                        .font(.system(size: 12, weight: opencodeModel == m.id ? .semibold : .regular))
+                        .foregroundStyle(Theme.Color.textPrimary)
+                    Text(m.hint)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.Color.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(opencodeModel == m.id ? Theme.Color.surface : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
     private var historyForKind: [AnalysisStore.HistoryEntry] {
         store.history.filter { $0.kind == selectedKind && $0.pairID == pair.id }
     }
@@ -966,11 +1046,11 @@ struct AnalysisPage: View {
     /// starter questions, not analysis recipes.
     private var customChips: [AnalysisReportColumn.InputChip] {
         [
-            .init(label: "Setup?",       body: "What's the cleanest trade setup on this pair right now? Give me entry, TP, SL."),
-            .init(label: "Key levels",   body: "List the 3-5 most important support and resistance levels and emit a LEVELS_JSON block."),
-            .init(label: "Find FVGs",    body: "Identify any unmitigated fair-value gaps in the visible bars and emit an FVG_JSON block."),
-            .init(label: "Long bias",    body: "I want to go long. Where would you enter, where's TP, where's the invalidation? Emit SCENARIO_JSON."),
-            .init(label: "Short bias",   body: "I want to go short. Where would you enter, where's TP, where's the invalidation? Emit SCENARIO_JSON."),
+            .init(id: "setup",    label: "Setup?",       body: "What's the cleanest trade setup on this pair right now? Give me entry, TP, SL."),
+            .init(id: "levels",   label: "Key levels",   body: "List the 3-5 most important support and resistance levels and emit a LEVELS_JSON block."),
+            .init(id: "fvgs",     label: "Find FVGs",    body: "Identify any unmitigated fair-value gaps in the visible bars and emit an FVG_JSON block."),
+            .init(id: "long",     label: "Long bias",    body: "I want to go long. Where would you enter, where's TP, where's the invalidation? Emit SCENARIO_JSON."),
+            .init(id: "short",    label: "Short bias",   body: "I want to go short. Where would you enter, where's TP, where's the invalidation? Emit SCENARIO_JSON."),
         ]
     }
 
@@ -1313,6 +1393,7 @@ struct AnalysisPage: View {
             }
         }()
         journalDraft = JournalEntry(
+            journalID: journal.lastUsedJournalID,
             pairID: pair.id,
             pairName: pair.name,
             side: side,
@@ -1364,11 +1445,6 @@ struct AnalysisPage: View {
         case .confluenceScanner:
             return "Run **\(selectedEngine.label)** for **Confluence Trade Scanner** on \(pair.name) across 15m, 1h, and 4h — scans for impulsive breakouts that left an FVG, then frames an entry against the last opposite-direction candle."
         case .custom:
-            // The custom path uses CustomPromptEditor instead of
-            // the idle hint, but keep the string defined for
-            // exhaustiveness — and as a fallback if some other
-            // code path surfaces it (e.g. follow-up chat re-using
-            // the kind label).
             return "Write your own prompt in the editor and run it against **\(pair.name)** at \(timeframe.label)."
         case .full, .supportResistance, .fvg:
             return "Run **\(selectedEngine.label)** for **\(selectedKind.label)** on \(pair.name) at \(timeframe.label)."

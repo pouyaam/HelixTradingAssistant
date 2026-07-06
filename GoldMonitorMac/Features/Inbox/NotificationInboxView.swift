@@ -78,7 +78,6 @@ struct NotificationInboxView: View {
             filterChip(.priceAlert, label: "Price")
             filterChip(.rsiAlert, label: "RSI")
             filterChip(.orderBlock, label: "Order Blocks")
-            filterChip(.scanner, label: "Scanner")
             Spacer()
         }
     }

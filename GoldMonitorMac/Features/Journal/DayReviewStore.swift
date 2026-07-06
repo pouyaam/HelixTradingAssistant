@@ -26,6 +26,13 @@ struct DayReviewEntry: Identifiable, Codable, Equatable {
     let report: String
     let thinking: String?
     let createdAt: Date
+    /// Journal these trades belong to — stamped by `JournalDayAISheet`
+    /// when saving so a journal's detail screen can scope the review
+    /// history to "this journal only" instead of showing reviews from
+    /// every other journal mixed in. Older saved reviews have nil here
+    /// (`decodeIfPresent`); the inline history treats nil as
+    /// "journal-agnostic" and shows them in every journal.
+    let journalID: UUID?
 
     init(
         id: UUID = UUID(),
@@ -38,7 +45,8 @@ struct DayReviewEntry: Identifiable, Codable, Equatable {
         modelLabel: String,
         report: String,
         thinking: String? = nil,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        journalID: UUID? = nil
     ) {
         self.id = id
         self.periodStart = periodStart
@@ -51,6 +59,7 @@ struct DayReviewEntry: Identifiable, Codable, Equatable {
         self.report = report
         self.thinking = thinking
         self.createdAt = createdAt
+        self.journalID = journalID
     }
 
     init(from decoder: Decoder) throws {
@@ -66,6 +75,7 @@ struct DayReviewEntry: Identifiable, Codable, Equatable {
         report = try c.decodeIfPresent(String.self, forKey: .report) ?? ""
         thinking = try c.decodeIfPresent(String.self, forKey: .thinking)
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        journalID = try c.decodeIfPresent(UUID.self, forKey: .journalID)
     }
 }
 
@@ -102,6 +112,24 @@ final class DayReviewStore: ObservableObject {
     func clearAll() {
         reviews = []
         save()
+    }
+
+    /// All saved reviews for one journal. Includes legacy reviews that
+    /// have `journalID == nil` (review saved before the field existed) so
+    /// the inline history doesn't silently disappear on upgrade.
+    func reviews(for journalID: UUID) -> [DayReviewEntry] {
+        sorted.filter { $0.journalID == journalID || $0.journalID == nil }
+    }
+
+    /// The most recent previous review whose journal matches and whose
+    /// `periodTitle` matches the given one (e.g. "This Week" the previous
+    /// week, "January 2026" the month before this, an all-time review
+    /// back when there were 30 fewer trades). Used to drive the
+    /// "vs Previous" disclosure in `JournalDayAISheet`.
+    func previousReview(journalID: UUID, matchingPeriodTitle title: String?) -> DayReviewEntry? {
+        reviews(for: journalID)
+            .filter { entry in title.map { entry.periodTitle == $0 } ?? true }
+            .first
     }
 
     // ── Persistence ──────────────────────────────────────────────

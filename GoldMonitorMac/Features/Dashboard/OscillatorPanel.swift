@@ -25,6 +25,13 @@ struct OscillatorPanel: View {
     @StateObject private var derived = ChartDerivedCache()
 
     var body: some View {
+        // Compute visible points ONCE — both `marks` and `yDomain`
+        // previously triggered independent `visiblePoints` evaluations,
+        // each building a fresh `Set(renderIndices)`.
+        let pts = visiblePoints
+        let domain = effectiveDomain
+        let yDom = yDomainForPoints(pts)
+
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Text(kind.displayName(config: config))
@@ -34,14 +41,14 @@ struct OscillatorPanel: View {
                 latestReadout
             }
             Chart {
-                marks
+                marks(pts: pts)
                 referenceLines
             }
-            .chartXScale(domain: effectiveDomain)
-            .chartYScale(domain: yDomain)
+            .chartXScale(domain: domain)
+            .chartYScale(domain: yDom)
             .chartXAxis(.hidden)
             .chartYAxis {
-                AxisMarks(position: .leading, values: yAxisValues) { value in
+                AxisMarks(position: .leading, values: yAxisValues(for: yDom)) { value in
                     AxisGridLine().foregroundStyle(Theme.Color.border.opacity(0.5))
                     AxisValueLabel {
                         if let v = value.as(Double.self) {
@@ -60,8 +67,7 @@ struct OscillatorPanel: View {
     // MARK: - Marks dispatch
 
     @ChartContentBuilder
-    private var marks: some ChartContent {
-        let pts = visiblePoints
+    private func marks(pts: [IndicatorPoint]) -> some ChartContent {
         switch kind {
         case .rsi:
             ForEach(pts) { p in
@@ -206,14 +212,13 @@ struct OscillatorPanel: View {
         return ChartWindow.defaultDomain(count: candles.count)
     }
 
-    private var yDomain: ClosedRange<Double> {
+    private func yDomainForPoints(_ pts: [IndicatorPoint]) -> ClosedRange<Double> {
         switch kind {
         case .rsi, .stochastic:
             return 0 ... 100
         case .macd:
             // Pad ±5% around the visible MACD range so the histogram
             // bars don't sit flush against the top/bottom edges.
-            let pts = visiblePoints
             let values = pts.map(\.value)
             let lo = values.min() ?? -1
             let hi = values.max() ?? 1
@@ -223,11 +228,11 @@ struct OscillatorPanel: View {
         }
     }
 
-    private var yAxisValues: [Double] {
+    private func yAxisValues(for yDom: ClosedRange<Double>) -> [Double] {
         switch kind {
         case .rsi:        return [30, 50, 70]
         case .stochastic: return [20, 50, 80]
-        case .macd:       return [yDomain.lowerBound, 0, yDomain.upperBound]
+        case .macd:       return [yDom.lowerBound, 0, yDom.upperBound]
         }
     }
 

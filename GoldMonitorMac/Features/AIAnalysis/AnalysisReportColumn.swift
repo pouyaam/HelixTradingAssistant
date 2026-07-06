@@ -59,11 +59,7 @@ struct AnalysisReportColumn: View {
     var clarify: PromptBuilder.ClarifyRequest? = nil
     var onClarifyPick: ((String) -> Void)? = nil
 
-    struct InputChip: Hashable, Identifiable {
-        let label: String
-        let body: String
-        var id: String { label }
-    }
+    typealias InputChip = ChatInputChip
 
     /// Disclosure state for the Thinking section. Defaults to nil so
     /// the view can pick a sensible auto-expansion (open while
@@ -590,14 +586,23 @@ struct AnalysisReportColumn: View {
                             .font(.system(size: 11))
                             .foregroundStyle(Theme.Color.textMuted)
                     }
+                } else if turn.isStreaming {
+                    // Plain Text while streaming — same optimisation
+                    // as the main report's trailing chunk (Fix 5).
+                    // Markdown re-parses the entire input on every
+                    // 100 ms flush; Text just appends layout.
+                    Text(turn.assistant)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.Color.textSecondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                    StreamingCaret()
                 } else {
                     Markdown(turn.assistant)
                         .markdownTheme(Theme.goldMarkdown)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    if turn.isStreaming {
-                        StreamingCaret()
-                    }
                 }
             }
             .padding(.top, 2)

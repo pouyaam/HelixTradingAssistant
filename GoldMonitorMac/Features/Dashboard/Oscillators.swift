@@ -291,19 +291,46 @@ enum Oscillators {
     //
     // %K = 100 * (close - low_N)  / (high_N - low_N)   over `kPeriod`
     // %D = SMA(%K, dPeriod)
+    //
+    // Uses a deque-based sliding window for O(1) amortised min/max per
+    // bar — replaces the prior O(kPeriod) per-bar scan.
     static func stochastic(_ candles: [Candle], kPeriod: Int, dPeriod: Int) -> [IndicatorPoint] {
         guard kPeriod > 0, dPeriod > 0, candles.count >= kPeriod else { return [] }
 
         var kVals: [Double?] = Array(repeating: nil, count: candles.count)
-        for i in (kPeriod - 1)..<candles.count {
-            let window = candles[(i - kPeriod + 1)...i]
-            // Tracking high/low via min/max keeps this O(period) per bar;
-            // a deque would push it to O(1) but isn't worth it at our
-            // chart sizes.
-            let lo = window.map(\.low).min()  ?? 0
-            let hi = window.map(\.high).max() ?? 0
-            let span = hi - lo
-            kVals[i] = span > 0 ? (candles[i].close - lo) / span * 100 : 50
+        // Deques store indices; front is always the current min/max.
+        // Low deque: increasing values (front = min).
+        // High deque: decreasing values (front = max).
+        var lowDeque: [Int] = []
+        var highDeque: [Int] = []
+
+        for i in 0..<candles.count {
+            // Remove elements that fall outside the window (left side).
+            let windowStart = i - kPeriod + 1
+            if let first = lowDeque.first, first < windowStart {
+                lowDeque.removeFirst()
+            }
+            if let first = highDeque.first, first < windowStart {
+                highDeque.removeFirst()
+            }
+            // Add current bar: remove from back while worse than new element.
+            let lo = candles[i].low
+            let hi = candles[i].high
+            while let last = lowDeque.last, candles[last].low >= lo {
+                lowDeque.removeLast()
+            }
+            lowDeque.append(i)
+            while let last = highDeque.last, candles[last].high <= hi {
+                highDeque.removeLast()
+            }
+            highDeque.append(i)
+            // Compute %K once the window is full.
+            if i >= kPeriod - 1 {
+                let windowLow  = candles[lowDeque[0]].low
+                let windowHigh = candles[highDeque[0]].high
+                let span = windowHigh - windowLow
+                kVals[i] = span > 0 ? (candles[i].close - windowLow) / span * 100 : 50
+            }
         }
 
         var dVals: [Double?] = Array(repeating: nil, count: candles.count)

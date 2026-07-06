@@ -168,8 +168,12 @@ private struct DayReviewDetailView: View {
                 }
                 Spacer()
                 Button {
+                    #if os(iOS)
+                    UIPasteboard.general.string = review.report
+                    #else
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(review.report, forType: .string)
+                    #endif
                 } label: {
                     Label("Copy", systemImage: "doc.on.doc")
                         .font(.system(size: 11, weight: .semibold))
@@ -202,11 +206,9 @@ private struct DayReviewDetailView: View {
                                 Text(section.title)
                                     .font(.system(size: 12, weight: .bold))
                                     .foregroundStyle(Theme.Color.textPrimary)
-                                Text(section.body.replacingOccurrences(of: "**", with: ""))
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(Theme.Color.textSecondary)
-                                    .textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                AIMarkdownLines(bodyText: section.body,
+                                    accentColor: Theme.Color.info,
+                                    bodyColor: Theme.Color.textSecondary)
                             }
                             .padding(Theme.Spacing.md)
                             .frame(maxWidth: .infinity, alignment: .leading)

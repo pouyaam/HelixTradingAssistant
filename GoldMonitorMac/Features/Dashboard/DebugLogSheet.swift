@@ -12,6 +12,7 @@ struct DebugLogSheet: View {
     @ObservedObject private var log = NetworkLog.shared
     @Environment(\.dismiss) private var dismiss
     @State private var expandedID: UUID?
+    @State private var copiedID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -181,6 +182,41 @@ struct DebugLogSheet: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Theme.Color.danger)
             }
+
+            HStack(spacing: 6) {
+                Button {
+                    let curl = Self.curlCommand(for: entry)
+                    #if os(macOS)
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(curl, forType: .string)
+                    #else
+                    UIPasteboard.general.string = curl
+                    #endif
+                    copiedID = entry.id
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        if copiedID == entry.id { copiedID = nil }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: copiedID == entry.id ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(copiedID == entry.id ? "Copied" : "Copy as cURL")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundStyle(copiedID == entry.id ? Theme.Color.success : Theme.Color.accentStart)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(Theme.Color.surface)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Copy this request as a cURL command")
+
+                Spacer()
+            }
+
             if !entry.responsePreview.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     Text(entry.responsePreview)
@@ -198,6 +234,23 @@ struct DebugLogSheet: View {
             }
         }
         .padding(.top, 4)
+    }
+
+    private static func curlCommand(for entry: NetworkLog.Entry) -> String {
+        var parts = ["curl"]
+        if entry.method != "GET" {
+            parts.append("-X \(entry.method)")
+        }
+        if let headers = entry.headers {
+            for (key, value) in headers.sorted(by: { $0.key < $1.key }) {
+                let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
+                parts.append("-H '\(key): \(escaped)'")
+            }
+        }
+        let escaped = entry.url
+            .replacingOccurrences(of: "'", with: "'\\''")
+        parts.append("'\(escaped)'")
+        return parts.joined(separator: " \\\n  ")
     }
 
     private var emptyState: some View {

@@ -29,6 +29,11 @@ final class YahooScheduler: ObservableObject {
     /// rather than a separate stored field.
     var latestOuncePrice: Double? { latestPrices["ounce"] }
 
+    /// When set, only this pair is actively synced (all other pairs
+    /// are paused). Set to `nil` to sync all pairs (macOS default).
+    /// iPad sets this to the selected pair to reduce CPU usage.
+    var focusedPairID: String?
+
     /// Timestamp of the last successful update (any source). Drives
     /// the dashboard's "fresh as of …" indicator and the countdown.
     @Published private(set) var lastUpdateAt: Date?
@@ -168,6 +173,7 @@ final class YahooScheduler: ObservableObject {
     private var task: Task<Void, Never>?
     private var stream: TwelveDataSpotStream?
     private var farazStream: FarazWebSocketStream?
+    private var farazWSObservation: AnyCancellable?
     private var tickCount: Int = 0
     /// Wall-clock of the most recent tick delivered by `FarazWebSocketStream`.
     /// When this is recent the 10s HTTP poll is suppressed — the WS is the
@@ -178,6 +184,14 @@ final class YahooScheduler: ObservableObject {
     /// back to the HTTP poll. 20s is comfortably past the Socket.IO
     /// heartbeat interval (25s), so a live socket always wins.
     private let farazWSStaleSeconds: TimeInterval = 20
+
+    /// True when the Faraz WS has ever completed a successful namespace
+    /// handshake this session. Published so the UI can distinguish
+    /// "WS never connected" from "WS connected but stale".
+    @Published private(set) var farazWSConnected: Bool = false
+    /// True when the Faraz WS has established at least one successful
+    /// connection this session (even if it's currently disconnected/reconnecting).
+    @Published private(set) var farazWSEverConnected: Bool = false
 
     /// Optional higher-priority source for the XAU/USD live feed. When
     /// set and "fresh", TwelveData ticks AND the gold-api fallback are
@@ -224,6 +238,11 @@ final class YahooScheduler: ObservableObject {
         if deepBackfilled.contains(key) || backfilling.contains(key) { return }
         guard let cfg = pairs.first(where: { $0.pairID == pairID }) else { return }
 
+        // When Faraz is the active source, pairs it doesn't serve
+        // (e.g. US30 index) have no upstream at all — skip the
+        // deep fetch entirely rather than falling through to Yahoo.
+        if goldSource == .faraz && !usesFaraz(pairID) { return }
+
         let faraz = usesFaraz(pairID)
         // Each source supports its own set of timeframes — bail early on
         // an unsupported TF so we don't insert a `backfilling` flag that
@@ -257,7 +276,7 @@ final class YahooScheduler: ObservableObject {
             }
             try await repo.upsertMany(bars)
             deepBackfilled.insert(key)
-            self.lastUpdateAt = Date()
+            publishLastUpdate()
         } catch {
             self.lastError = "\(faraz ? "faraz" : "yahoo") backfill \(pairID)/\(sourceTF): \(error.localizedDescription)"
         }
@@ -352,7 +371,7 @@ final class YahooScheduler: ObservableObject {
                 return 0
             }
             try await repo.upsertMany(older)
-            self.lastUpdateAt = Date()
+            publishLastUpdate()
             return older.count
         } catch {
             self.lastError = "\(faraz ? "faraz" : "twelve-data") history \(pairID)/\(sourceTF): \(error.localizedDescription)"
@@ -367,30 +386,17 @@ final class YahooScheduler: ObservableObject {
         let repo = database.ohlcRepo
         cachedRepo = repo
 
-        // 1) Twelve Data WebSocket — one socket, all four symbols.
-        let s = TwelveDataSpotStream(symbols: pairs.compactMap { $0.twelveDataSymbol })
-        s.onTick = { [weak self] symbol, price in
-            guard let self = self else { return }
-            let id = self.pairIDByTwelveDataSymbol[symbol] ?? symbol
-            // Source gate: when the user has put the ounce on Faraz, the
-            // Twelve Data tick for XAU/USD is ignored — Faraz's 10s poll
-            // is the authoritative ounce feed. Other pairs are unaffected.
-            if self.usesFaraz(id) { return }
-            // Fallback gate: if cTrader is currently the authoritative
-            // source for ounce, don't let TwelveData overwrite it.
-            // Other pairs are unaffected because cTrader only streams
-            // XAU/USD today.
-            if id == "ounce", self.cTraderProvider?.isFreshForXAUUSD() == true {
-                return
-            }
-            Task { await self.applyLiveTick(price: price, pairID: id, source: "twelve-data", repo: repo) }
-        }
-        s.start()
-        stream = s
-
-        // Start Faraz WebSocket if it's the active source.
+        // Live-stream source selection. Every Twelve Data-served
+        // symbol (ounce + BTC/SOL/ETH) is Faraz-driven when Faraz is
+        // on, so opening the Twelve Data socket in that mode just
+        // delivers ticks the per-tick `usesFaraz` gate would drop —
+        // wasted bandwidth + reconnect churn. Open exactly one of
+        // the two; `switchGoldSource` toggles between them when the
+        // user changes Settings.
         if goldSource == .faraz {
             startFarazStream(repo: repo)
+        } else {
+            startTwelveDataStream(repo: repo)
         }
 
         // Watch for a gold-source switch in Settings. `dropFirst` skips
@@ -420,8 +426,7 @@ final class YahooScheduler: ObservableObject {
     func stop() {
         task?.cancel()
         task = nil
-        stream?.stop()
-        stream = nil
+        stopTwelveDataStream()
         stopFarazStream()
         goldSourceCancellable?.cancel()
         goldSourceCancellable = nil
@@ -434,6 +439,44 @@ final class YahooScheduler: ObservableObject {
     /// interleave), drop this pair's session backfill latches, then
     /// refetch deep history from the now-active upstream. Bumps
     /// `dataResetToken` at the end so the dashboard does a full reload.
+    // MARK: - Live-stream lifecycle
+
+    /// One socket, all four Twelve Data symbols (XAU + BTC + SOL + ETH).
+    /// Idempotent — repeated calls stop the previous stream first. Kept
+    /// open for the lifetime the app is in non-Faraz mode; closed via
+    /// `stopTwelveDataStream` (called from `stop` / `switchGoldSource`)
+    /// when Faraz takes over, since every symbol this socket would
+    /// deliver is Faraz-driven and the ticks would just be dropped.
+    private func startTwelveDataStream(repo: OHLCRepo) {
+        stopTwelveDataStream()
+        let s = TwelveDataSpotStream(symbols: pairs.compactMap { $0.twelveDataSymbol })
+        s.onTick = { [weak self] symbol, price in
+            guard let self = self else { return }
+            let id = self.pairIDByTwelveDataSymbol[symbol] ?? symbol
+            // Source gate: when this pair is Faraz-driven, ignore the
+            // Twelve Data tick — Faraz's 10s poll + Faraz WS are the
+            // authoritative feeds. The socket is normally closed
+            // entirely in this case, but the per-tick gate stays as a
+            // belt-and-braces against a windowed source switch.
+            if self.usesFaraz(id) { return }
+            // Fallback gate: if cTrader is currently the authoritative
+            // source for ounce, don't let TwelveData overwrite it.
+            // Other pairs are unaffected because cTrader only streams
+            // XAU/USD today.
+            if id == "ounce", self.cTraderProvider?.isFreshForXAUUSD() == true {
+                return
+            }
+            Task { await self.applyLiveTick(price: price, pairID: id, source: "twelve-data", repo: repo) }
+        }
+        s.start()
+        stream = s
+    }
+
+    private func stopTwelveDataStream() {
+        stream?.stop()
+        stream = nil
+    }
+
     // MARK: - Faraz WebSocket stream lifecycle
 
     private func startFarazStream(repo: OHLCRepo) {
@@ -450,9 +493,19 @@ final class YahooScheduler: ObservableObject {
             guard let self else { return }
             Task {
                 try? await repo.upsertMany([bar])
-                await MainActor.run { self.lastUpdateAt = Date() }
+                // Throttled to 1 Hz — Faraz can push many candle
+                // updates per second; an unthrottled write here
+                // pegs the main thread on chart redraws.
+                await MainActor.run { self.publishLastUpdate() }
             }
         }
+        // Observe WS connection state changes.
+        farazWSObservation = s.$isConnected.combineLatest(s.$wsEverConnected)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] connected, everConnected in
+                self?.farazWSConnected = connected
+                self?.farazWSEverConnected = everConnected
+            }
         s.start()
         farazStream = s
     }
@@ -460,6 +513,10 @@ final class YahooScheduler: ObservableObject {
     private func stopFarazStream() {
         farazStream?.stop()
         farazStream = nil
+        farazWSObservation?.cancel()
+        farazWSObservation = nil
+        farazWSConnected = false
+        // Don't reset farazWSEverConnected — it's a session-lifetime flag
     }
 
     /// True when the Faraz WS has delivered a tick recently enough to be
@@ -473,14 +530,58 @@ final class YahooScheduler: ObservableObject {
     /// that suppresses other sources, since this IS the Faraz source.
     private func applyFarazTick(price: Double, pairID: String, repo: OHLCRepo) async {
         lastFarazWSTick = Date()
-        latestPrices[pairID] = price
-        activeLiveSource = "faraz-ws/\(pairID)"
         let cfg = pairs.first { $0.pairID == pairID }
         let respectsWeekend = cfg?.respectsWeekend ?? false
+        // Bar-rolling on every tick — buckets must reflect the latest
+        // price the moment it lands; gating this would let bars lag.
         try? await rollLiveBar(pairID: pairID, timeframe: "1m", bucketSize: 60,
                                respectsWeekend: respectsWeekend, price: price, repo: repo)
         try? await rollLiveBar(pairID: pairID, timeframe: "5m", bucketSize: 300,
                                respectsWeekend: respectsWeekend, price: price, repo: repo)
+        // @Published side (price tag, source label, lastUpdateAt) is
+        // throttled to 1 Hz — see `publishTick`.
+        publishTick(price: price, pairID: pairID, source: "faraz-ws")
+    }
+
+    /// Push the latest tick to the `@Published` side of this scheduler,
+    /// throttled to 1 Hz. `latestPrices`, `activeLiveSource` and
+    /// `lastUpdateAt` are all `@Published`, so every set fires
+    /// `objectWillChange` and re-evaluates every SwiftUI view that
+    /// touches ANY of this scheduler's properties via `@EnvironmentObject`
+    /// — including the whole `DashboardView` body, `ChartView`, the
+    /// three `OscillatorPanel`s, the sidebar `PairRow`s, etc.
+    ///
+    /// Live providers (Twelve Data WS, Faraz WS, cTrader flush) can push
+    /// 5–20 ticks per second per symbol; an unthrottled publish pegs the
+    /// main thread on chart redraws. 1 Hz is plenty for the price-tag UI
+    /// AND for the trade / alert evaluators (they observe
+    /// `yahoo.$latestPrices` and care about price touches against
+    /// entry / TP / SL — not cadence).
+    ///
+    /// The bar-rolling DB writes upstream of this call are explicitly NOT
+    /// throttled — buckets must reflect the latest tick the instant it
+    /// arrives; the trailing-splice / Yahoo history sync reads from the
+    /// DB, not from `latestPrices`, so they're unaffected by this gate.
+    private func publishTick(price: Double, pairID: String, source: String) {
+        let now = Date()
+        if let prev = lastUpdateAt, now.timeIntervalSince(prev) < 1.0 {
+            hasBootstrapped = true
+            return
+        }
+        latestPrices[pairID] = price
+        activeLiveSource = "\(source)/\(pairID)"
+        lastUpdateAt = now
+        hasBootstrapped = true
+    }
+
+    /// Throttled `lastUpdateAt` write for paths that don't carry a
+    /// live price — deep-history backfill, pan-left older-bars load,
+    /// Faraz WS candle arrivals. Same 1 Hz gate as `publishTick`
+    /// so the `@Published` cascade (DashboardView body → ChartView →
+    /// OscillatorPanels → Apple Charts scene graph) fires at most
+    /// once per second regardless of how fast the upstream pushes
+    /// data.
+    private func publishLastUpdate() {
         let now = Date()
         if let prev = lastUpdateAt, now.timeIntervalSince(prev) < 1.0 {
             hasBootstrapped = true
@@ -491,11 +592,17 @@ final class YahooScheduler: ObservableObject {
     }
 
     private func switchGoldSource(repo: OHLCRepo) async {
-        // Start or stop the Faraz WS stream to match the new source.
+        // Toggle both live-stream sockets to match the new selection.
+        // Faraz on  → close Twelve Data (every TD-served symbol is
+        //            Faraz-driven now, so the socket would just deliver
+        //            ticks the per-tick `usesFaraz` gate drops).
+        // Faraz off → reopen Twelve Data, close Faraz.
         if goldSource == .faraz {
+            stopTwelveDataStream()
             startFarazStream(repo: repo)
         } else {
             stopFarazStream()
+            startTwelveDataStream(repo: repo)
         }
 
         // The toggle is global, so every Faraz-capable pair flips between
@@ -521,7 +628,7 @@ final class YahooScheduler: ObservableObject {
         }
 
         dataResetToken &+= 1
-        lastUpdateAt = Date()
+        publishLastUpdate()
     }
 
     // ── Bootstrap / gap-fill ──────────────────────────────────────────
@@ -532,35 +639,70 @@ final class YahooScheduler: ObservableObject {
     private func bootstrapAndGapFill(repo: OHLCRepo) async {
         isFetching = true
         defer { isFetching = false }
-        for cfg in pairs {
-            // Weekend cleanup only matters for markets that have
-            // weekends; crypto never has closed-day rows.
-            if cfg.respectsWeekend {
-                _ = try? await repo.deleteClosedDayBars(pairID: cfg.pairID)
-            }
-            // Pull every native series to full depth through the shared
-            // `ensureDeepHistory` path — same code (and `backfilling`
-            // skeleton signalling) the dashboard's on-demand backfill
-            // uses, so the two can't double-fetch the same series.
-            // Depth per interval (Yahoo's per-interval ceiling):
-            //   5m → 60d · 1m → 8d · 1h → 2y · 1d → 10y.
-            await ensureDeepHistory(pairID: cfg.pairID, sourceTF: "5m")
-            await ensureDeepHistory(pairID: cfg.pairID, sourceTF: "1m")
-            await ensureDeepHistory(pairID: cfg.pairID, sourceTF: "1h")
-            await ensureDeepHistory(pairID: cfg.pairID, sourceTF: "1d")
-
-            // Seed the published price from the last stored 1m bar.
-            if let last1m = try? await repo.latestBucket(pairID: cfg.pairID, timeframe: "1m"),
-               let recent = try? await repo.read(
-                pairID: cfg.pairID, timeframe: "1m",
-                since: last1m.addingTimeInterval(-60),
-                until: last1m
-               ).last {
-                latestPrices[cfg.pairID] = recent.close
-            }
-            self.hasBootstrapped = true
+        // Collect seed prices for all pairs, then write the whole
+        // dictionary once at the end. Writing `latestPrices[k] = v`
+        // inside the loop fires `objectWillChange` per pair — each
+        // triggers a full DashboardView + ChartView body rerun, and
+        // at bootstrap the chart just loaded years of deep history
+        // so each rerun is expensive. A single dictionary assignment
+        // collapses all four into one cascade.
+        //
+        // Parallel: each pair's 4 timeframes are fetched concurrently
+        // via backfillAll/ensureDeepHistory, and pairs themselves run
+        // concurrently via TaskGroup. The `deepBackfilled` /
+        // `backfilling` guards inside ensureDeepHistory prevent
+        // double-fetching. (Parallel-bootstrap Performance Fix.)
+        let eligiblePairs = pairs.filter { cfg in
+            !(goldSource == .faraz && !usesFaraz(cfg.pairID))
         }
-        self.lastUpdateAt = Date()
+
+        // Phase 1: deep history for all pairs in parallel.
+        await withTaskGroup(of: Void.self) { group in
+            for cfg in eligiblePairs {
+                group.addTask { [self] in
+                    // Weekend cleanup only matters for markets that have
+                    // weekends; crypto never has closed-day rows.
+                    if cfg.respectsWeekend {
+                        _ = try? await repo.deleteClosedDayBars(pairID: cfg.pairID)
+                    }
+                    // Pull every native series to full depth. backfillAll
+                    // already fans out 1m/5m/1h/1d in parallel.
+                    await self.backfillAll(pairID: cfg.pairID)
+                }
+            }
+        }
+        hasBootstrapped = true
+
+        // Phase 2: seed prices from the last stored 1m bar per pair.
+        // These reads are cheap; batch them to avoid per-pair
+        // @Published cascades.
+        var seedPrices: [String: Double] = [:]
+        await withTaskGroup(of: (String, Double?).self) { group in
+            for cfg in eligiblePairs {
+                group.addTask {
+                    var price: Double?
+                    if let last1m = try? await repo.latestBucket(pairID: cfg.pairID, timeframe: "1m"),
+                       let recent = try? await repo.read(
+                        pairID: cfg.pairID, timeframe: "1m",
+                        since: last1m.addingTimeInterval(-60),
+                        until: last1m
+                       ).last {
+                        price = recent.close
+                    }
+                    return (cfg.pairID, price)
+                }
+            }
+            for await (pairID, price) in group {
+                if let price { seedPrices[pairID] = price }
+            }
+        }
+        // Single @Published write — one chart cascade instead of N.
+        if !seedPrices.isEmpty {
+            for (pairID, price) in seedPrices {
+                latestPrices[pairID] = price
+            }
+        }
+        publishLastUpdate()
     }
 
     // ── Periodic tick ─────────────────────────────────────────────────
@@ -569,51 +711,97 @@ final class YahooScheduler: ObservableObject {
         defer { isFetching = false }
         tickCount += 1
 
+        // Filter pairs to only the focused one (iPad optimization) or all (macOS).
+        let activePairs: [PairConfig]
+        if let focused = focusedPairID {
+            activePairs = pairs.filter { $0.pairID == focused }
+        } else {
+            activePairs = pairs
+        }
+
         // Faraz-driven pairs: the WebSocket provides live price ticks and
         // 1m / 1D candle updates in real time, so the HTTP poll is only
         // needed when the WS is stale/disconnected (live fallback) OR every
         // Nth tick to refresh 5m / 1h / 1d bars the WS doesn't broadcast.
         if goldSource == .faraz {
-            let wsStale = !farazWSIsFresh()
+            let wsFresh = farazWSIsFresh()
             let historyTick = tickCount % yahooEveryNTicks == 0
-            if wsStale || historyTick {
-                await syncFarazPairs(repo: repo)
+            if !wsFresh {
+                // WS is stale or never connected — HTTP poll every tick as
+                // the primary source for all timeframes.
+                await syncFarazPairs(repo: repo, pairs: activePairs)
+            } else if historyTick {
+                // WS is fresh — only poll for 1h/1d history the WS doesn't
+                // broadcast. 1m/5m come from the WS live ticks.
+                await syncFarazPairsHistory(repo: repo, pairs: activePairs)
             }
         }
 
-        // Yahoo authoritative history sync every Nth tick. Fans out
-        // across all managed pairs in parallel. The Twelve Data WS
-        // and cTrader bridge (when running) keep the *latest tick*
-        // fresher than this in between syncs; Yahoo is what gives
-        // us the OHLC bars.
-        if tickCount % yahooEveryNTicks == 0 {
+        // Yahoo authoritative history sync every Nth tick. Completely
+        // skipped when Faraz is the active source — Faraz serves all
+        // the pairs it covers via its own WS + HTTP path, and pairs
+        // without a Faraz symbol (e.g. US30) go without Yahoo sync
+        // while Faraz is on. Toggle back to the default source to
+        // restore Yahoo-driven history for those pairs.
+        if tickCount % yahooEveryNTicks == 0 && goldSource != .faraz {
             await withTaskGroup(of: Void.self) { group in
-                for cfg in pairs {
+                for cfg in activePairs {
                     group.addTask { [self] in
                         await syncYahoo(cfg: cfg, repo: repo)
                     }
                 }
             }
-            self.lastUpdateAt = Date()
+            publishLastUpdate()
         }
     }
 
     /// Faraz live/trailing sync for every Faraz-driven pair (gold +
     /// BTC/SOL/ETH). Fans out across pairs so one slow request doesn't
     /// stall the others within a 10s tick.
-    private func syncFarazPairs(repo: OHLCRepo) async {
+    private func syncFarazPairs(repo: OHLCRepo, pairs activePairs: [PairConfig]? = nil) async {
         guard !DataSourceConfig.shared.farazCookie.isEmpty else {
             self.lastError = "faraz: session cookie not set (Settings)."
             return
         }
-        let faraz = pairs.filter { FarazHistorySource.symbolByPairID[$0.pairID] != nil }
+        let allPairs = activePairs ?? pairs
+        let faraz = allPairs.filter { FarazHistorySource.symbolByPairID[$0.pairID] != nil }
         await withTaskGroup(of: Void.self) { group in
             for cfg in faraz {
                 group.addTask { [self] in await self.syncFarazPair(cfg: cfg, repo: repo) }
             }
         }
-        lastUpdateAt = Date()
+        // `publishTick` inside each `syncFarazPair` already wrote
+        // `lastUpdateAt` / `latestPrices` / `activeLiveSource` at
+        // most 1 Hz — no additional @Published write needed here.
         hasBootstrapped = true
+    }
+
+    /// History-only sync when the WS is fresh — fetches 1h + 1d bars
+    /// that the WS doesn't broadcast, skipping 1m/5m (the WS handles
+    /// those live).
+    private func syncFarazPairsHistory(repo: OHLCRepo, pairs activePairs: [PairConfig]? = nil) async {
+        guard !DataSourceConfig.shared.farazCookie.isEmpty else { return }
+        let allPairs = activePairs ?? pairs
+        let faraz = allPairs.filter { FarazHistorySource.symbolByPairID[$0.pairID] != nil }
+        await withTaskGroup(of: Void.self) { group in
+            for cfg in faraz {
+                group.addTask { [self] in
+                    for tf in ["1h", "1d"] {
+                        do {
+                            let bars = try await self.fetchFarazWindow(
+                                pairID: cfg.pairID, sourceTF: tf, cfg: cfg,
+                                to: Date(), countback: 30, firstDataRequest: false
+                            )
+                            try await repo.upsertMany(bars)
+                        } catch {
+                            await MainActor.run {
+                                self.lastError = "faraz \(cfg.pairID)/\(tf): \(error.localizedDescription)"
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Refresh one Faraz pair's fast series (1m + 5m) every tick so the
@@ -643,44 +831,57 @@ final class YahooScheduler: ObservableObject {
         }
 
         if let px = newestClose {
-            latestPrices[cfg.pairID] = px
-            activeLiveSource = "faraz/\(cfg.pairID)"
+            publishTick(price: px, pairID: cfg.pairID, source: "faraz")
         }
     }
 
-    /// Sync one pair's 1m + 5m history in parallel. Errors are
-    /// captured into `lastError` but don't bail — one pair failing
-    /// shouldn't stop the others.
+    /// Sync one pair's 1m + 5m + 1h + 1d history in parallel.
+    /// Errors are captured into `lastError` but don't bail — one pair
+    /// failing shouldn't stop the others.
+    ///
+    /// Incremental: checks `latestBucket` for each timeframe and
+    /// only fetches bars newer than what's stored. Falls back to
+    /// the full `range` when no prior data exists.
+    /// (Incremental-fetch Performance Fix.)
     private func syncYahoo(cfg: PairConfig, repo: OHLCRepo) async {
-        // When the ounce is on Faraz, its 10s poll owns the series —
-        // skip Yahoo for this pair so the two sources don't fight over
-        // the same bars. Other pairs sync normally.
-        if usesFaraz(cfg.pairID) { return }
+        // Faraz is the single source for every pair it serves; when
+        // it's the active source, Yahoo is not needed at all — even
+        // for pairs (e.g. US30) that have no Faraz symbol. Those
+        // pairs simply go without periodic history sync while Faraz
+        // is on; the user toggles back to default to restore them.
+        if goldSource == .faraz { return }
         do {
-            // Periodic sync only needs to refresh the *trailing* bars —
-            // the deep 1h/1d tails were filled at bootstrap and never
-            // change once closed. So we use short ranges here (cheap
-            // payloads, kinder to Yahoo's rate limits) and let
-            // upsertMany merge the freshest few bars of each series.
+            // Check what we already have for each timeframe so we
+            // can pass `since` to Yahoo and skip re-fetching /
+            // re-upserting thousands of stale bars.
+            let latest1m  = try? await repo.latestBucket(pairID: cfg.pairID, timeframe: "1m")
+            let latest5m  = try? await repo.latestBucket(pairID: cfg.pairID, timeframe: "5m")
+            let latest1h  = try? await repo.latestBucket(pairID: cfg.pairID, timeframe: "1h")
+            let latest1d  = try? await repo.latestBucket(pairID: cfg.pairID, timeframe: "1d")
+
             async let oneMinT = YahooGoldSource.fetchHistory(
                 pairID: cfg.pairID, symbol: cfg.yahooSymbol,
                 skipWeekends: cfg.respectsWeekend,
-                range: "8d", interval: "1m"
+                range: "8d", interval: "1m",
+                since: latest1m
             )
             async let fiveMinT = YahooGoldSource.fetchHistory(
                 pairID: cfg.pairID, symbol: cfg.yahooSymbol,
                 skipWeekends: cfg.respectsWeekend,
-                range: "1mo", interval: "5m"
+                range: "1mo", interval: "5m",
+                since: latest5m
             )
             async let oneHourT = YahooGoldSource.fetchHistory(
                 pairID: cfg.pairID, symbol: cfg.yahooSymbol,
                 skipWeekends: cfg.respectsWeekend,
-                range: "5d", interval: "1h"
+                range: "5d", interval: "1h",
+                since: latest1h
             )
             async let oneDayT = YahooGoldSource.fetchHistory(
                 pairID: cfg.pairID, symbol: cfg.yahooSymbol,
                 skipWeekends: cfg.respectsWeekend,
-                range: "1mo", interval: "1d"
+                range: "1mo", interval: "1d",
+                since: latest1d
             )
             let oneMin = try await oneMinT
             let fiveMin = try await fiveMinT
@@ -709,32 +910,18 @@ final class YahooScheduler: ObservableObject {
         // ignore ticks from every other provider (Twelve Data, cTrader,
         // gold-api) so they can't interleave a second source's prices.
         if usesFaraz(pairID) { return }
-        // Publish the price immediately (cheap @Published mutation on the
-        // main actor) so the UI updates the instant a tick arrives — the
-        // bar-rolling DB work below runs off-main and never blocks it.
-        latestPrices[pairID] = price
-        activeLiveSource = "\(source)/\(pairID)"
         let cfg = pairs.first { $0.pairID == pairID }
         let respectsWeekend = cfg?.respectsWeekend ?? false
+        // Bar-rolling on every tick — buckets must reflect the latest
+        // price the moment it lands; gating this would let bars lag and
+        // the trailing-splice UI path would show stale OHLC.
         try? await rollLiveBar(pairID: pairID, timeframe: "1m", bucketSize: 60,
                                respectsWeekend: respectsWeekend, price: price, repo: repo)
         try? await rollLiveBar(pairID: pairID, timeframe: "5m", bucketSize: 300,
                                respectsWeekend: respectsWeekend, price: price, repo: repo)
-        // Throttle lastUpdateAt writes — it's @Published and feeds
-        // several heavy observers (chart reload trigger, header
-        // FetchTimerView re-render, status bar). At cTrader's 2+ Hz
-        // flush rate, writing it every tick would fire
-        // `objectWillChange` on the scheduler 2× per second, which
-        // re-evaluates every view that reads ANY of this scheduler's
-        // properties. 1 Hz here keeps the timer countdown looking
-        // live without those cascade costs.
-        let now = Date()
-        if let prev = lastUpdateAt, now.timeIntervalSince(prev) < 1.0 {
-            hasBootstrapped = true
-            return
-        }
-        lastUpdateAt = now
-        hasBootstrapped = true
+        // @Published side (price tag, source label, lastUpdateAt) is
+        // throttled to 1 Hz — see `publishTick` for why.
+        publishTick(price: price, pairID: pairID, source: source)
     }
 
     /// True if Twelve Data has delivered an XAU/USD tick recently.

@@ -84,14 +84,20 @@ extension AIEngine {
 /// Engines available in this build. New ones get added here; the UI's
 /// EngineSelector enumerates them.
 enum AIEngineKind: String, CaseIterable, Identifiable {
+    #if !os(iOS)
     case claude
     case codex
+    #endif
+    case opencode
 
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .claude: return "Claude"
-        case .codex:  return "Codex"
+        #if !os(iOS)
+        case .claude:   return "Claude"
+        case .codex:    return "Codex"
+        #endif
+        case .opencode: return "OpenCode"
         }
     }
 }
@@ -102,8 +108,11 @@ enum AIEngineKind: String, CaseIterable, Identifiable {
 enum AIEngineFactory {
     static func make(_ kind: AIEngineKind) -> AIEngine {
         switch kind {
-        case .claude: return ClaudeEngine()
-        case .codex:  return CodexEngine()
+        #if !os(iOS)
+        case .claude:   return ClaudeEngine()
+        case .codex:    return CodexEngine()
+        #endif
+        case .opencode: return OpenCodeEngine()
         }
     }
 }

@@ -9,11 +9,15 @@ import SwiftUI
 /// the Color-returning brand bits live here so we can stay in SwiftUI.
 extension AIEngineKind {
     /// Approximate brand colour. Claude = Anthropic terracotta, Codex =
-    /// OpenAI green. Used to tint the glyph + the selected-engine ring.
+    /// OpenAI green, OpenCode = terminal blue-grey. Used to tint the
+    /// glyph + the selected-engine ring.
     var brandColor: Color {
         switch self {
-        case .claude: return Color(red: 0.84, green: 0.46, blue: 0.33)   // #D6764F-ish
-        case .codex:  return Color(red: 0.06, green: 0.64, blue: 0.50)   // #10A37F-ish
+        #if !os(iOS)
+        case .claude:   return Color(red: 0.84, green: 0.46, blue: 0.33)   // #D6764F-ish
+        case .codex:    return Color(red: 0.06, green: 0.64, blue: 0.50)   // #10A37F-ish
+        #endif
+        case .opencode: return Color(red: 0.39, green: 0.40, blue: 0.42)   // #636669-ish
         }
     }
 }
@@ -29,6 +33,7 @@ struct EngineGlyph: View {
     var body: some View {
         Group {
             switch kind {
+            #if !os(iOS)
             case .claude:
                 ClaudeBurst()
                     .stroke(
@@ -40,6 +45,13 @@ struct EngineGlyph: View {
                     .stroke(
                         kind.brandColor,
                         style: StrokeStyle(lineWidth: size * 0.10, lineJoin: .round)
+                    )
+            #endif
+            case .opencode:
+                OpenCodeTerminal()
+                    .stroke(
+                        kind.brandColor,
+                        style: StrokeStyle(lineWidth: size * 0.12, lineCap: .round, lineJoin: .round)
                     )
             }
         }
@@ -93,6 +105,39 @@ private struct OpenAIKnot: Shape {
                 .concatenating(CGAffineTransform(translationX: c.x, y: c.y))
             p.addPath(ellipse.applying(t))
         }
+        return p
+    }
+}
+
+/// OpenCode terminal prompt — a `>_` style mark. A right-pointing
+/// angle bracket (chevron) followed by an underscore, evoking a
+/// terminal cursor. Clean, geometric, instantly reads as "code/CLI".
+private struct OpenCodeTerminal: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let w = rect.width
+        let h = rect.height
+        let strokeW = w * 0.12
+
+        // Chevron (>): two lines meeting at the right midpoint.
+        let chevronTipX = w * 0.58
+        let chevronTipY = h * 0.50
+        let chevronTopX = w * 0.18
+        let chevronTopY = h * 0.18
+        let chevronBotX = w * 0.18
+        let chevronBotY = h * 0.82
+
+        p.move(to: CGPoint(x: chevronTopX, y: chevronTopY))
+        p.addLine(to: CGPoint(x: chevronTipX, y: chevronTipY))
+        p.addLine(to: CGPoint(x: chevronBotX, y: chevronBotY))
+
+        // Underscore (_) — a horizontal bar near the bottom right.
+        let barY = h * 0.78
+        let barStartX = w * 0.62
+        let barEndX = w * 0.88
+        p.move(to: CGPoint(x: barStartX, y: barY))
+        p.addLine(to: CGPoint(x: barEndX, y: barY))
+
         return p
     }
 }

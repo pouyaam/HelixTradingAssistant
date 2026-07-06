@@ -34,6 +34,10 @@ final class FarazWebSocketStream {
     var onCandle: ((_ bar: OHLCBar) -> Void)?
 
     @Published private(set) var isConnected: Bool = false
+    /// True once the WS has successfully completed the namespace handshake
+    /// at least once this session. Lets the scheduler distinguish "never
+    /// connected" from "connected but currently stale".
+    @Published private(set) var wsEverConnected: Bool = false
 
     private var socket: URLSessionWebSocketTask?
     private var runTask: Task<Void, Never>?
@@ -141,6 +145,7 @@ final class FarazWebSocketStream {
             if text.hasPrefix("40/customer,") && !namespaceConnected {
                 namespaceConnected = true
                 isConnected = true
+                wsEverConnected = true
                 logEvent("WS NAMESPACE OK", error: nil)
                 for room in rooms {
                     let escaped = room.replacingOccurrences(of: "\"", with: "\\\"")

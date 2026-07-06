@@ -16,6 +16,8 @@ struct DataSourcesCard: View {
     @State private var farazAPIURLDraft: String = ""
     @State private var isDirty: Bool = false
     @State private var savedFlash: Bool = false
+    @State private var showTwelveDataKey: Bool = false
+    @State private var showFarazCookie: Bool = false
 
     var body: some View {
         Card {
@@ -59,10 +61,27 @@ struct DataSourcesCard: View {
                     .tracking(0.8)
                     .foregroundStyle(Theme.Color.textMuted)
                     .padding(.top, 2)
-                SecureField("Cookie header value copied from a logged-in faraz.io tab", text: $farazCookieDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12).monospaced())
-                    .onChange(of: farazCookieDraft) { _ in isDirty = true }
+                HStack(spacing: 4) {
+                    if showFarazCookie {
+                        TextField("Cookie header value copied from a logged-in faraz.io tab", text: $farazCookieDraft)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12).monospaced())
+                    } else {
+                        SecureField("Cookie header value copied from a logged-in faraz.io tab", text: $farazCookieDraft)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12).monospaced())
+                    }
+                    Button {
+                        showFarazCookie.toggle()
+                    } label: {
+                        Image(systemName: showFarazCookie ? "eye.slash" : "eye")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.Color.textMuted)
+                    }
+                    .buttonStyle(.plain)
+                    .help(showFarazCookie ? "Hide cookie" : "Show cookie")
+                }
+                .onChange(of: farazCookieDraft) { _ in isDirty = true }
                 Text("In a logged-in faraz.io tab open DevTools → Network → any request → Headers, copy the full Cookie value and paste it here. Polled every 10s. Drives gold + BTC/SOL/ETH from Faraz. Changing the source clears those pairs' stored bars and refetches.")
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.Color.textMuted)
@@ -115,17 +134,38 @@ struct DataSourcesCard: View {
                 Spacer()
                 Button("Get a free key →") {
                     if let url = URL(string: "https://twelvedata.com/pricing") {
+                        #if os(iOS)
+                        UIApplication.shared.open(url)
+                        #else
                         NSWorkspace.shared.open(url)
+                        #endif
                     }
                 }
                 .buttonStyle(.plain)
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(Theme.Color.accentStart)
             }
-            SecureField("Paste your Twelve Data API key", text: $twelveDataKeyDraft)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12).monospaced())
-                .onChange(of: twelveDataKeyDraft) { _ in isDirty = true }
+            HStack(spacing: 4) {
+                if showTwelveDataKey {
+                    TextField("Paste your Twelve Data API key", text: $twelveDataKeyDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12).monospaced())
+                } else {
+                    SecureField("Paste your Twelve Data API key", text: $twelveDataKeyDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12).monospaced())
+                }
+                Button {
+                    showTwelveDataKey.toggle()
+                } label: {
+                    Image(systemName: showTwelveDataKey ? "eye.slash" : "eye")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.Color.textMuted)
+                }
+                .buttonStyle(.plain)
+                .help(showTwelveDataKey ? "Hide key" : "Show key")
+            }
+            .onChange(of: twelveDataKeyDraft) { _ in isDirty = true }
             Text("Free tier covers crypto + forex WebSocket streams. Without a key, the live ticker for BTC / ETH / SOL stays offline; the chart still works from Yahoo history.")
                 .font(.system(size: 10))
                 .foregroundStyle(Theme.Color.textMuted)

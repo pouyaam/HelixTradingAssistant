@@ -49,6 +49,62 @@ enum OrderBlocks {
         var id: String { "\(index)-\(isBullish ? "bull" : "bear")" }
     }
 
+    // MARK: - Shared Volume Profile Helpers
+
+    /// Pre-computed volume profile data shared between `OrderBlocks` and
+    /// `SteroidOrderBlocks` so the HVN / volume-SMA work is done once.
+    struct VolumeProfileData {
+        let volumeSMAs: [Double]
+        let hvnRanges: [ClosedRange<Double>]
+    }
+
+    /// Compute a rolling 20-period volume SMA and identify High Volume
+    /// Nodes (price ranges whose accumulated volume ≥ `hvnThreshold`
+    /// of the peak bucket). Used by both OrderBlocks (when
+    /// `detectSteroids` is true) and SteroidOrderBlocks.
+    static func computeVolumeProfile(
+        candles: [Candle],
+        bucketCount: Int = 30,
+        hvnThreshold: Double = 0.70
+    ) -> VolumeProfileData {
+        // Rolling volume SMA (period 20).
+        let volPeriod = 20
+        var volSMAs = [Double](repeating: 0, count: candles.count)
+        var volSum: Double = 0
+        for i in 0..<candles.count {
+            let vol = candles[i].volume ?? 0
+            volSum += vol
+            if i >= volPeriod {
+                volSum -= candles[i - volPeriod].volume ?? 0
+            }
+            let activePeriod = min(i + 1, volPeriod)
+            volSMAs[i] = volSum / Double(activePeriod)
+        }
+
+        // Volume Profile — bucket typical price into equal bands.
+        let prices = candles.flatMap { [$0.low, $0.high] }
+        var hvnRanges: [ClosedRange<Double>] = []
+        if let priceMin = prices.min(), let priceMax = prices.max(), priceMax > priceMin {
+            let bucketSize = (priceMax - priceMin) / Double(bucketCount)
+            var bucketVolumes = [Double](repeating: 0, count: bucketCount)
+            for c in candles {
+                let typical = (c.high + c.low + c.close) / 3
+                let idx = min(bucketCount - 1, max(0, Int((typical - priceMin) / bucketSize)))
+                let vol = c.volume ?? 0
+                bucketVolumes[idx] += vol > 0 ? vol : 1
+            }
+            let maxVol = bucketVolumes.max() ?? 1
+            let hvnLimit = maxVol * hvnThreshold
+            for i in 0..<bucketCount {
+                if bucketVolumes[i] >= hvnLimit {
+                    let rangeMin = priceMin + Double(i) * bucketSize
+                    hvnRanges.append(rangeMin...rangeMin + bucketSize)
+                }
+            }
+        }
+        return VolumeProfileData(volumeSMAs: volSMAs, hvnRanges: hvnRanges)
+    }
+
     /// Scan the series for order blocks.
     ///
     /// - periods:   required run of same-direction candles after the OB
@@ -70,80 +126,42 @@ enum OrderBlocks {
     ) -> [Zone] {
         // Need the OB candle + its run + one evaluation bar.
         guard periods >= 1, candles.count >= periods + 2 else { return [] }
-        var out: [Zone] = []
         let n = candles.count
 
-        // Precompute Volume SMA & HVNs if detectSteroids is true
-        var volSMAs = [Double](repeating: 0, count: candles.count)
-        var hvnRanges: [ClosedRange<Double>] = []
-        
-        if detectSteroids {
-            // Step 2: Compute a rolling Volume SMA
-            var volSum: Double = 0
-            let volPeriod = 20
-            for i in 0..<candles.count {
-                let vol = candles[i].volume ?? 0
-                volSum += vol
-                if i >= volPeriod {
-                    volSum -= candles[i - volPeriod].volume ?? 0
-                }
-                let activePeriod = min(i + 1, volPeriod)
-                volSMAs[i] = volSum / Double(activePeriod)
-            }
-            
-            // Step 3: Compute Volume Profile
-            let prices = candles.flatMap { [$0.low, $0.high] }
-            if let priceMin = prices.min(), let priceMax = prices.max(), priceMax > priceMin {
-                let bucketSize = (priceMax - priceMin) / Double(bucketCount)
-                var bucketVolumes = [Double](repeating: 0, count: bucketCount)
-                
-                for c in candles {
-                    let typical = (c.high + c.low + c.close) / 3
-                    let idx = min(bucketCount - 1, max(0, Int((typical - priceMin) / bucketSize)))
-                    let vol = c.volume ?? 0
-                    bucketVolumes[idx] += vol > 0 ? vol : 1
-                }
-                
-                let maxVol = bucketVolumes.max() ?? 1
-                let hvnLimit = maxVol * hvnThreshold
-                
-                for i in 0..<bucketCount {
-                    if bucketVolumes[i] >= hvnLimit {
-                        let rangeMin = priceMin + Double(i) * bucketSize
-                        let rangeMax = rangeMin + bucketSize
-                        hvnRanges.append(rangeMin...rangeMax)
-                    }
-                }
-            }
-        }
+        // ── Precompute Volume SMA & HVNs (if detectSteroids) ────────
+        let vpData: VolumeProfileData? = detectSteroids
+            ? computeVolumeProfile(candles: candles, bucketCount: bucketCount, hvnThreshold: hvnThreshold)
+            : nil
+        let volSMAs = vpData?.volumeSMAs ?? []
+        let hvnRanges = vpData?.hvnRanges ?? []
 
-        // `e` is the evaluation bar (Pine's "current" bar, offset 0). The
-        // OB candle sits `periods + 1` bars back; the run occupies the
-        // `periods` bars between them (indices obIdx+1 ... e-1).
+        // ── Stage 1: detect zones ──────────────────────────────────
+        // Each zone starts as `.fresh`; stage 2 updates status.
+        struct DetectedZone {
+            let index: Int
+            let high: Double
+            let low: Double
+            let isBullish: Bool
+        }
+        var detected: [DetectedZone] = []
+
         for e in (periods + 1)..<n {
             let obIdx = e - (periods + 1)
             let ob = candles[obIdx]
             guard ob.close != 0 else { continue }
 
-            // % move from the OB close to the last run candle (Pine's
-            // `close[1]`, i.e. the bar just before the evaluation bar).
             let absMove = abs(ob.close - candles[e - 1].close) / ob.close * 100
             guard absMove >= threshold else { continue }
 
-            // Count the direction of the `periods` run candles. A doji
-            // (close == open) counts as neither, so it breaks the run —
-            // same as the Pine `close[i] > open[i] ? 1 : 0` accumulation.
             var up = 0, down = 0
             for k in (obIdx + 1)...(e - 1) {
                 if candles[k].close > candles[k].open { up += 1 }
                 else if candles[k].close < candles[k].open { down += 1 }
             }
 
-            // Bullish OB: a down candle followed by an all-up run.
             if ob.close < ob.open, up == periods {
                 let zHigh = useWicks ? ob.high : ob.open
                 let zLow = ob.low
-                
                 if detectSteroids {
                     let obVol = ob.volume ?? 0
                     let avgVol = volSMAs[obIdx]
@@ -152,38 +170,11 @@ enum OrderBlocks {
                     let overlapsHVN = hvnRanges.contains { zoneRange.overlaps($0) }
                     guard isHighVolume || overlapsHVN else { continue }
                 }
-                
-                var testCount = 0
-                var status = ExhaustionStatus.fresh
-                let startIdx = obIdx + periods + 1
-                if startIdx < candles.count {
-                    for k in startIdx..<candles.count {
-                        let c = candles[k]
-                        if c.low <= zHigh && c.high >= zLow {
-                            testCount += 1
-                            status = .tested
-                        }
-                        if c.close < zLow {
-                            status = .exhausted
-                            break
-                        }
-                    }
-                }
-                
-                out.append(Zone(
-                    index: obIdx,
-                    high: zHigh,
-                    low: zLow,
-                    isBullish: true,
-                    status: status,
-                    testCount: testCount
-                ))
+                detected.append(DetectedZone(index: obIdx, high: zHigh, low: zLow, isBullish: true))
             }
-            // Bearish OB: an up candle followed by an all-down run.
             else if ob.close > ob.open, down == periods {
                 let zHigh = ob.high
                 let zLow = useWicks ? ob.low : ob.open
-                
                 if detectSteroids {
                     let obVol = ob.volume ?? 0
                     let avgVol = volSMAs[obIdx]
@@ -192,34 +183,59 @@ enum OrderBlocks {
                     let overlapsHVN = hvnRanges.contains { zoneRange.overlaps($0) }
                     guard isHighVolume || overlapsHVN else { continue }
                 }
-                
-                var testCount = 0
-                var status = ExhaustionStatus.fresh
-                let startIdx = obIdx + periods + 1
-                if startIdx < candles.count {
-                    for k in startIdx..<candles.count {
-                        let c = candles[k]
-                        if c.high >= zLow && c.low <= zHigh {
-                            testCount += 1
-                            status = .tested
-                        }
-                        if c.close > zHigh {
-                            status = .exhausted
-                            break
-                        }
-                    }
-                }
-                
-                out.append(Zone(
-                    index: obIdx,
-                    high: zHigh,
-                    low: zLow,
-                    isBullish: false,
-                    status: status,
-                    testCount: testCount
-                ))
+                detected.append(DetectedZone(index: obIdx, high: zHigh, low: zLow, isBullish: false))
             }
         }
-        return out
+
+        guard !detected.isEmpty else { return [] }
+
+        // ── Stage 2: single forward pass for exhaustion ────────────
+        // Walk each candle once, updating test counts and exhaustion
+        // status for every zone simultaneously. O(n × zones) total but
+        // each candle is visited once — eliminates the prior O(n²) that
+        // re-scanned the tail for every zone independently.
+        var testCounts = [Int](repeating: 0, count: detected.count)
+        var statuses = [ExhaustionStatus](repeating: .fresh, count: detected.count)
+
+        for ci in 0..<candles.count {
+            let c = candles[ci]
+            for zi in 0..<detected.count {
+                guard statuses[zi] != .exhausted else { continue }
+                let z = detected[zi]
+                let startIdx = z.index + periods + 1
+                guard ci >= startIdx else { continue }
+
+                if z.isBullish {
+                    if c.low <= z.high && c.high >= z.low {
+                        testCounts[zi] += 1
+                        statuses[zi] = .tested
+                    }
+                    if c.close < z.low {
+                        statuses[zi] = .exhausted
+                    }
+                } else {
+                    if c.high >= z.low && c.low <= z.high {
+                        testCounts[zi] += 1
+                        statuses[zi] = .tested
+                    }
+                    if c.close > z.high {
+                        statuses[zi] = .exhausted
+                    }
+                }
+            }
+        }
+
+        // ── Assemble results ───────────────────────────────────────
+        return (0..<detected.count).map { i in
+            let z = detected[i]
+            return Zone(
+                index: z.index,
+                high: z.high,
+                low: z.low,
+                isBullish: z.isBullish,
+                status: statuses[i],
+                testCount: testCounts[i]
+            )
+        }
     }
 }

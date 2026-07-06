@@ -6,22 +6,77 @@ import SwiftUI
 struct JournalDayAISheet: View {
     let entries: [JournalEntry]
     let day: Date
-    /// Override the header date label — use for week / month reviews.
+    /// Override the header date label — use for week / month / all-time reviews.
     var periodTitle: String? = nil
+    /// Coarse period classification so the system prompt can frame the
+    /// scope correctly ("today's session" vs "the full week" vs "all-time")
+    /// instead of always speaking of "this trading day". Defaults to
+    /// `.day` because the day-group analyse button still passes a single day.
+    var periodScope: PeriodScope = .day
+    /// Heuristic behavioral flags already computed by the caller
+    /// (`JournalDetailView.computeBehavioralWarnings(for:)`) — revenge
+    /// trades, overtrading windows, loss streaks, late-session fade. Feeding
+    /// them into the prompt as "preliminary flags detected by your rules
+    /// engine — corroborate or refute each" makes the AI's review build on
+    /// the deterministic checks instead of silently redoing them blind, and
+    /// surfaces disagreement (model thinks it *wasn't* revenge, the rules
+    /// engine thought it was) as a discussion rather than a hidden bug.
+    var behavioralHints: [String] = []
+    /// Journal these trades belong to. Derived from `entries.first` if nil
+    /// so legacy callers don't need to thread an explicit ID through. Used
+    /// for per-journal engine/model persistence and to scope the saved
+    /// review into `DayReviewEntry.journalID` for the inline history.
+    var journalID: UUID? = nil
+
+    /// Coarse scope classification for the period being reviewed.
+    enum PeriodScope: String {
+        case day, yesterday, week, month, custom, all
+
+        /// User-facing noun ("this session", "this week", "this month",
+        /// "your entire trading history").
+        var nounPhrase: String {
+            switch self {
+            case .day:        return "this trading day"
+            case .yesterday:  return "yesterday's session"
+            case .week:       return "this week's sessions"
+            case .month:      return "this month's sessions"
+            case .custom:     return "this custom period"
+            case .all:        return "your entire trading history"
+            }
+        }
+        /// Short label appended to the AI button on the journal detail
+        /// screen ("AI Today", "AI This Week", "AI All-Time").
+        var buttonLabel: String {
+            switch self {
+            case .day:        return "Today"
+            case .yesterday:  return "Yesterday"
+            case .week:       return "This Week"
+            case .month:      return "This Month"
+            case .custom:     return "Custom"
+            case .all:        return "All-Time"
+            }
+        }
+    }
 
     @EnvironmentObject private var app: AppState
     @EnvironmentObject private var dayReviewStore: DayReviewStore
     @Environment(\.dismiss) private var dismiss
+
+    /// The journal under analysis — either the explicit `journalID` or the
+    /// journal every entry was filed under. Used for per-journal prefs and
+    /// to scope the saved `DayReviewEntry.journalID`.
+    private var scopedJournalID: UUID { journalID ?? entries.first?.journalID ?? JournalEntry.defaultJournalID }
 
     // ── Engine / model / effort ───────────────────────────────────
     @State private var engineKind: AIEngineKind = {
         let raw = UserDefaults.standard.string(forKey: "ai.journal.engine") ?? "claude"
         return AIEngineKind(rawValue: raw) ?? .claude
     }()
-    @State private var claudeModelID  = UserDefaults.standard.string(forKey: "ai.claude.model")  ?? ClaudeModelCatalog.defaultModelID
-    @State private var claudeEffortID = UserDefaults.standard.string(forKey: "ai.claude.effort") ?? ClaudeModelCatalog.defaultEffortID
-    @State private var codexModelID   = UserDefaults.standard.string(forKey: "ai.codex.model")   ?? CodexModelCatalog.defaultModelID
-    @State private var codexEffortID  = UserDefaults.standard.string(forKey: "ai.codex.effort")  ?? CodexModelCatalog.defaultEffortID
+    @State private var claudeModelID   = UserDefaults.standard.string(forKey: "ai.claude.model")   ?? ClaudeModelCatalog.defaultModelID
+    @State private var claudeEffortID  = UserDefaults.standard.string(forKey: "ai.claude.effort")  ?? ClaudeModelCatalog.defaultEffortID
+    @State private var codexModelID    = UserDefaults.standard.string(forKey: "ai.codex.model")    ?? CodexModelCatalog.defaultModelID
+    @State private var codexEffortID   = UserDefaults.standard.string(forKey: "ai.codex.effort")   ?? CodexModelCatalog.defaultEffortID
+    @State private var opencodeModelID = UserDefaults.standard.string(forKey: "ai.opencode.model") ?? OpenCodeModelCatalog.defaultModelID
 
     // ── Stream state ──────────────────────────────────────────────
     @State private var thinking   = ""
@@ -31,6 +86,17 @@ struct JournalDayAISheet: View {
     @State private var streamTask: Task<Void, Never>? = nil
     @State private var showThinking = false
     @State private var savedReview = false
+    /// Flips to true once the model emits its first `## ` header — used to
+    /// decide when to switch from the live raw-text streaming view over to
+    /// the parsed section cards.
+    @State private var firstHeaderArrived = false
+    /// Toggle for the "vs Previous review" disclosure — set to false on
+    /// each new run, true once the user expands the prior report.
+    @State private var showPrevious = false
+    /// Most-recent saved review for this journal + period, looked up at
+    /// run-time so the user can compare what changed against last week's
+    /// verdict on the same scope.
+    @State private var previousReview: DayReviewEntry? = nil
 
     // ── Layout ────────────────────────────────────────────────────
     var body: some View {
@@ -46,6 +112,7 @@ struct JournalDayAISheet: View {
         .frame(width: 780, height: 700)
         .background(Theme.Color.canvas)
         .onDisappear { streamTask?.cancel() }
+        .task { applyPerJournalDefaults(); refreshPreviousReview() }
     }
 
     // ── Summary computed props ────────────────────────────────────
@@ -133,11 +200,13 @@ struct JournalDayAISheet: View {
                                   efforts: ClaudeModelCatalog.efforts,
                                   selectedModel: $claudeModelID,
                                   selectedEffort: $claudeEffortID)
-            } else {
+            } else if engineKind == .codex {
                 modelEffortPicker(models: CodexModelCatalog.models,
                                   efforts: CodexModelCatalog.efforts,
                                   selectedModel: $codexModelID,
                                   selectedEffort: $codexEffortID)
+            } else {
+                opencodeModelPicker
             }
             Spacer()
             HStack {
@@ -216,9 +285,12 @@ struct JournalDayAISheet: View {
     private var resultPanel: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                if let prev = previousReview { previousReviewDisclosure(prev) }
                 if !thinking.isEmpty { thinkingDisclosure }
                 if isRunning && output.isEmpty {
                     analyzingSpinner
+                } else if isRunning && !firstHeaderArrived {
+                    liveRawText
                 } else {
                     parsedSections
                 }
@@ -233,6 +305,82 @@ struct JournalDayAISheet: View {
         }
     }
 
+    /// Collapsible view of the most recent saved review matching this
+    /// (journal, period) — gives the user a side-by-side mental diff so a
+    /// weekly run can be compared against the previous week's verdict
+    /// without diving into the global review history sheet. Rendered as a
+    /// plain-text disclosure (no line-level diff — the model's wording
+    /// churns too much to make a character diff useful; a "compare against
+    /// last week's bottom line" still surfaces consistency / drift).
+    @ViewBuilder
+    private func previousReviewDisclosure(_ review: DayReviewEntry) -> some View {
+        DisclosureGroup(isExpanded: $showPrevious) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text(String(format: "%+.2f", review.netPL))
+                        .font(.system(size: 11, weight: .bold).monospacedDigit())
+                        .foregroundStyle(review.netPL >= 0 ? Theme.Color.success : Theme.Color.danger)
+                    Text("\(review.tradeCount) trades")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.Color.textMuted)
+                    Text("· \(review.engineLabel) · \(review.modelLabel)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.Color.textMuted)
+                    Spacer()
+                }
+                Text(review.report)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(Theme.Spacing.sm)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.Color.info.opacity(0.85))
+                Text("Previous review — \(Self.dateFmt.string(from: review.createdAt))")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.Color.info.opacity(0.85))
+                Spacer()
+            }
+        }
+        .padding(Theme.Spacing.sm)
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.sm).fill(Theme.Color.surface))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.sm)
+            .strokeBorder(Theme.Color.info.opacity(0.2), lineWidth: 1))
+    }
+
+    /// Mid-stream raw text shown until the model emits its first `## `
+    /// header, mirroring `JournalAISheet.liveRawText` — keeps the sheet
+    /// visibly responsive between "Analyse…" → first section header.
+    private var liveRawText: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini).tint(Theme.Color.accentStart)
+                Text("Receiving…")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textMuted)
+                Spacer()
+            }
+            ScrollView {
+                Text(output.isEmpty ? "…" : output)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(Theme.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.md).fill(Theme.Color.surface))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md)
+            .strokeBorder(Theme.Color.border, lineWidth: 1))
+    }
+
     // ── Section parsing ───────────────────────────────────────────
 
     private struct AISection: Identifiable {
@@ -243,35 +391,45 @@ struct JournalDayAISheet: View {
         let accentColor: Color
     }
 
-    private var sectionMeta: [(icon: String, color: Color)] {[
-        ("chart.bar.xaxis",               Theme.Color.info),
-        ("checkmark.seal.fill",           Theme.Color.success),
-        ("exclamationmark.triangle.fill", Theme.Color.danger),
-        ("square.3.layers.3d.top.filled", Theme.Color.warn),
-        ("arrow.up.right.circle.fill",    Theme.Color.accentStart),
-        ("lightbulb.fill",                Theme.Color.textSecondary),
-    ]}
+    /// Resolve a section header → (icon, color) **by name** rather than by
+    /// array index. The original index-based mapping sent the wrong glyph
+    /// when the model reordered sections or added an intro paragraph; this
+    /// lookup tolerates reordering, paraphrasing, and an extra "Summary"
+    /// the rules engine itself pre-stages.
+    private func meta(forTitle title: String) -> (icon: String, color: Color) {
+        let known = ["Session Overview",
+                     "What Made You Profitable",
+                     "What Cost You",
+                     "Order Block Quality Assessment",
+                     "Patterns & Discipline",
+                     "What You Should Have Done Differently",
+                     "Key Rules to Carry Forward",
+                     "Summary"]
+        let idx = AISectionParse.match(title, against: known)
+        switch idx {
+        case 0:  return ("chart.bar.xaxis",               Theme.Color.info)
+        case 1:  return ("checkmark.seal.fill",           Theme.Color.success)
+        case 2:  return ("exclamationmark.triangle.fill", Theme.Color.danger)
+        case 3:  return ("square.3.layers.3d.top.filled", Theme.Color.warn)
+        case 4:  return ("arrow.up.right.circle.fill",    Theme.Color.accentStart)
+        case 5:  return ("lightbulb.fill",                Theme.Color.accentStart)
+        case 6:  return ("checkmark.seal.fill",           Theme.Color.textSecondary)
+        case 7:  return ("line.3.horizontal",             Theme.Color.textSecondary)
+        default: return ("line.3.horizontal",             Theme.Color.textSecondary)
+        }
+    }
 
     private func parseOutput(_ raw: String) -> [AISection] {
-        let lines = raw.components(separatedBy: "\n")
-        var buckets: [(header: String, lines: [String])] = []
-        var current: (header: String, lines: [String])?
-        for line in lines {
-            if line.hasPrefix("## ") {
-                if let c = current { buckets.append(c) }
-                current = (String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces), [])
-            } else if current != nil {
-                current!.lines.append(line)
-            }
-        }
-        if let c = current { buckets.append(c) }
-        guard !buckets.isEmpty else { return [] }
-        return buckets.enumerated().map { i, bucket in
-            let body = bucket.lines.joined(separator: "\n")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let meta = sectionMeta[min(i, sectionMeta.count - 1)]
-            return AISection(id: "\(i)", icon: meta.icon, title: bucket.header,
-                             body: body, accentColor: meta.color)
+        let buckets = AISectionParse.sections(from: raw)
+        return buckets.enumerated().map { i, b in
+            let m = meta(forTitle: b.title)
+            return AISection(
+                id: "\(i)",
+                icon: m.icon,
+                title: b.title.isEmpty ? "Summary" : b.title,
+                body: b.body,
+                accentColor: m.color
+            )
         }
     }
 
@@ -307,33 +465,11 @@ struct JournalDayAISheet: View {
                 Text(section.title)
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(Theme.Color.textPrimary)
-                let bodyLines = section.body.components(separatedBy: "\n")
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(Array(bodyLines.enumerated()), id: \.offset) { _, line in
-                        let trimmed = line.trimmingCharacters(in: .whitespaces)
-                        if trimmed.hasPrefix("- ") || trimmed.hasPrefix("• ") {
-                            HStack(alignment: .top, spacing: 6) {
-                                Circle()
-                                    .fill(section.accentColor.opacity(0.75))
-                                    .frame(width: 4, height: 4)
-                                    .padding(.top, 5)
-                                Text(stripBold(trimmed.hasPrefix("- ")
-                                     ? String(trimmed.dropFirst(2))
-                                     : String(trimmed.dropFirst(2))))
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(Theme.Color.textSecondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        } else if trimmed == "---" || trimmed.isEmpty {
-                            EmptyView()
-                        } else {
-                            Text(stripBold(trimmed))
-                                .font(.system(size: 12))
-                                .foregroundStyle(Theme.Color.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
+                AIMarkdownLines(
+                    bodyText: section.body,
+                    accentColor: section.accentColor,
+                    bodyColor: Theme.Color.textSecondary
+                )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -347,10 +483,6 @@ struct JournalDayAISheet: View {
                 .frame(width: 3)
                 .padding(.vertical, 8)
         }
-    }
-
-    private func stripBold(_ s: String) -> String {
-        s.replacingOccurrences(of: "**", with: "")
     }
 
     // ── Supporting result-panel views ─────────────────────────────
@@ -409,7 +541,7 @@ struct JournalDayAISheet: View {
                 }
                 .buttonStyle(.plain)
             } else {
-                Button { thinking = ""; output = ""; error = nil; savedReview = false } label: {
+                Button { thinking = ""; output = ""; error = nil; savedReview = false; firstHeaderArrived = false } label: {
                     Label("Re-run", systemImage: "arrow.counterclockwise")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.Color.textSecondary)
@@ -422,8 +554,12 @@ struct JournalDayAISheet: View {
 
                 if !output.isEmpty {
                     Button {
+                        #if os(iOS)
+                        UIPasteboard.general.string = output
+                        #else
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(output, forType: .string)
+                        #endif
                     } label: {
                         Label("Copy", systemImage: "doc.on.doc")
                             .font(.system(size: 11, weight: .semibold))
@@ -481,8 +617,7 @@ struct JournalDayAISheet: View {
         let available = engine.availability.canRun
         Button { if available { engineKind = kind } } label: {
             HStack(spacing: 5) {
-                Image(systemName: kind == .claude ? "brain" : "cpu")
-                    .font(.system(size: 10, weight: .semibold))
+                EngineGlyph(kind: kind, size: 12)
                 Text(kind.label)
                     .font(.system(size: 12, weight: selected ? .bold : .medium))
                 if !available {
@@ -537,28 +672,69 @@ struct JournalDayAISheet: View {
         }
     }
 
+    private var opencodeModelPicker: some View {
+        HStack(alignment: .top, spacing: Theme.Spacing.xl) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                sectionLabel("MODEL")
+                Picker("Model", selection: $opencodeModelID) {
+                    Section("FREE") {
+                        ForEach(OpenCodeModelCatalog.freeModels) { Text($0.label).tag($0.id) }
+                    }
+                    ForEach(OpenCodeModelCatalog.providerOrder, id: \.self) { provider in
+                        if let group = OpenCodeModelCatalog.paidModelsByProvider.first(where: { $0.provider == provider }) {
+                            Section(provider) {
+                                ForEach(group.models) { Text($0.label).tag($0.id) }
+                            }
+                        }
+                    }
+                }
+                .pickerStyle(.menu).labelsHidden()
+                .frame(maxWidth: 280, alignment: .leading)
+            }
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // MARK: – AI run + prompt
     // ═══════════════════════════════════════════════════════════════
 
     private func startAnalysis() {
+        // Persist global (legacy) + per-journal preferences.
         UserDefaults.standard.set(engineKind.rawValue, forKey: "ai.journal.engine")
-        if engineKind == .claude {
+        switch engineKind {
+        case .claude:
             UserDefaults.standard.set(claudeModelID,  forKey: "ai.claude.model")
             UserDefaults.standard.set(claudeEffortID, forKey: "ai.claude.effort")
-        } else {
+        case .codex:
             UserDefaults.standard.set(codexModelID,  forKey: "ai.codex.model")
             UserDefaults.standard.set(codexEffortID, forKey: "ai.codex.effort")
+        case .opencode:
+            UserDefaults.standard.set(opencodeModelID, forKey: "ai.opencode.model")
         }
-        isRunning = true; error = nil; output = ""; thinking = ""; savedReview = false
+        persistPerJournalSettings(.engine)
+        persistPerJournalSettings(.model)
+        persistPerJournalSettings(.effort)
+        // Refresh the "previous review" so the user can compare against the
+        // most recent verdict *before* this run, not after we save this one.
+        refreshPreviousReview()
+        isRunning = true; error = nil
+        output = ""; thinking = ""; savedReview = false
+        firstHeaderArrived = false
+        showPrevious = false
         let engine = AIEngineFactory.make(engineKind)
         let (sys, usr) = buildPrompt()
         streamTask = Task { @MainActor in
             do {
                 for try await event in engine.run(system: sys, user: usr) {
                     switch event {
-                    case .text(let c):     output   += c
-                    case .thinking(let c): thinking += c
+                    case .text(let c):
+                        output += c
+                        if !firstHeaderArrived,
+                           output.range(of: "(?m)^## ", options: .regularExpression) != nil {
+                            firstHeaderArrived = true
+                        }
+                    case .thinking(let c):
+                        thinking += c
                     }
                 }
             } catch is CancellationError {
@@ -568,18 +744,32 @@ struct JournalDayAISheet: View {
     }
 
     private func buildPrompt() -> (system: String, user: String) {
+        // Period-aware framing: the system prompt previously always spoke of
+        // "this trading day" even when the analysis covered a week, month, or
+        // the journal's entire history — which led the model to narrate a
+        // Monday-Friday single session even on multi-week reviews. Branching
+        // on `periodScope` keeps the wording aligned with what the user
+        // actually asked for.
+        let scopeNoun = periodScope.nounPhrase
+        let isAllTime = periodScope == .all
+        let isMultiDay = periodScope == .week || periodScope == .month || periodScope == .custom || periodScope == .all
+
         let system = """
         You are an expert trading coach and market analyst specialising in gold (XAUUSD) and forex \
         with deep knowledge of Smart Money Concepts (SMC) and order block (OB) trading. \
         The trader you are reviewing primarily uses order blocks as their core setup — always factor \
         this into your feedback.
 
-        Analyse the trader's full session for the day provided. Your response must use exactly \
-        these six Markdown sections (## headers, keep titles verbatim):
+        Analyse the trader's \(scopeNoun). \(isMultiDay
+            ? "Because this spans multiple trading sessions, organise your commentary by day and don't treat this as a single session. Aggregate intra-day trends only after giving a per-day take."
+            : "Treat this as one trading session and review intra-day sequencing explicitly.")
+
+        Your response must use exactly these six Markdown sections (## headers, keep titles verbatim):
 
         ## Session Overview
-        Summarise the day: total trades, win rate, net P/L, dominant direction (long/short bias), \
-        session context (Asia/London/NY overlap), and whether the day was overall disciplined.
+        \(isMultiDay
+            ? "Summarise the period: total trades, win rate, net P/L, dominant direction, sessions contributing most to net P/L (e.g. London vs NY), and whether the period overall was disciplined."
+            : "Summarise the day: total trades, win rate, net P/L, dominant direction (long/short bias), session context (Asia/London/NY overlap), and whether the day was overall disciplined.")
 
         ## What Made You Profitable (or What Cost You)
         If net positive: identify the specific behaviours, setups, and order block confluences \
@@ -591,10 +781,10 @@ struct JournalDayAISheet: View {
         Rate each order block entry individually (if price data given). \
         Comment on: mitigation quality, confluence with structure, entry timing, \
         whether the OB was respected or swept before continuation. \
-        Highlight the best and worst OB trade of the session.
+        \(isMultiDay ? "Group by trading day if the period spans several." : "Highlight the best and worst OB trade of the session.")
 
         ## Patterns & Discipline
-        Identify behavioural patterns across the session: \
+        Identify behavioural patterns across \(scopeNoun): \
         Did the trader revenge-trade after a loss? Did they take low-quality setups late in the session? \
         Did they cut winners early? Did they move SL to breakeven too soon? \
         Reward good habits explicitly.
@@ -641,29 +831,49 @@ struct JournalDayAISheet: View {
 
         let gradedCount = wins.count + losses.count
         let wrStr = gradedCount > 0 ? String(format: "%.0f%%", winRate * 100) : "N/A"
-        let user = """
-        Please analyse my full trading session for \(dateStr).
+        var userHeaders: [String] = [
+            "Please analyse my trading for \(dateStr)."
+        ]
+        if isAllTime { userHeaders.append("This is the all-time review of this journal — treat it as a long-run retrospective, not a single session.") }
 
-        Day summary:
-        - Total trades: \(entries.count)
-        - Wins: \(wins.count), Losses: \(losses.count), Open: \(entries.filter { $0.result == .open }.count)
-        - Win rate: \(wrStr)
-        - Net P/L: \(String(format: "%+.2f", netPL))
+        var userDetails: [String] = [
+            "Period summary:",
+            "- Total trades: \(entries.count)",
+            "- Wins: \(wins.count), Losses: \(losses.count), Open: \(entries.filter { $0.result == .open }.count)",
+            "- Win rate: \(wrStr)",
+            "- Net P/L: \(String(format: "%+.2f", netPL))"
+        ]
 
-        Individual trades:
-        \(tradeLines.joined(separator: "\n\n"))
-        """
+        // Feed heuristic flags from the caller into the prompt as preliminary
+        // findings — the AI is asked to *corroborate or refute* each, turning
+        // the model's behavioural-pattern analysis into a dialogue with the
+        // deterministic rules engine rather than a duplicate blind pass.
+        if !behavioralHints.isEmpty {
+            userDetails.append("")
+            userDetails.append("Preliminary flags already detected by your rules engine — corroborate or explicitly refute each below in your Patterns & Discipline section:")
+            for h in behavioralHints { userDetails.append("- \(h)") }
+        }
+        userDetails.append("")
+        userDetails.append("Individual trades:")
+        userDetails.append(tradeLines.joined(separator: "\n\n"))
+        let user = (userHeaders + userDetails).joined(separator: "\n")
         return (system, user)
     }
 
     /// Persist the finished report into `DayReviewStore` so it shows
     /// up in the AI review history instead of being lost the moment
-    /// the sheet is dismissed.
+    /// the sheet is dismissed. The journal the trades belong to is
+    /// stamped on `DayReviewEntry.journalID` so the journal detail screen
+    /// can show this review inline in its "AI Review History — this
+    /// journal" section without surfacing reviews from other journals.
     private func saveReview() {
         guard !output.isEmpty else { return }
-        let modelLabel = engineKind == .claude
-            ? ClaudeModelCatalog.label(forModelID: claudeModelID)
-            : CodexModelCatalog.label(forModelID: codexModelID)
+        let modelLabel: String
+        switch engineKind {
+        case .claude:   modelLabel = ClaudeModelCatalog.label(forModelID: claudeModelID)
+        case .codex:    modelLabel = CodexModelCatalog.label(forModelID: codexModelID)
+        case .opencode: modelLabel = OpenCodeModelCatalog.label(forModelID: opencodeModelID)
+        }
         let review = DayReviewEntry(
             periodStart: entries.map(\.date).min() ?? day,
             periodTitle: periodTitle ?? Self.dayFmt.string(from: day),
@@ -673,10 +883,62 @@ struct JournalDayAISheet: View {
             engineLabel: engineKind.label,
             modelLabel: modelLabel,
             report: output,
-            thinking: thinking.isEmpty ? nil : thinking
+            thinking: thinking.isEmpty ? nil : thinking,
+            journalID: scopedJournalID
         )
         dayReviewStore.add(review)
         savedReview = true
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // MARK: – Per-journal engine / model persistence
+    // ═══════════════════════════════════════════════════════════════
+
+    private enum JournalPrefSlot: String { case engine, model, effort }
+
+    private func journalPrefKey(_ slot: JournalPrefSlot) -> String {
+        "ai.journal.\(scopedJournalID.uuidString).\(slot.rawValue)"
+    }
+
+    /// On appear, override seeded global defaults with this journal's
+    /// last-used settings if any were ever persisted.
+    private func applyPerJournalDefaults() {
+        if let raw = UserDefaults.standard.string(forKey: journalPrefKey(.engine)),
+           let kind = AIEngineKind(rawValue: raw) {
+            engineKind = kind
+        }
+        switch engineKind {
+        case .claude:
+            if let m  = UserDefaults.standard.string(forKey: journalPrefKey(.model))  { claudeModelID  = m }
+            if let ef = UserDefaults.standard.string(forKey: journalPrefKey(.effort)) { claudeEffortID = ef }
+        case .codex:
+            if let m  = UserDefaults.standard.string(forKey: journalPrefKey(.model))  { codexModelID   = m }
+            if let ef = UserDefaults.standard.string(forKey: journalPrefKey(.effort)) { codexEffortID  = ef }
+        case .opencode:
+            if let m = UserDefaults.standard.string(forKey: journalPrefKey(.model)) { opencodeModelID = m }
+        }
+    }
+
+    private func persistPerJournalSettings(_ slot: JournalPrefSlot) {
+        let key = journalPrefKey(slot)
+        switch (slot, engineKind) {
+        case (.engine, _):                    UserDefaults.standard.set(engineKind.rawValue, forKey: key)
+        case (.model, .claude):               UserDefaults.standard.set(claudeModelID, forKey: key)
+        case (.effort, .claude):              UserDefaults.standard.set(claudeEffortID, forKey: key)
+        case (.model, .codex):                UserDefaults.standard.set(codexModelID, forKey: key)
+        case (.effort, .codex):               UserDefaults.standard.set(codexEffortID, forKey: key)
+        case (.model, .opencode):             UserDefaults.standard.set(opencodeModelID, forKey: key)
+        case (.effort, .opencode):            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    /// Look up the most recent saved review for *this* journal and *this*
+    /// period scope, excluding whatever the current run produced. Used to
+    /// drive the "vs Previous" disclosure so the user can compare against
+    /// the prior verdict on the same period.
+    private func refreshPreviousReview() {
+        previousReview = dayReviewStore.previousReview(journalID: scopedJournalID,
+                                                        matchingPeriodTitle: periodTitle)
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -726,5 +988,10 @@ struct JournalDayAISheet: View {
 
     private static let timeFmt: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "HH:mm"; return f
+    }()
+
+    /// Date+time formatter used by the "Previous review — …" disclosure.
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MMM d, yyyy · HH:mm"; return f
     }()
 }

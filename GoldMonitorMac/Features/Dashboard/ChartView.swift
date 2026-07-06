@@ -237,8 +237,16 @@ struct ChartView: View {
                 // steal pan/hover from the main canvas.
                 .overlay(alignment: .trailing) { priceAxisScaleStrip }
                 .overlay(alignment: .topLeading) { hoverTooltip }
-                .animation(.easeOut(duration: 0.15), value: hovered)
-                .animation(.easeInOut(duration: 0.4), value: candles.count)
+                // No global .animation() modifiers here. Previously:
+                //   .animation(.easeOut(0.15), value: hovered)
+                //   .animation(.easeInOut(0.4), value: candles.count)
+                // Both wrapped the ENTIRE chart subtree (hundreds of
+                // marks + overlays), triggering animation transactions
+                // on every hover event and every 1 Hz tick. The hovered
+                // animation is now targeted to just the tooltip overlay;
+                // the candles-count animation was removed — instant bar
+                // appearance is fine (TradingView does the same).
+                // (Pan/zoom performance fix.)
         }
     }
 
@@ -324,32 +332,24 @@ struct ChartView: View {
         return indicatorConfig.fvgShowMitigated ? all : all.filter { !$0.isMitigated }
     }
 
-    /// Session runs to draw: every *enabled* preset's runs that intersect
-    /// the visible window (+a margin), capped to the most recent so a deep
-    /// history doesn't pile hundreds of boxes into one frame. Swift Charts
-    /// draws every mark it's handed (clipping after), so we window here for
-    /// the same reason `renderIndices` windows the candles. The runs
-    /// themselves are memoized data-side in `ChartDerivedCache`.
+    /// Session runs to draw: the *current day only* instance of every
+    /// enabled preset — i.e. each venue's most recent run, not its whole
+    /// history. `TradingSessions.compute` appends runs per-session in
+    /// chronological order, so the last run seen for a given session ID is
+    /// that venue's latest (today's, or still-open) trading day; overwriting
+    /// by ID as we walk the memoized list picks exactly that one. This
+    /// keeps at most one box per enabled session on screen — no windowing
+    /// or cap needed — and lets `sessionMarks` extend each one's high/low/
+    /// average lines to the live edge so, say, Tokyo's range stays visible
+    /// as a dotted reference while London/New York are trading.
     private var sessionRuns: [TradingSessions.SessionRun] {
         guard indicators.contains(.tradingSession) else { return [] }
-        let enabled = derived.tradingSessions(candles: candles)
-            .filter { indicatorConfig.showsSession($0.sessionID) }
-        guard !enabled.isEmpty,
-              let b = ChartWindow.visibleBounds(domain: effectiveXDomain, count: candles.count)
-        else { return [] }
-        let margin = max(8, (b.hi - b.lo) / 4)
-        let lo = b.lo - margin
-        let hi = b.hi + margin
-        // Keep runs whose [start, end] overlaps the padded window. The
-        // memoized list is grouped by session (Tokyo→London→NY), so sort
-        // by bar before the safety cap takes the *most recent* runs across
-        // all sessions rather than dropping a whole venue first.
-        let visible = enabled
-            .filter { $0.end >= lo && $0.start <= hi }
-            .sorted { $0.start < $1.start }
-        return Array(visible.suffix(Self.maxSessionRuns))
+        var latest: [String: TradingSessions.SessionRun] = [:]
+        for run in derived.tradingSessions(candles: candles) where indicatorConfig.showsSession(run.sessionID) {
+            latest[run.sessionID] = run
+        }
+        return latest.values.sorted { $0.start < $1.start }
     }
-    private static let maxSessionRuns = 90
 
 
     /// NY Open Setup results to draw: the per-day setups whose footprint
@@ -382,7 +382,15 @@ struct ChartView: View {
     private static let maxSetupsOnChart = 3
 
     private var chart: some View {
-        Chart {
+        // Compute the visible bar indices ONCE for the entire frame.
+        // Previously `renderIndices` and `renderIndexSet` were separate
+        // computed properties that each called ChartWindow.renderIndices
+        // independently, doubling the work on every pan/zoom frame.
+        Group {
+            let indices = renderIndices
+            let indexSet = Set(indices)
+
+            Chart {
             // Last-price horizontal reference line. Drawn first so it sits
             // behind the data marks. The trailing annotation pins a price
             // tag to the right edge — TradingView-style.
@@ -451,17 +459,17 @@ struct ChartView: View {
             // `displayCandles`, so the renderer doesn't need to care
             // about the source.
             switch chartType {
-            case .line:                  lineMarks
-            case .candle, .heikinAshi:   candleMarks
+            case .line:                  lineMarks(indices: indices)
+            case .candle, .heikinAshi:   candleMarks(indices: indices)
             }
 
             // Indicator overlays — drawn on top of the price series so
             // SMA/EMA/Bollinger lines aren't obscured by candle bodies.
-            indicatorMarks
+            indicatorMarks(visible: indexSet)
 
             // UT Bot trailing-stop line + buy/sell labels. Rendered last
             // so the labels sit on top of every other mark.
-            utBotMarks
+            utBotMarks(indices: indices, visible: indexSet)
 
             // Crosshair — drawn last so it overlays the data. Vertical
             // rule snaps to the bar column under the cursor (bars are
@@ -575,6 +583,7 @@ struct ChartView: View {
                     ))
                     .simultaneousGesture(magnificationGesture())
             }
+        }
         }
     }
 
@@ -1028,19 +1037,28 @@ struct ChartView: View {
     /// current candle series. Returns the nearest-by-time index so a
     /// drawing made on 1h still renders sensibly when the user flips
     /// to 4h (it lands on whichever 4h bucket contains the same moment).
+    /// Uses binary search — O(log n) instead of the prior O(n) linear scan.
     /// Returns nil for empty series.
     private func barIndex(forDate date: Date) -> Double? {
         guard !candles.isEmpty else { return nil }
-        var bestIdx = 0
-        var bestDelta = abs(candles[0].bucketStart.timeIntervalSince(date))
-        for (i, c) in candles.enumerated().dropFirst() {
-            let d = abs(c.bucketStart.timeIntervalSince(date))
-            if d < bestDelta {
-                bestDelta = d
-                bestIdx = i
+        let ts = date.timeIntervalSince1970
+        var lo = 0
+        var hi = candles.count - 1
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if candles[mid].bucketStart.timeIntervalSince1970 < ts {
+                lo = mid + 1
+            } else {
+                hi = mid
             }
         }
-        return Double(bestIdx)
+        // lo is the first index >= date; check neighbours for nearest.
+        if lo > 0 {
+            let dLo = abs(candles[lo].bucketStart.timeIntervalSince(date))
+            let dPrev = abs(candles[lo - 1].bucketStart.timeIntervalSince(date))
+            if dPrev < dLo { return Double(lo - 1) }
+        }
+        return Double(lo)
     }
 
     /// Trackpad pinch-to-zoom. value > 1 ⇒ zoom in; < 1 ⇒ zoom out. We
@@ -1084,28 +1102,19 @@ struct ChartView: View {
     /// Marks still plot at the *global* bar index, so overlays/hover/
     /// replay keep working unchanged.
     private var renderIndices: [Int] {
-        // Use the raw `candles.count` (a stored property, O(1)) rather
-        // than `displayCandles.count` — the Heikin-Ashi transform /
-        // live-price patch preserve length, so the counts are identical
-        // and we avoid triggering that whole O(n) rebuild just to size
-        // the window.
         ChartWindow.renderIndices(domain: effectiveXDomain, count: candles.count)
-    }
-
-    private var renderIndexSet: Set<Int> {
-        Set(renderIndices)
     }
 
     // MARK: - Mark variants
 
     @ChartContentBuilder
-    private var lineMarks: some ChartContent {
+    private func lineMarks(indices: [Int]) -> some ChartContent {
         // Evaluate `displayCandles` ONCE here. It's a computed property
         // that rebuilds (HA transform + live-price array copy) on every
         // access, so indexing it inside the ForEach closure would re-run
         // that O(n) work per visible bar — quadratic on deep history.
         let cs = displayCandles
-        ForEach(renderIndices, id: \.self) { i in
+        ForEach(indices, id: \.self) { i in
             let c = cs[i]
             AreaMark(
                 x: .value("Bar", Double(i)),
@@ -1281,21 +1290,27 @@ struct ChartView: View {
     }
 
     /// Trading-session overlays — one translucent high-low box per
-    /// session per day, with optional dashed open/close lines, a dotted
-    /// average line, and a corner label (range / average / name). Each
-    /// session keeps its own hue; boxes span only their own bar range
-    /// (`start...end`), unlike order blocks which extend to the live edge.
-    /// Mirrors the Pine "Trading Sessions" study. The display toggles come
-    /// from `indicatorConfig`.
+    /// *current-day* session (see `sessionRuns`), with dotted high/low/
+    /// average reference lines that run through to the live edge, optional
+    /// dashed open/close lines, and a corner label (range / average /
+    /// name). Each session keeps its own hue. The box itself is confined
+    /// to the session's own bar range (`start...end`), but the high/low/
+    /// average lines extend past it to the last bar on the chart — so
+    /// e.g. Tokyo's range is still visible, dotted, in Tokyo's colour,
+    /// while London or New York are trading. Mirrors the Pine "Trading
+    /// Sessions" study, extended with the cross-session reference lines.
+    /// The display toggles come from `indicatorConfig`.
     @ChartContentBuilder
     private var sessionMarks: some ChartContent {
         let cfg = indicatorConfig
+        let lineEnd = Double(max(candles.count - 1, 0))
         ForEach(sessionRuns) { run in
             let xStart = Double(run.start)
             let xEnd   = Double(run.end)
 
             // The session's high-low region — low opacity so candles read
-            // through it.
+            // through it. Confined to the session's own bars, unlike the
+            // high/low lines below.
             RectangleMark(
                 xStart: .value("Session start", xStart),
                 xEnd:   .value("Session end",   xEnd),
@@ -1303,6 +1318,23 @@ struct ChartView: View {
                 yEnd:   .value("Session high",  run.high)
             )
             .foregroundStyle(run.color.opacity(0.12))
+
+            // High & low as dotted reference lines carried through to the
+            // live edge, in the session's own colour.
+            RuleMark(
+                xStart: .value("Sess high start", xStart),
+                xEnd:   .value("Sess high end",   lineEnd),
+                y:      .value("Sess high",       run.high)
+            )
+            .foregroundStyle(run.color.opacity(0.7))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [1, 3]))
+            RuleMark(
+                xStart: .value("Sess low start", xStart),
+                xEnd:   .value("Sess low end",   lineEnd),
+                y:      .value("Sess low",        run.low)
+            )
+            .foregroundStyle(run.color.opacity(0.7))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [1, 3]))
 
             if cfg.sessShowOpenClose {
                 // Open & close as dashed rules spanning the session.
@@ -1323,10 +1355,11 @@ struct ChartView: View {
             }
 
             if cfg.sessShowAverage {
-                // Mean close — the Pine source's dotted average line.
+                // Mean close — the Pine source's dotted average (middle)
+                // line, carried through to the live edge like high/low.
                 RuleMark(
                     xStart: .value("Sess avg start", xStart),
-                    xEnd:   .value("Sess avg end",   xEnd),
+                    xEnd:   .value("Sess avg end",   lineEnd),
                     y:      .value("Sess avg",       run.average)
                 )
                 .foregroundStyle(run.color.opacity(0.6))
@@ -1733,6 +1766,7 @@ struct ChartView: View {
         }
     }
 
+
     /// Indicator-computed FVG zones. Each gap is a translucent rectangle
     /// from the bar where it formed to the right edge of the chart
     /// (extending into the future so the user can watch price approach).
@@ -1906,16 +1940,27 @@ struct ChartView: View {
     }
 
     /// Resolves the bar index of the candle whose `bucketStart` is
-    /// closest to `date`. Returns nil when the candle list is empty.
+    /// closest to `date`. Binary search — O(log n).
+    /// Returns nil when the candle list is empty.
     private func barIndex(closestTo date: Date) -> Int? {
         guard !candles.isEmpty else { return nil }
-        var best = 0
-        var bestDist = abs(candles[0].bucketStart.timeIntervalSince(date))
-        for i in 1..<candles.count {
-            let d = abs(candles[i].bucketStart.timeIntervalSince(date))
-            if d < bestDist { bestDist = d; best = i }
+        let ts = date.timeIntervalSince1970
+        var lo = 0
+        var hi = candles.count - 1
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if candles[mid].bucketStart.timeIntervalSince1970 < ts {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
         }
-        return best
+        if lo > 0 {
+            let dLo = abs(candles[lo].bucketStart.timeIntervalSince(date))
+            let dPrev = abs(candles[lo - 1].bucketStart.timeIntervalSince(date))
+            if dPrev < dLo { return lo - 1 }
+        }
+        return lo
     }
 
     /// Finds the bar index of the candle where `price` first fell inside
@@ -2239,38 +2284,27 @@ struct ChartView: View {
                     let x0 = min(xs, xe), x1 = max(xs, xe)
                     let y0 = min(d.start.price, end.price)
                     let y1 = max(d.start.price, end.price)
-                    // Translucent fill
+                    // Translucent fill — 1 RectangleMark
                     RectangleMark(
                         xStart: .value("X0", x0), xEnd: .value("X1", x1),
                         yStart: .value("Y0", y0), yEnd: .value("Y1", y1)
                     )
                     .foregroundStyle(stroke.opacity(d.color.alpha * 0.18))
-                    // Border — four edges as LineMark pairs
-                    let sid = d.id.uuidString
-                    LineMark(x: .value("Bx", x0), y: .value("By", y1),
-                             series: .value("S", "rt-\(sid)"))
-                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
-                    LineMark(x: .value("Bx", x1), y: .value("By", y1),
-                             series: .value("S", "rt-\(sid)"))
-                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
-                    LineMark(x: .value("Bx", x0), y: .value("By", y0),
-                             series: .value("S", "rb-\(sid)"))
-                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
-                    LineMark(x: .value("Bx", x1), y: .value("By", y0),
-                             series: .value("S", "rb-\(sid)"))
-                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
-                    LineMark(x: .value("Bx", x0), y: .value("By", y0),
-                             series: .value("S", "rl-\(sid)"))
-                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
-                    LineMark(x: .value("Bx", x0), y: .value("By", y1),
-                             series: .value("S", "rl-\(sid)"))
-                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
-                    LineMark(x: .value("Bx", x1), y: .value("By", y0),
-                             series: .value("S", "rr-\(sid)"))
-                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
-                    LineMark(x: .value("Bx", x1), y: .value("By", y1),
-                             series: .value("S", "rr-\(sid)"))
-                        .foregroundStyle(stroke).lineStyle(StrokeStyle(lineWidth: lw))
+                    // Border — 4 RuleMarks (top/bottom/left/right)
+                    // instead of the prior 8 LineMarks.
+                    let borderStyle = StrokeStyle(lineWidth: lw)
+                    RuleMark(xStart: .value("T", x0), xEnd: .value("T", x1),
+                             y: .value("Top", y1))
+                        .foregroundStyle(stroke).lineStyle(borderStyle)
+                    RuleMark(xStart: .value("B", x0), xEnd: .value("B", x1),
+                             y: .value("Bot", y0))
+                        .foregroundStyle(stroke).lineStyle(borderStyle)
+                    RuleMark(x: .value("L", x0),
+                             yStart: .value("L0", y0), yEnd: .value("L1", y1))
+                        .foregroundStyle(stroke).lineStyle(borderStyle)
+                    RuleMark(x: .value("R", x1),
+                             yStart: .value("R0", y0), yEnd: .value("R1", y1))
+                        .foregroundStyle(stroke).lineStyle(borderStyle)
                 }
             case .volumeProfile:
                 if let end = d.end,
@@ -2559,14 +2593,13 @@ struct ChartView: View {
     /// UT Bot trailing-stop line + buy/sell signal labels. Returns no
     /// content when the indicator is toggled off.
     @ChartContentBuilder
-    private var utBotMarks: some ChartContent {
+    private func utBotMarks(indices: [Int], visible: Set<Int>) -> some ChartContent {
         if let out = utBotOutput {
-            let visible = renderIndexSet
             // Trailing stop: amber stepped line across all bars where
             // the stop is defined. Toggled by the user via the UT Bot
             // settings — when off, only the buy/sell labels remain.
             if indicatorConfig.utShowTrailingStop {
-                ForEach(renderIndices, id: \.self) { i in
+                ForEach(indices, id: \.self) { i in
                     if i < out.trailingStop.count, let v = out.trailingStop[i] {
                         LineMark(
                             x: .value("Bar", Double(i)),
@@ -2616,9 +2649,8 @@ struct ChartView: View {
     /// points as a single connected line (rather than a per-point disjoint
     /// segment).
     @ChartContentBuilder
-    private var indicatorMarks: some ChartContent {
+    private func indicatorMarks(visible: Set<Int>) -> some ChartContent {
         let computed = derived.indicators(enabled: indicators, candles: candles)
-        let visible = renderIndexSet
         ForEach(computed, id: \.kind) { entry in
             ForEach(entry.points.filter { visible.contains($0.index) }) { p in
                 LineMark(
@@ -2652,11 +2684,11 @@ struct ChartView: View {
     }
 
     @ChartContentBuilder
-    private var candleMarks: some ChartContent {
+    private func candleMarks(indices: [Int]) -> some ChartContent {
         // See `lineMarks`: bind `displayCandles` once to avoid the
         // quadratic per-bar rebuild on deep history.
         let cs = displayCandles
-        ForEach(renderIndices, id: \.self) { i in
+        ForEach(indices, id: \.self) { i in
             let c = cs[i]
             // Wick — full high-to-low range.
             RuleMark(
@@ -2789,6 +2821,8 @@ struct ChartView: View {
             )
             .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
             .padding(12)
+            .transition(.opacity)
+            .animation(.easeOut(duration: 0.1), value: hovered != nil)
         }
     }
 
@@ -2975,6 +3009,12 @@ struct ChartView: View {
     /// at 0, which compresses million-toman prices into a single pixel.
     /// Also folds in indicator/overlay extremes so e.g. the upper
     /// Bollinger band doesn't get clipped off the top.
+    ///
+    /// Overlay extremes (S/R, FVG, OB, drawings, trades, journal) are
+    /// cached in ChartDerivedCache — they don't depend on the visible
+    /// window, so the expensive multi-loop scan only runs when overlay
+    /// data actually changes (AI result, trade edit, drawing add), not
+    /// on every pan/zoom frame. (Pan/zoom Performance Fix.)
     private var autoYDomain: ClosedRange<Double> {
         // Fit Y to only the *visible* bar window — otherwise the axis
         // hugs the entire (possibly multi-year) range and the recent
@@ -2994,7 +3034,7 @@ struct ChartView: View {
         // Pull in any indicator values that exceed the candle range so
         // SMA/EMA/Bollinger lines never get clipped off-screen. Restrict
         // to the visible index window to match the rendered marks.
-        if let b = bounds {
+        if !indicators.isEmpty, let b = bounds {
             for entry in derived.indicators(enabled: indicators, candles: candles) {
                 for p in entry.points where p.index >= b.lo && p.index <= b.hi {
                     if p.value < lo { lo = p.value }
@@ -3007,6 +3047,7 @@ struct ChartView: View {
         // when the user has the visual stop line enabled — otherwise
         // we'd be reserving Y space for an invisible mark.
         if indicatorConfig.utShowTrailingStop,
+           indicators.contains(.utBot),
            let b = bounds,
            let stops = utBotOutput?.trailingStop
         {
@@ -3016,99 +3057,44 @@ struct ChartView: View {
                 if v > hi { hi = v }
             }
         }
-        // S/R levels from the AI: keep them on-screen even when the
-        // identified level sits beyond the visible candles.
-        for v in srLevels.support + srLevels.resistance {
-            if v < lo { lo = v }
-            if v > hi { hi = v }
-        }
-        // FVG zones — fold both edges so a gap above/below the visible
-        // range still shows up at the chart border.
-        for zone in fvgZones {
-            if zone.low  < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        // Supply / Demand zones — same treatment so a zone above or
-        // below the visible candles still draws against the chart
-        // edge (typical with strong moves that left a big base
-        // behind).
-        for zone in supplyDemandZones {
-            if zone.low  < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        // Indicator FVG zones — fold both edges into the Y domain.
-        for zone in indicatorFvgZones {
-            if zone.low  < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        // Order Block zones — fold both edges so a block above/below the
-        // visible candles still draws against the chart border.
-        for zone in orderBlockZones {
-            if zone.low  < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        // Steroid Order Block zones — fold both edges.
-        for zone in steroidOrderBlockZones {
-            if zone.low  < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        // Trading-session boxes — fold their high/low so a box edge isn't
-        // clipped. Matters mainly in Heikin-Ashi mode, where the raw
-        // session extremes can sit just outside the HA candle range the
-        // visible-candle fit above is based on.
-        for run in sessionRuns {
-            if run.low  < lo { lo = run.low }
-            if run.high > hi { hi = run.high }
-        }
-        // NY Open Setup — fold the OR box and the plan's SL/TP so the
-        // breakout target/stop stay on-screen even when they sit beyond
-        // the visible candles.
-        for r in nySetupResults {
-            if r.orLow  < lo { lo = r.orLow }
-            if r.orHigh > hi { hi = r.orHigh }
-            for v in [r.fvgLow, r.fvgHigh, r.entry, r.stopLoss, r.takeProfit].compactMap({ $0 }) {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
+        // All overlay extremes (S/R, FVG, OB, sessions, scenarios,
+        // drawings, trades, journal) are cached — the scan only runs
+        // when overlay data changes, not on every pan/zoom frame.
+        let allZones: [ChartDerivedCache.OverlayBounds] =
+            fvgZones.map { .init(low: $0.low, high: $0.high) }
+            + supplyDemandZones.map { .init(low: $0.low, high: $0.high) }
+            + indicatorFvgZones.map { .init(low: $0.low, high: $0.high) }
+            + orderBlockZones.map { .init(low: $0.low, high: $0.high) }
+            + steroidOrderBlockZones.map { .init(low: $0.low, high: $0.high) }
+            + sessionRuns.map { .init(low: $0.low, high: $0.high) }
+            + nySetupResults.map { .init(low: $0.orLow, high: $0.orHigh) }
+        let drawingPoints: [ChartDerivedCache.PricePoint] = drawings
+            .filter(\.visible)
+            .flatMap { d -> [ChartDerivedCache.PricePoint] in
+                var pts: [ChartDerivedCache.PricePoint] = [.init(price: d.start.price)]
+                if let e = d.end { pts.append(.init(price: e.price)) }
+                return pts
             }
+        let tradePoints: [ChartDerivedCache.PricePoint] = trades.flatMap { t in
+            [t.entry, t.takeProfit, t.stopLoss, t.fillPrice ?? t.entry]
+                .map { .init(price: $0) }
         }
-
-        // Scenario entry / TP / SL — same treatment. Entry can be nil
-        // for legacy history entries; skip it then. Alt scenario folds
-        // in the same way so its lines stay on-screen too.
-        for scenario in [taScenario, taAltScenario].compactMap({ $0 }) {
-            var values = [scenario.takeProfit, scenario.stopLoss]
-            if let entry = scenario.entry { values.append(entry) }
-            for v in values {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
+        let journalPoints: [ChartDerivedCache.PricePoint] = journalEntries
+            .flatMap { je in
+                [je.entry, je.takeProfit, je.stopLoss].compactMap { $0 }
             }
-        }
-        // User drawings — a horizontal line above the highest candle
-        // would clip off-screen without this, defeating its purpose.
-        for d in drawings where d.visible {
-            if d.start.price < lo { lo = d.start.price }
-            if d.start.price > hi { hi = d.start.price }
-            if let e = d.end {
-                if e.price < lo { lo = e.price }
-                if e.price > hi { hi = e.price }
-            }
-        }
-        // Paper trades — fold in entry / TP / SL / fillPrice so an
-        // out-of-range trade line still renders inside the visible
-        // plot. fillPrice diverges from entry only on market orders.
-        for t in trades {
-            for v in [t.takeProfit, t.stopLoss, t.entry, t.fillPrice ?? t.entry] {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
-            }
-        }
-        // Journal overlays — fold entry, TP, SL so the lines stay
-        // on-screen even when the position sits beyond visible candles.
-        for je in journalEntries {
-            for v in [je.entry, je.takeProfit, je.stopLoss].compactMap({ $0 }) {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
-            }
+            .map { .init(price: $0) }
+        if let ext = derived.overlayYExtremes(
+            srLevels: srLevels,
+            overlayZones: allZones,
+            scenario: taScenario.map { (entry: $0.entry, takeProfit: $0.takeProfit, stopLoss: $0.stopLoss) },
+            altScenario: taAltScenario.map { (entry: $0.entry, takeProfit: $0.takeProfit, stopLoss: $0.stopLoss) },
+            drawings: drawingPoints,
+            trades: tradePoints,
+            journalEntries: journalPoints
+        ) {
+            if ext.lo < lo { lo = ext.lo }
+            if ext.hi > hi { hi = ext.hi }
         }
         guard visibleCandles.isEmpty == false else { return 0...1 }
         let span = hi - lo

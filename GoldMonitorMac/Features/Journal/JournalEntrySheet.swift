@@ -145,7 +145,9 @@ struct JournalEntrySheet: View {
                 fieldLabeled("DATE") {
                     DatePicker("", selection: $entry.date, displayedComponents: [.date, .hourAndMinute])
                         .labelsHidden()
+                        #if !os(iOS)
                         .datePickerStyle(.field)
+                        #endif
                 }
                 Spacer()
             }

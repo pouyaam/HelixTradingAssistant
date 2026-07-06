@@ -4,6 +4,100 @@ All notable changes to Helix Trading App are documented here.
 
 ---
 
+## [v1.5] — 2026-07-06
+
+**iPad app, device deploy tooling, and chart performance overhaul.**
+
+### New Features
+
+- **Native iPad app** — a full SwiftUI iPad target (`HelixTradingAppiPad`) sharing the same data model, AI engines, indicators, and storage layer as the Mac app. Uses `NavigationSplitView` with a sidebar for navigation and a pair-selector dropdown in the dashboard header. All chart controls (timeframe, chart type, indicators, layers, drawings, replay, alerts, AI analyze, debug, fullscreen) are available in the chart toolbar. Supports portrait, landscape, and all orientations on iPad.
+- **`./run.sh --ipad`** — lists all iPad simulators (with iOS version and boot state) and real devices, prompts for a selection, builds the iPad target, and installs + launches on the chosen device. Handles automatic signing, simulator boot, and `xcrun devicectl` for real device deployment.
+- **Focused pair syncing** — `YahooScheduler.focusedPairID` limits data fetching to the currently selected pair. iPad sets this automatically on boot and on pair change, reducing CPU usage and battery drain. Grid chart panes skip data loading entirely when hidden.
+
+### Performance — iPad Chart
+
+- **Crosshair uses `onContinuousHover`** — replaced the `LongPressGesture` + `DragGesture` crosshair with the system-optimized `onContinuousHover` handler (iOS 16+), eliminating the full gesture state machine overhead on every touch frame.
+- **Drag gesture deadzone** — added a 3px movement threshold before panning begins, preventing finger jitter from triggering state writes. Y-axis lock threshold increased from 3px to 6px.
+- **Throttled pinch-to-zoom** — increased `minimumScaleDelta` from 0.01 to 0.02 and clamped scale range to 0.1–20, reducing gesture update frequency on ProMotion displays.
+- **Hidden pane optimization** — `ChartPaneView` now guards its initial `.task` data load with `isVisible`, so grid panes that aren't on screen skip candle loading entirely.
+
+### iPad UI
+
+- **Fullscreen charts** — single chart and grid pane fullscreen both use the same `chartCard` view (chromeless, zero padding, full toolbar). Exiting fullscreen from the chartCard button properly restores the grid layout.
+- **Pair selector dropdown** — replaces the sidebar pair list; shows all pairs with a checkmark on the active one.
+- **Compact toolbar** — chart toolbar buttons reduced from 44×44 with circle backgrounds to 32×32 flat icons, matching the Mac toolbar style.
+- **App icon** — generated all iPad icon sizes from the Mac 1024px source icon.
+- **Launch storyboard** — `LaunchScreen.storyboard` with landscape fullscreen device configuration, added via `project.yml` so it survives `xcodegen generate`.
+- **SF Symbol fix** — replaced invalid `"layers"` symbol with `"square.3.layers.3d"`.
+
+### Mac App
+
+- **ChartGrid fullscreen sync** — `ChartGridView` now watches `app.isChartFullscreen` and clears `fullscreenPaneID` when fullscreen exits externally, fixing the case where a grid pane stayed "fullscreen" internally after the chartCard's exit button was tapped.
+- **ChartPaneView hidden-pane guard** — grid pane initial data load skips when the pane is not visible.
+
+### Bug Fixes
+
+- **Info.plist keys survive regeneration** — `UILaunchStoryboardName` and `UISupportedInterfaceOrientations~ipad` are now set in `project.yml` properties instead of directly in the plist, so `xcodegen generate` doesn't strip them.
+- **Removed hardcoded credentials** — OpenCode server URL, model, and password no longer baked into the iPad entry point.
+
+---
+
+## [v1.4 build 5] — 2026-07-05
+
+**Async data pipeline, incremental fetching, and streaming AI performance.**
+
+### Performance — Data Fetching
+
+- **All DB reads now off the main thread** — `OHLCCandleLoader.loadAsync()` uses GRDB's async `repo.read()` so SQLite work never blocks the UI. `DashboardView.reloadCandles()`, `refreshTrailingCandles()`, and `ChartPaneView` candle loading all route through it. The 1 Hz live-tick trailing refresh and pair/timeframe changes no longer cause visible hangs on large histories.
+- **Incremental Yahoo fetching** — periodic sync now checks `latestBucket` per timeframe and passes `period1` (Unix timestamp) to Yahoo's chart API, fetching only bars newer than what's stored. Eliminates re-downloading and re-upserting ~11,520 stale 1m bars every 60 seconds.
+- **Batched upserts** — `OHLCRepo._upsertMany()` now uses multi-row INSERT (124 rows per statement, 992 params) instead of individual INSERT per row. 11,520 bars go from ~11,520 SQL executions to ~93.
+- **Parallel bootstrap** — `bootstrapAndGapFill()` now uses `TaskGroup` to process all pairs concurrently (each pair's 4 timeframes already ran concurrently via `backfillAll`). Seed price reads also parallelized. Startup history fetch is no longer sequential across pairs.
+- **`@Published` cascade reduction** — `publishTick()` and `publishLastUpdate()` throttle `latestPrices` / `lastUpdateAt` / `activeLiveSource` writes to 1 Hz, so the entire DashboardView → ChartView → OscillatorPanel view tree re-evaluates at most once per second instead of on every live tick (5–20 Hz per symbol).
+
+### Performance — AI Analysis Streaming
+
+- **Conversation turn `Text()` fallback** — follow-up turns now render plain `Text()` while streaming (same optimization as the main report's trailing chunk), promoting to `Markdown()` only once the turn completes. Eliminates cmark re-parse + SwiftUI view tree rebuild on every 100 ms flush.
+- **Conversation turn flush no longer triggers store-level `@Published`** — removed `sessions[key] = sess` from the flush path. Session is a class, so the mutation is in-place; the `@ObservedObject` on the report column picks it up without cascading the store's `@Published` to the entire AnalysisPage.
+- **`stripStructuredBlocks` fast path** — a single `contains` check per marker returns the report unchanged when no `### *_JSON` markers are present. During streaming, markers only appear near the end, so the common path is O(1) instead of 7 marker scans + string rebuilding every 100 ms.
+- **`renderChunks()` throttled to 5 Hz** — the 100 ms chunk flush invalidates the cache every time, but the actual `stripStructuredBlocks` + `chunkAtH3` recomputation is deferred until at least 200 ms has elapsed. The stale cache is returned in the interim; the trailing `Text()` chunk covers the visual gap.
+
+### Bug Fixes
+
+- **Faraz WebSocket-fresh periods skip Yahoo sync entirely** — when Faraz is the active source, the periodic Yahoo history sync is now fully skipped (not just gated per-pair), avoiding redundant HTTP requests for pairs Faraz already serves.
+- **Twelve Data socket lifecycle matches source selection** — the socket is now opened/closed as a unit (`startTwelveDataStream` / `stopTwelveDataStream`) instead of being left open while Faraz ticks drop every incoming message. `switchGoldSource` toggles both sockets cleanly.
+
+---
+
+## [v1.4] — 2026-07-04
+
+**Multiple journals, an in-app updater, the OpenCode engine, and a much faster chart.**
+
+### New Features
+
+- **Multiple journals** — the Journal screen now opens to a list of independently-tracked journals (e.g. "Prop firm challenge," "Personal account," "Backtests"), each with its own trades, win rate, and net P&L shown at a glance. Tap a journal to open its trade log (rename or delete from the row's context menu); an "all-time" AI review is available per journal. Entries added from outside the Journal screen (e.g. "Add to journal" from an AI analysis run) file into whichever journal was opened most recently. Existing single-journal installs migrate automatically into a "My Journal" journal — no data loss.
+
+- **In-app updates** — `Settings → Updates` now checks GitHub releases for a newer version, shows the release notes, and downloads + opens the `.dmg` in Finder, replacing the old "open the releases page manually" placeholder link.
+
+- **OpenCode engine** — a third AI engine alongside Claude and Codex. Runs locally via the OpenCode CLI (`opencode run`), or against a self-hosted remote OpenCode server (`opencode serve`) reachable over HTTP with optional basic-auth. Ships with a curated catalog of 5 free Zen models (MiMo V2.5 Free, DeepSeek V4 Flash Free, North Mini Code Free, Nemotron 3 Ultra Free, Big Pickle Free) that work out of the box without billing, plus 12 paid models from Anthropic, OpenAI, Google, DeepSeek, Alibaba, and Moonshot. Free models don't require an API key — authentication is handled automatically. An API key for paid Zen models, and the remote server's password, are stored in Keychain via Settings → AI → OpenCode.
+
+- **Improved journal AI reviews** — day/week/month review prompts now include full OHLC data for each relevant timeframe alongside the trade log, giving the AI richer context for session analysis. Review history is persisted and browsable from the Journal's overflow menu.
+
+- **Trading Sessions now track the live day** — instead of drawing every historical session box in view, the indicator now shows only each venue's current (or most recently closed) run, with its high/low/average extended as dotted reference lines through to the live edge — so, e.g., Tokyo's range stays visible while London/New York are trading.
+
+### Performance
+
+- **Smoother panning, zooming, and replay** — indicator and oscillator recomputation (Order Blocks, FVG, NY Open Setup, MACD, RSI, etc.) now runs off the main thread. Order Block / Steroid Order Block exhaustion scanning dropped from O(n²) to a single O(n) forward pass. Bar-index lookups (drawing placement, hover) now binary-search instead of scanning linearly. Replay stepping and auto-play splice one bar into memory instead of reloading and re-folding the entire stored series on every tick.
+- **No more chart teardown on layout/fullscreen changes** — switching multi-chart grid layouts, toggling a pane (or the main chart) fullscreen, and dragging the pair-header sidebar all previously destroyed and rebuilt the underlying `ChartView` (and its indicator cache), causing a visible stall. These now vary a `Card`'s chrome/frame in place, so chart state and caches survive the transition.
+
+### Bug Fixes
+
+- **Grid-mode header no longer clips** — the pair header could get squeezed to a sliver (and cropped) when a 2-row/2×2 grid demanded more vertical space than the window had; it now keeps its intrinsic size and lets the grid absorb any overflow instead.
+- **Sidebar pair selection now updates every pane** — with "Sync symbol across panes" on, picking a new pair from the sidebar while in grid mode previously only affected the primary chart; it now propagates to all panes.
+- **Faraz WebSocket-fresh periods skip redundant HTTP polling** — once the socket is confirmed live, the 10s poll now only fetches the 1h/1d history the socket doesn't broadcast, instead of re-polling every timeframe on every tick.
+- **AI analysis sessions no longer lose in-flight state** — a session looked up before its first run returned a fresh, un-stored placeholder each time; it's now created once and reused, so state started on one lookup is visible on the next.
+
+---
+
 ## [v1.3] — 2026-07-02
 
 **Steroid Order Blocks, Volume Profile, multi-chart grid, AI-reviewed journal days, and a real notification inbox.**

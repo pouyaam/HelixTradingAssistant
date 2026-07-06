@@ -29,6 +29,28 @@ struct ChartPaneView: View {
     /// — see `ChartGridView`). Toggled by the header's fullscreen
     /// button or the right-click menu's "Fullscreen" item.
     @Binding var isFullscreen: Bool
+    /// True when the grid stacks two full rows of panes (`.twoRow` /
+    /// `.grid2x2`) — those layouts need roughly double the vertical
+    /// budget of a single-row layout, so this trims chart/volume/
+    /// oscillator minimums and padding to help both rows actually fit
+    /// the window instead of overflowing it.
+    var isCompact: Bool = false
+    /// False while a *sibling* pane is fullscreen, collapsing this one
+    /// to zero size (see `ChartGridView.paneSlot`'s `isHidden`). The
+    /// view stays mounted either way — only the tick-driven candle
+    /// refresh pauses (see `body`'s `onReceive`). Skipping that refresh
+    /// while invisible avoids rebuilding this pane's `ChartView` (candle
+    /// marks, Order Block / Steroid OB scans, oscillators — the
+    /// expensive part) on every live price tick for a chart nobody can
+    /// see; a plain grid with N mounted panes was paying that cost N×
+    /// even with only one pane on screen.
+    var isVisible: Bool = true
+    /// External drawing tool binding from the parent (ChartGridView /
+    /// DashboardView). When the pane is fullscreen, this binding is
+    /// used instead of the internal @State so the fullscreen toolbar's
+    /// drawing picker and the pane's gesture handler share the same
+    /// state. (Grid fullscreen drawing fix.)
+    @Binding var fullscreenDrawingTool: DrawingTool
     let onUpdate: (ChartPane) -> Void
 
     @State private var candles: [Candle] = []
@@ -41,11 +63,25 @@ struct ChartPaneView: View {
     @State private var activeDrawingTool: DrawingTool = .none
     @State private var selectedDrawingID: UUID?
 
+    /// The active drawing tool — reads from the external binding when
+    /// fullscreen (so the fullscreen toolbar works), falls back to the
+    /// internal @State when not fullscreen.
+    private var effectiveDrawingTool: DrawingTool {
+        isFullscreen ? fullscreenDrawingTool : activeDrawingTool
+    }
+
+    /// Set the drawing tool on both internal state and external binding.
+    private func setDrawingTool(_ tool: DrawingTool) {
+        activeDrawingTool = tool
+        fullscreenDrawingTool = tool
+    }
+
     private var pair: TradingPair? { app.pairs.first(where: { $0.id == pane.pairID }) }
 
     var body: some View {
         content
             .task(id: "\(pane.pairID)|\(pane.timeframe.rawValue)") {
+                guard isVisible else { return }
                 await load()
             }
             .onReceive(
@@ -56,71 +92,129 @@ struct ChartPaneView: View {
                     .compactMap { $0 }
                     .throttle(for: .seconds(1), scheduler: DispatchQueue.main, latest: true)
             ) { _ in
-                refreshTrailing()
+                guard isVisible else { return }
+                Task { await refreshTrailing() }
             }
             .onChange(of: yahoo.dataResetToken) { _ in
                 Task { await load() }
             }
+            // Catch up on whatever ticks were skipped while a sibling
+            // pane was fullscreen — refreshTrailing's lookback window
+            // (`margin`) covers ordinary durations, so a cheap trailing
+            // refresh is enough rather than a full `load()`.
+            .onChange(of: isVisible) { visible in
+                if visible { Task { await refreshTrailing() } }
+            }
     }
 
-    @ViewBuilder
     private var content: some View {
         // Fullscreen drops the Card chrome (rounded corners, padding,
         // surface fill) the same way the primary chart's own
         // `isChartFull` does — the chart's edges meet the window edges
-        // so it truly fills the space with nothing else visible.
-        if isFullscreen {
-            chartStack
-        } else {
-            Card {
-                chartStack
-                    .padding(Theme.Spacing.md)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // so it truly fills the space with nothing else visible. A
+        // single, unconditional `Card` call (chrome + padding vary by
+        // value) instead of `if isFullscreen { chartStack } else {
+        // Card { chartStack } }` — that `if/else` would tear down and
+        // rebuild `chartStack`'s `ChartView` (and its indicator cache)
+        // on every fullscreen toggle. See `Card.chromeless`.
+        Card(padding: isFullscreen ? 0 : (isCompact ? Theme.Spacing.md : Theme.Spacing.xl), chromeless: isFullscreen) {
+            chartStack.padding(isFullscreen ? 0 : Theme.Spacing.md)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var chartStack: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             header
             if let pair {
-                ChartView(
-                    candles: candles,
-                    chartType: pane.chartType,
-                    accent: pair.color,
-                    xDomain: $xDomain,
-                    yDomain: $yDomain,
-                    indicators: pane.indicators,
-                    indicatorConfig: indicatorConfig,
-                    drawings: drawingStore.drawings(for: pane.pairID),
-                    activeTool: activeDrawingTool,
-                    onCommitDrawing: { drawing in
-                        drawingStore.add(drawing, for: pane.pairID)
-                        // TradingView-style: drop back to cursor after a
-                        // successful draw — same as the primary chart.
-                        activeDrawingTool = .none
-                        selectedDrawingID = drawing.id
-                    },
-                    onMoveDrawing: { drawing in
-                        drawingStore.update(drawing, for: pane.pairID)
-                    },
-                    selectedDrawingID: selectedDrawingID,
-                    onSelectDrawing: { id in
-                        selectedDrawingID = id
-                    },
-                    livePrice: yahoo.latestPrices[pane.pairID]
-                )
-                .frame(minHeight: 200, maxHeight: .infinity)
-                .clipped()
+                let chartContent = Group {
+                    #if os(iOS)
+                    ChartViewiPad(
+                        candles: candles,
+                        chartType: pane.chartType,
+                        accent: pair.color,
+                        xDomain: $xDomain,
+                        yDomain: $yDomain,
+                        indicators: pane.indicators,
+                        indicatorConfig: indicatorConfig,
+                        drawings: drawingStore.drawings(for: pane.pairID),
+                        activeTool: effectiveDrawingTool,
+                        onCommitDrawing: { drawing in
+                            drawingStore.add(drawing, for: pane.pairID)
+                            setDrawingTool(.none)
+                            selectedDrawingID = drawing.id
+                        },
+                        onMoveDrawing: { drawing in
+                            drawingStore.update(drawing, for: pane.pairID)
+                        },
+                        selectedDrawingID: selectedDrawingID,
+                        onSelectDrawing: { id in
+                            selectedDrawingID = id
+                        },
+                        livePrice: yahoo.latestPrices[pane.pairID]
+                    )
+                    #else
+                    ChartView(
+                        candles: candles,
+                        chartType: pane.chartType,
+                        accent: pair.color,
+                        xDomain: $xDomain,
+                        yDomain: $yDomain,
+                        indicators: pane.indicators,
+                        indicatorConfig: indicatorConfig,
+                        drawings: drawingStore.drawings(for: pane.pairID),
+                        activeTool: effectiveDrawingTool,
+                        onCommitDrawing: { drawing in
+                            drawingStore.add(drawing, for: pane.pairID)
+                            setDrawingTool(.none)
+                            selectedDrawingID = drawing.id
+                        },
+                        onMoveDrawing: { drawing in
+                            drawingStore.update(drawing, for: pane.pairID)
+                        },
+                        selectedDrawingID: selectedDrawingID,
+                        onSelectDrawing: { id in
+                            selectedDrawingID = id
+                        },
+                        livePrice: yahoo.latestPrices[pane.pairID]
+                    )
+                    #endif
+                }
+                chartContent
+                    .frame(minHeight: isCompact ? 130 : 200, maxHeight: .infinity)
+                    .clipped()
+                #if !os(iOS)
+                .drawingDeleteKey(selectedDrawingID: $selectedDrawingID, drawingStore: drawingStore, pairID: pane.pairID)
+                #endif
                 .contextMenu { optionsMenu }
+                // Scroll-to-latest puck — same as the single chart's.
+                .overlay(alignment: .bottomLeading) {
+                    if !isViewingLatest {
+                        Button { scrollToLatest() } label: {
+                            Image(systemName: "forward.end.fill")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 32, height: 32)
+                                .background(Circle().fill(Theme.accentGradient))
+                                .overlay(Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 1))
+                                .shadow(color: .black.opacity(0.4), radius: 6, y: 2)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Scroll to latest")
+                        .padding(.leading, Theme.Spacing.sm)
+                        .padding(.bottom, Theme.Spacing.sm)
+                        .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                .animation(.easeOut(duration: 0.15), value: isViewingLatest)
 
                 if pane.showVolume {
                     VolumeBarsView(candles: candles, accent: pair.color, xDomain: xDomain)
-                        .frame(height: 36)
+                        .frame(height: isCompact ? 28 : 36)
                 }
                 ForEach(pane.oscillators.sorted(by: { $0.rawValue < $1.rawValue })) { osc in
                     OscillatorPanel(kind: osc, candles: candles, config: indicatorConfig, xDomain: xDomain)
-                        .frame(height: 80)
+                        .frame(height: isCompact ? 56 : 80)
                 }
             } else {
                 Text("Pair unavailable")
@@ -129,6 +223,7 @@ struct ChartPaneView: View {
                     .frame(maxWidth: .infinity, minHeight: 200)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // ── Header ────────────────────────────────────────────────────
@@ -153,16 +248,41 @@ struct ChartPaneView: View {
 
             Spacer()
 
-            if activeDrawingTool != .none {
+            if effectiveDrawingTool != .none {
                 armedToolBadge
             }
 
-            Text(pane.timeframe.label)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(Theme.Color.textMuted)
+            // Timeframe + chart type selectors — same controls as the
+            // single chart's toolbar, bound to this pane's state.
+            TimeframeSelector(selected: timeframeBinding)
+            ChartTypeToggle(selected: chartTypeBinding, isDisabled: false)
 
             fullscreenButton
         }
+    }
+
+    /// Binding for TimeframeSelector — reads from pane, writes via onUpdate.
+    private var timeframeBinding: Binding<Timeframe> {
+        Binding(
+            get: { pane.timeframe },
+            set: { newTF in
+                var updated = pane
+                updated.timeframe = newTF
+                onUpdate(updated)
+            }
+        )
+    }
+
+    /// Binding for ChartTypeToggle — reads from pane, writes via onUpdate.
+    private var chartTypeBinding: Binding<ChartType> {
+        Binding(
+            get: { pane.chartType },
+            set: { newCT in
+                var updated = pane
+                updated.chartType = newCT
+                onUpdate(updated)
+            }
+        )
     }
 
     /// Shown only while a drawing tool is armed — there's no persistent
@@ -171,11 +291,11 @@ struct ChartPaneView: View {
     /// shape instead of panning. Tapping it disarms back to the cursor.
     private var armedToolBadge: some View {
         Button {
-            activeDrawingTool = .none
+            setDrawingTool(.none)
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: activeDrawingTool.systemImage)
-                Text(activeDrawingTool.label)
+                Image(systemName: effectiveDrawingTool.systemImage)
+                Text(effectiveDrawingTool.label)
             }
             .font(.system(size: 10, weight: .semibold))
             .foregroundStyle(.white)
@@ -277,9 +397,9 @@ struct ChartPaneView: View {
         Menu("Drawing Tool") {
             ForEach(DrawingTool.allCases) { tool in
                 Button {
-                    activeDrawingTool = tool
+                    setDrawingTool(tool)
                 } label: {
-                    Label(tool.label, systemImage: activeDrawingTool == tool
+                    Label(tool.label, systemImage: effectiveDrawingTool == tool
                           ? "checkmark.circle.fill" : tool.systemImage)
                 }
             }
@@ -331,23 +451,21 @@ struct ChartPaneView: View {
         let pairID = pane.pairID
         let tf = pane.timeframe
         let respectsWeekend = app.pairs.first(where: { $0.id == pairID })?.category != .crypto
-        let result = OHLCCandleLoader.load(
+        let result = await OHLCCandleLoader.loadAsync(
             repo: db.ohlcRepo, pairID: pairID, tf: tf,
             since: .distantPast, until: Date(), dropClosedDays: respectsWeekend
         )
-        await MainActor.run {
-            self.candles = result
-            self.xDomain = nil
-            self.yDomain = nil
-            self.activeDrawingTool = .none
-            self.selectedDrawingID = nil
-        }
+        self.candles = result
+        self.xDomain = nil
+        self.yDomain = nil
+        self.setDrawingTool(.none)
+        self.selectedDrawingID = nil
     }
 
     /// Cheap trailing-window refresh on the same live-tick cadence the
     /// primary chart uses, so panes stay current without re-reading
     /// years of history every tick.
-    private func refreshTrailing() {
+    private func refreshTrailing() async {
         guard let db = app.database, !candles.isEmpty else { return }
         let pairID = pane.pairID
         let tf = pane.timeframe
@@ -355,7 +473,7 @@ struct ChartPaneView: View {
         let until = Date()
         let margin = Double(max(tf.seconds * 3, 6 * 3600))
         let since = until.addingTimeInterval(-margin)
-        let recent = OHLCCandleLoader.load(
+        let recent = await OHLCCandleLoader.loadAsync(
             repo: db.ohlcRepo, pairID: pairID, tf: tf,
             since: since, until: until, dropClosedDays: respectsWeekend
         )
@@ -364,5 +482,28 @@ struct ChartPaneView: View {
         while let last = merged.last, last.bucketStart >= cutoff { merged.removeLast() }
         merged.append(contentsOf: recent)
         candles = merged
+    }
+
+    // ── Scroll to latest ──────────────────────────────────────────
+
+    /// True when the visible window's right edge is at or past the
+    /// newest candle. Drives the scroll-to-latest puck's visibility.
+    private var isViewingLatest: Bool {
+        guard candles.count > 0, let d = xDomain else { return true }
+        return d.upperBound >= Double(candles.count - 1)
+    }
+
+    /// Slide the window so its right edge lands on the newest candle,
+    /// preserving the current zoom width. Matches DashboardView's
+    /// `scrollToLatest()`.
+    private func scrollToLatest() {
+        guard candles.count > 0 else { return }
+        let domain = xDomain ?? ChartWindow.defaultDomain(count: candles.count)
+        let span = domain.upperBound - domain.lowerBound
+        let upper = Double(candles.count - 1) + 0.5
+        let lower = max(-0.5, upper - span)
+        withAnimation(.easeInOut(duration: 0.25)) {
+            xDomain = lower ... upper
+        }
     }
 }
