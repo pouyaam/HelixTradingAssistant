@@ -1120,7 +1120,9 @@ struct JournalDetailView: View {
                 Button {
                     aiDayEntries = group.entries
                     aiDayDate = group.day
+                    #if !os(iOS)
                     aiDayScope = .day
+                    #endif
                     aiDayPeriodTitleForGroup(group)
                     aiDayHints = Self.hintLines(for: Self.computeWarnings(group.entries))
                 } label: {
