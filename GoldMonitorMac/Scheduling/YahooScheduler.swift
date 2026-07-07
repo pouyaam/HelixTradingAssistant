@@ -34,6 +34,13 @@ final class YahooScheduler: ObservableObject {
     /// iPad sets this to the selected pair to reduce CPU usage.
     var focusedPairID: String?
 
+    /// Mac: the currently selected pair in the dashboard. Drives
+    /// dual-speed ticking — the selected pair gets live data every
+    /// `fastTickSeconds` (5s), while all other pairs sync every
+    /// `slowTickSeconds` (60min). Set from AppState; `nil` means
+    /// tick everything at the fast rate (fallback).
+    var selectedPairID: String?
+
     /// Timestamp of the last successful update (any source). Drives
     /// the dashboard's "fresh as of …" indicator and the countdown.
     @Published private(set) var lastUpdateAt: Date?
@@ -121,6 +128,11 @@ final class YahooScheduler: ObservableObject {
     /// 10s tick — for the gold-api fallback path. Twelve Data ticks
     /// arrive on their own clock independent of this.
     let tickIntervalSeconds: Int = 10
+
+    /// Mac dual-speed: selected pair ticks at this rate.
+    private let fastTickSeconds: Int = 5
+    /// Mac dual-speed: non-selected pairs tick at this rate.
+    private let slowTickSeconds: Int = 3600
 
     /// Yahoo history sync runs every Nth tick (~60s).
     private let yahooEveryNTicks: Int = 6
@@ -412,14 +424,32 @@ final class YahooScheduler: ObservableObject {
             }
 
         // 2) Bootstrap + polling/sync loop.
+        // Mac: dual-speed — selected pair at 5s, others at 60min.
+        // iPad: single loop via focusedPairID (already gates pairs).
         task = Task { [weak self] in
             await self?.bootstrapAndGapFill(repo: repo)
-            while !Task.isCancelled {
-                let interval = UInt64(self?.tickIntervalSeconds ?? 60) * 1_000_000_000
-                try? await Task.sleep(nanoseconds: interval)
-                if Task.isCancelled { break }
-                await self?.tick(repo: repo)
+            guard let self else { return }
+            // Fast loop: selected pair only (or all when selectedPairID is nil).
+            let fastTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    let interval = UInt64(self?.fastTickSeconds ?? 5) * 1_000_000_000
+                    try? await Task.sleep(nanoseconds: interval)
+                    if Task.isCancelled { break }
+                    await self?.tick(repo: repo, onlyPair: self?.selectedPairID)
+                }
             }
+            // Slow loop: all pairs EXCEPT the selected one.
+            let slowTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    let interval = UInt64(self?.slowTickSeconds ?? 3600) * 1_000_000_000
+                    try? await Task.sleep(nanoseconds: interval)
+                    if Task.isCancelled { break }
+                    await self?.tick(repo: repo, excludePair: self?.selectedPairID)
+                }
+            }
+            // Keep both alive until cancelled.
+            await fastTask.value
+            await slowTask.value
         }
     }
 
@@ -706,15 +736,23 @@ final class YahooScheduler: ObservableObject {
     }
 
     // ── Periodic tick ─────────────────────────────────────────────────
-    private func tick(repo: OHLCRepo) async {
+    /// - onlyPair: if set, only tick this pair (fast loop for selected).
+    /// - excludePair: if set, tick all pairs EXCEPT this one (slow loop
+    ///   for non-selected). When both nil, tick everything.
+    private func tick(repo: OHLCRepo, onlyPair: String? = nil, excludePair: String? = nil) async {
         isFetching = true
         defer { isFetching = false }
         tickCount += 1
 
-        // Filter pairs to only the focused one (iPad optimization) or all (macOS).
+        // Filter pairs: iPad uses focusedPairID, Mac uses onlyPair/excludePair
+        // for dual-speed ticking.
         let activePairs: [PairConfig]
         if let focused = focusedPairID {
             activePairs = pairs.filter { $0.pairID == focused }
+        } else if let only = onlyPair {
+            activePairs = pairs.filter { $0.pairID == only }
+        } else if let exclude = excludePair {
+            activePairs = pairs.filter { $0.pairID != exclude }
         } else {
             activePairs = pairs
         }

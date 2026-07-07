@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // Entry point. Sets up the single window scene with sidebar+content
 // layout. CleanMyMac X uses a single ~1100×720 window with custom
@@ -52,6 +53,10 @@ struct HelixTradingApp: App {
     /// the surrounding @StateObjects exist to wire stores +
     /// subscriptions.
     @StateObject private var autoTrader = AutoTraderEngine()
+
+    /// Combine subscription that syncs `appState.selectedPairID` →
+    /// `yahoo.selectedPairID` for dual-speed ticking.
+    @State private var selectedPairCancellable: AnyCancellable?
 
     var body: some Scene {
         WindowGroup("Helix Trading", id: "main") {
@@ -108,6 +113,14 @@ struct HelixTradingApp: App {
                         ctrader.start(database: db) { [weak yahoo] price, pairID, source in
                             yahoo?.applyExternalTick(price: price, pairID: pairID, source: source)
                         }
+                        // Mac dual-speed: selected pair gets live data
+                        // every 5s, all others every 60min.
+                        yahoo.selectedPairID = appState.selectedPairID
+                        selectedPairCancellable = appState.$selectedPairID
+                            .removeDuplicates()
+                            .sink { [weak yahoo] id in
+                                yahoo?.selectedPairID = id
+                            }
                     }
                 }
         }
