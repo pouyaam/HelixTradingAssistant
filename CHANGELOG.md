@@ -4,6 +4,43 @@ All notable changes to Helix Trading App are documented here.
 
 ---
 
+## [v1.5] — 2026-07-06
+
+**iPad app, device deploy tooling, and chart performance overhaul.**
+
+### New Features
+
+- **Native iPad app** — a full SwiftUI iPad target (`HelixTradingAppiPad`) sharing the same data model, AI engines, indicators, and storage layer as the Mac app. Uses `NavigationSplitView` with a sidebar for navigation and a pair-selector dropdown in the dashboard header. All chart controls (timeframe, chart type, indicators, layers, drawings, replay, alerts, AI analyze, debug, fullscreen) are available in the chart toolbar. Supports portrait, landscape, and all orientations on iPad.
+- **`./run.sh --ipad`** — lists all iPad simulators (with iOS version and boot state) and real devices, prompts for a selection, builds the iPad target, and installs + launches on the chosen device. Handles automatic signing, simulator boot, and `xcrun devicectl` for real device deployment.
+- **Focused pair syncing** — `YahooScheduler.focusedPairID` limits data fetching to the currently selected pair. iPad sets this automatically on boot and on pair change, reducing CPU usage and battery drain. Grid chart panes skip data loading entirely when hidden.
+
+### Performance — iPad Chart
+
+- **Crosshair uses `onContinuousHover`** — replaced the `LongPressGesture` + `DragGesture` crosshair with the system-optimized `onContinuousHover` handler (iOS 16+), eliminating the full gesture state machine overhead on every touch frame.
+- **Drag gesture deadzone** — added a 3px movement threshold before panning begins, preventing finger jitter from triggering state writes. Y-axis lock threshold increased from 3px to 6px.
+- **Throttled pinch-to-zoom** — increased `minimumScaleDelta` from 0.01 to 0.02 and clamped scale range to 0.1–20, reducing gesture update frequency on ProMotion displays.
+- **Hidden pane optimization** — `ChartPaneView` now guards its initial `.task` data load with `isVisible`, so grid panes that aren't on screen skip candle loading entirely.
+
+### iPad UI
+
+- **Fullscreen charts** — single chart and grid pane fullscreen both use the same `chartCard` view (chromeless, zero padding, full toolbar). Exiting fullscreen from the chartCard button properly restores the grid layout.
+- **Pair selector dropdown** — replaces the sidebar pair list; shows all pairs with a checkmark on the active one.
+- **Compact toolbar** — chart toolbar buttons reduced from 44×44 with circle backgrounds to 32×32 flat icons, matching the Mac toolbar style.
+- **App icon** — generated all iPad icon sizes from the Mac 1024px source icon.
+- **Launch storyboard** — `LaunchScreen.storyboard` with landscape fullscreen device configuration, added via `project.yml` so it survives `xcodegen generate`.
+- **SF Symbol fix** — replaced invalid `"layers"` symbol with `"square.3.layers.3d"`.
+
+### Mac App
+
+- **ChartGrid fullscreen sync** — `ChartGridView` now watches `app.isChartFullscreen` and clears `fullscreenPaneID` when fullscreen exits externally, fixing the case where a grid pane stayed "fullscreen" internally after the chartCard's exit button was tapped.
+- **ChartPaneView hidden-pane guard** — grid pane initial data load skips when the pane is not visible.
+
+### Bug Fixes
+
+- **Info.plist keys survive regeneration** — `UILaunchStoryboardName` and `UISupportedInterfaceOrientations~ipad` are now set in `project.yml` properties instead of directly in the plist, so `xcodegen generate` doesn't strip them.
+- **Removed hardcoded credentials** — OpenCode server URL, model, and password no longer baked into the iPad entry point.
+
+---
 ## [v1.4 build 5] — 2026-07-05
 
 **Async data pipeline, incremental fetching, and streaming AI performance.**

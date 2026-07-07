@@ -76,3 +76,79 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+  HelixTradingAppiPad:
+    type: application
+    platform: iOS
+    sources:
+      - path: GoldMonitorMac
+        excludes:
+          - "**/Resources/**"
+          - "**/ClaudeEngine.swift"
+          - "**/CodexEngine.swift"
+          - "**/ClaudeModelCatalog.swift"
+          - "**/WindowConfigurator.swift"
+          - "**/ChartView.swift"
+          - "**/RootView.swift"
+          - "**/HelixTradingApp.swift"
+          - "**/DashboardView.swift"
+          - "**/SidebarView.swift"
+          - "**/SettingsView.swift"
+          - "**/AnalysisPage.swift"
+          - "**/ScrollZoomCatcher.swift"
+          - "**/DrawingDeleteKeyHandler.swift"
+          - "**/WhatsNewView.swift"
+          - "**/WizardView.swift"
+          - "**/ReleaseNotes.swift"
+          - "**/UpdateChecker.swift"
+          - "**/FetcherTimerView.swift"
+          - "**/JournalDayAISheet.swift"
+          - "**/JournalAISheet.swift"
+          - "**/ChartControlsFAB.swift"
+          - "**/DebugLogSheet.swift"
+          - "**/DrawingInspector.swift"
+          - "**/ChartSkeleton.swift"
+          - "**/RiskCalculatorView.swift"
+          - "**/CTraderBridgeCard.swift"
+          - "**/UpdatesCard.swift"
+          - "**/AnalysisActionDock.swift"
+          - "**/AnalysisAspectCard.swift"
+          - "**/AnalysisHistoryView.swift"
+          - "**/AnalysisPlansColumn.swift"
+          - "**/AnalysisReportColumn.swift"
+          - "**/Info.plist"
+      - path: ipadapp/HelixTradingApp-iPad
+      - path: CTraderBridge/HelixBridgeBot.cs
+        buildPhase: resources
+    resources:
+      - path: ipadapp/HelixTradingApp-iPad/Resources/Assets.xcassets
+      - path: ipadapp/HelixTradingApp-iPad/Resources/LaunchScreen.storyboard
+    dependencies:
+      - package: GRDB
+        product: GRDB
+      - package: MarkdownUI
+        product: MarkdownUI
+    info:
+      path: ipadapp/HelixTradingApp-iPad/Info.plist
+      properties:
+        CFBundleName: HelixTrading
+        CFBundleDisplayName: Helix Trading
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        LSApplicationCategoryType: public.app-category.finance
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        UILaunchStoryboardName: LaunchScreen
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: club.helixtrading.app.ipad
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        TARGETED_DEVICE_FAMILY: 2
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        CODE_SIGN_STYLE: Automatic

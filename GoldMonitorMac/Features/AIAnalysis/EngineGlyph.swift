@@ -13,8 +13,10 @@ extension AIEngineKind {
     /// glyph + the selected-engine ring.
     var brandColor: Color {
         switch self {
+        #if !os(iOS)
         case .claude:   return Color(red: 0.84, green: 0.46, blue: 0.33)   // #D6764F-ish
         case .codex:    return Color(red: 0.06, green: 0.64, blue: 0.50)   // #10A37F-ish
+        #endif
         case .opencode: return Color(red: 0.39, green: 0.40, blue: 0.42)   // #636669-ish
         }
     }
@@ -31,6 +33,7 @@ struct EngineGlyph: View {
     var body: some View {
         Group {
             switch kind {
+            #if !os(iOS)
             case .claude:
                 ClaudeBurst()
                     .stroke(
@@ -43,6 +46,7 @@ struct EngineGlyph: View {
                         kind.brandColor,
                         style: StrokeStyle(lineWidth: size * 0.10, lineJoin: .round)
                     )
+            #endif
             case .opencode:
                 OpenCodeTerminal()
                     .stroke(

@@ -5,7 +5,7 @@ import Foundation
 ///
 /// Subscribes to two room types per symbol:
 ///   - `term-room-@SYMBOL`            → spot tick (price + timestamp)
-///   - `symbol-room-@SYMBOL@TF@0`     → OHLCV bar update (1m + 1D)
+///   - `symbol-room-@SYMBOL@TF@0`     → OHLCV bar update (1m/5m/15m/30m/1h/4h/1D)
 ///
 /// Socket.IO v4 (EIO=4) protocol is handled inline — no third-party lib:
 ///   1. EIO OPEN (`0{…}`) — server, contains ping interval.
@@ -66,6 +66,11 @@ final class FarazWebSocketStream {
         for sym in symbols {
             r.append("term-room-@\(sym)")
             r.append("symbol-room-@\(sym)@1@0")
+            r.append("symbol-room-@\(sym)@5@0")
+            r.append("symbol-room-@\(sym)@15@0")
+            r.append("symbol-room-@\(sym)@30@0")
+            r.append("symbol-room-@\(sym)@60@0")
+            r.append("symbol-room-@\(sym)@240@0")
             r.append("symbol-room-@\(sym)@1D@0")
         }
         self.rooms = r
@@ -229,6 +234,7 @@ final class FarazWebSocketStream {
         case "1":   return "1m"
         case "5":   return "5m"
         case "15":  return "15m"
+        case "30":  return "30m"
         case "60":  return "1h"
         case "240": return "4h"
         case "1D":  return "1d"

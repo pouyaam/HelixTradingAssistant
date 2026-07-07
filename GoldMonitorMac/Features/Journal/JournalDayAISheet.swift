@@ -554,8 +554,12 @@ struct JournalDayAISheet: View {
 
                 if !output.isEmpty {
                     Button {
+                        #if os(iOS)
+                        UIPasteboard.general.string = output
+                        #else
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(output, forType: .string)
+                        #endif
                     } label: {
                         Label("Copy", systemImage: "doc.on.doc")
                             .font(.system(size: 11, weight: .semibold))

@@ -5,6 +5,7 @@
 #   ./run.sh                # debug build, install deps + regen + build + launch
 #   ./run.sh --debug        # debug configuration (the default, stated explicitly)
 #   ./run.sh --release      # release configuration
+#   ./run.sh --ipad          # list iPad devices (sim + real), pick, build & run
 #   ./run.sh --dmg          # package a distributable .dmg (implies --release, no launch)
 #   ./run.sh --sign         # ad-hoc code-sign the .app before packaging (implies --dmg)
 #   ./run.sh --sign=<id>    # sign with a named identity, e.g. "Developer ID Application: …"
@@ -51,6 +52,7 @@ QUIET=false
 SKIP_DEPS=false
 DMG=false
 SIGN=""   # empty = don't sign; "-" = ad-hoc; otherwise a named identity
+IPAD=false
 
 # ── Args ───────────────────────────────────────────────────────────
 for arg in "$@"; do
@@ -68,6 +70,7 @@ for arg in "$@"; do
     --sign)       SIGN="-";            DMG=true; CONFIG="Release"; LAUNCH=false ;;
     --sign=*)     SIGN="${arg#*=}";    DMG=true; CONFIG="Release"; LAUNCH=false ;;
     --clean)      CLEAN=true ;;
+    --ipad)       IPAD=true ;;
     --no-launch)  LAUNCH=false ;;
     --quiet)      QUIET=true ;;
     --skip-deps)  SKIP_DEPS=true ;;
@@ -79,6 +82,12 @@ for arg in "$@"; do
       exit 2 ;;
   esac
 done
+
+# --ipad switches to the iPad scheme and handles its own launch flow.
+if [ "$IPAD" = true ]; then
+  SCHEME="HelixTradingAppiPad"
+  LAUNCH=false   # we launch manually via simctl / xcodebuild -run
+fi
 
 # ── Logging helpers ────────────────────────────────────────────────
 log()  { printf "\033[1;34m▸ %s\033[0m\n" "$*"; }
@@ -211,13 +220,22 @@ log "Building $SCHEME ($CONFIG)"
 # Predictable derived-data location — keeps the .app at a known path
 # instead of buried under DerivedData/${SCHEME}-${HASH}/Build/...
 DERIVED="$SCRIPT_DIR/build"
-APP_PATH="$DERIVED/Build/Products/$CONFIG/$SCHEME.app"
+
+if [ "$IPAD" = true ]; then
+  # iPad: build for "Any iOS Simulator" so we get a universal sim build;
+  # the actual device is chosen at install time.
+  APP_PATH="$DERIVED/Build/Products/$CONFIG-iphonesimulator/$SCHEME.app"
+  DESTINATION="generic/platform=iOS Simulator"
+else
+  APP_PATH="$DERIVED/Build/Products/$CONFIG/$SCHEME.app"
+  DESTINATION="platform=macOS"
+fi
 
 BUILD_ARGS=(
   -project "$PROJECT"
   -scheme "$SCHEME"
   -configuration "$CONFIG"
-  -destination 'platform=macOS'
+  -destination "$DESTINATION"
   -derivedDataPath "$DERIVED"
   -skipPackagePluginValidation
   -skipMacroValidation
@@ -303,7 +321,154 @@ if [ "$DMG" = true ]; then
 fi
 
 # ── Step 6: Launch ─────────────────────────────────────────────────
-if [ "$LAUNCH" = true ]; then
+if [ "$IPAD" = true ]; then
+  # ── iPad: list devices, let user pick, install & launch ────────
+  log "Scanning for iPad devices"
+
+  # Collect simulators (booted first, then shutdown) and real devices.
+  # Format: "UDID | Name | OS | State"
+  DEVICES=()
+  IDX=0
+  CURRENT_OS=""
+
+  # Simulators — parse xcrun simctl list devices output.  Section
+  # headers are "-- iOS 18.2 --", device lines are:
+  #   iPad Name (UDID) (State)
+  while IFS= read -r line; do
+    # Track current OS version from section headers
+    if [[ "$line" =~ ^--[[:space:]]+iOS[[:space:]]+([0-9.]+) ]]; then
+      CURRENT_OS="${BASH_REMATCH[1]}"
+      continue
+    fi
+
+    # Skip headers, empty lines, and non-device lines
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$line" == "=="* ]] && continue
+    [[ "$line" == "Known"* ]] && continue
+    [[ "$line" == "--"* ]] && continue
+    [[ "$line" =~ [A-F0-9]{8}- ]] || continue
+
+    # Simulator format: "    iPad (A16) (UDID) (State)"
+    # The UDID is always a UUID (8-4-4-4-12 hex). Extract it first,
+    # then derive name and state from the remaining parts.
+    udid=$(echo "$line" | grep -oE '[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}')
+    [ -z "$udid" ] && continue
+    # Name = everything before the UDID token
+    name=$(echo "$line" | sed "s/ *([A-F0-9-]*${udid}.*//" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    # State = word inside parens right after UDID
+    state=$(echo "$line" | grep -oE "${udid}\) \([A-Za-z ]+\)" | sed "s/${udid}) *(//;s/).*//")
+    [ -z "$name" ] && continue
+
+    IDX=$((IDX + 1))
+    icon="📱"
+    [ "$state" = "Booted" ] && icon="🟢"
+    DEVICES+=("$udid|$name|$CURRENT_OS|$state|sim")
+    printf "  \033[1;36m%d)\033[0m %s %s (iOS %s) [%s]\n" "$IDX" "$icon" "$name" "$CURRENT_OS" "$state"
+  done < <(xcrun simctl list devices iPad available 2>/dev/null)
+
+  # Real devices — parse xcrun xctrace list devices
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$line" == "=="* ]] && continue
+    [[ "$line" == *"--"* ]] && continue
+    [[ "$line" == *"Simulator"* ]] && continue
+    [[ "$line" == *"MacBook"* ]] && continue
+    [[ "$line" == *"Watch"* ]] && continue
+    # Must contain a UUID-like hex string and a version number
+    [[ "$line" =~ [0-9A-F]{8}- ]] || continue
+    [[ "$line" =~ [0-9]+\.[0-9]+ ]] || continue
+
+    # Format: "Name (OS) (UDID)" — split by parentheses
+    name=$(echo "$line" | awk -F'[()]' '{print $1}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    os_ver=$(echo "$line" | awk -F'[()]' '{print $2}')
+    udid=$(echo "$line" | awk -F'[()]' '{print $(NF-1)}')
+    [ -z "$udid" ] && continue
+    [ -z "$name" ] && continue
+
+    IDX=$((IDX + 1))
+    DEVICES+=("$udid|$name|$os_ver|connected|real")
+    printf "  \033[1;32m%d)\033[0m 🔌 %s (iOS %s) [connected]\n" "$IDX" "$name" "$os_ver"
+  done < <(xcrun xctrace list devices 2>/dev/null)
+
+  if [ ${#DEVICES[@]} -eq 0 ]; then
+    die "No iPad devices or simulators found. Open Simulator.app or connect a device."
+  fi
+
+  echo ""
+  read -r -p "Pick a device (1-$IDX): " choice
+  [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$IDX" ] \
+    || die "Invalid choice."
+
+  IFS='|' read -r DEV_UDID DEV_NAME DEV_OS DEV_STATE DEV_TYPE <<< "${DEVICES[$((choice - 1))]}"
+  ok "Selected: $DEV_NAME ($DEV_UDID)"
+
+  if [ "$DEV_TYPE" = "sim" ]; then
+    # Boot the simulator if it's not already running
+    if [ "$DEV_STATE" != "Booted" ]; then
+      log "Booting simulator $DEV_NAME"
+      xcrun simctl boot "$DEV_UDID" 2>/dev/null || true
+    fi
+    # Open Simulator.app so the user can see it
+    open -a Simulator --args -CurrentDeviceUDID "$DEV_UDID" 2>/dev/null || true
+    sleep 1
+
+    log "Installing $SCHEME on $DEV_NAME"
+    xcrun simctl install "$DEV_UDID" "$APP_PATH"
+
+    # Derive the bundle ID from the built Info.plist
+    BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
+                  "$APP_PATH/Info.plist" 2>/dev/null)
+    [ -n "$BUNDLE_ID" ] || die "Could not read CFBundleIdentifier from $APP_PATH/Info.plist"
+
+    log "Launching $BUNDLE_ID on $DEV_NAME"
+    xcrun simctl launch "$DEV_UDID" "$BUNDLE_ID"
+    ok "$SCHEME launched on $DEV_NAME (simulator)"
+  else
+    # Real device — build, then install & launch via devicectl
+    log "Installing & launching $SCHEME on $DEV_NAME"
+
+    # Detect development team: env var > security keychain > error
+    team_id="${DEVELOPMENT_TEAM:-}"
+    if [ -z "$team_id" ]; then
+      team_id=$(security find-identity -v -p codesigning 2>/dev/null \
+        | grep -oE '[A-F0-9]{10}' | head -1)
+    fi
+    if [ -z "$team_id" ]; then
+      die "No development team found. Either:
+  1) Open Xcode → Settings → Accounts → sign in with your Apple ID
+  2) Or run: DEVELOPMENT_TEAM=<your-team-id> ./run.sh --ipad
+You can find your team id at https://developer.apple.com/account"
+    fi
+
+    # Build for device with signing
+    xcodebuild \
+      -project "$PROJECT" \
+      -scheme "$SCHEME" \
+      -configuration "$CONFIG" \
+      -destination "id=$DEV_UDID" \
+      -derivedDataPath "$DERIVED" \
+      -skipPackagePluginValidation \
+      -skipMacroValidation \
+      -allowProvisioningUpdates \
+      DEVELOPMENT_TEAM="$team_id" \
+      CODE_SIGN_STYLE=Automatic \
+      build
+
+    # Find the built .app for device
+    app_glob="$DERIVED/Build/Products/$CONFIG-iphoneos/$SCHEME.app"
+    device_app=$(ls -d $app_glob 2>/dev/null | head -1)
+    [ -d "$device_app" ] || die "Device build succeeded but .app not found at $app_glob"
+
+    # Install and launch via devicectl (Xcode 15+)
+    xcrun devicectl device install app --device "$DEV_UDID" "$device_app"
+    BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
+                  "$device_app/Info.plist" 2>/dev/null)
+    [ -n "$BUNDLE_ID" ] || die "Could not read CFBundleIdentifier from $device_app/Info.plist"
+    xcrun devicectl device process launch --device "$DEV_UDID" "$BUNDLE_ID"
+    ok "$SCHEME launched on $DEV_NAME (device)"
+  fi
+
+elif [ "$LAUNCH" = true ]; then
   log "Launching $SCHEME"
   # Kill any already-running instance so the fresh build is what
   # shows up on screen instead of an older still-open window.

@@ -42,6 +42,15 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     /// back inside) are kept at lower opacity with a dashed outline.
     /// Ported from LuxAlgo's PineScript v5 FVG indicator (CC BY-NC-SA 4.0).
     case fairValueGap
+    /// Sonarlab Order Blocks — momentum-based OB detection using a
+    /// custom ROC (Rate of Change) of opens over 4 bars. When ROC
+    /// crosses above/below a sensitivity threshold the last
+    /// counter-trend candle within bars 4–15 is marked as an order
+    /// block. Ported from ClayeWeight's PineScript v5 "Sonarlab -
+    /// Order Blocks" (MPL 2.0).
+    case sonarlabOrderBlock
+    /// FVG-First → OB Back — FVG triggers backward search for originating OB.
+    case fvgFirstOB
 
     var id: String { rawValue }
 
@@ -59,6 +68,8 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .tradingSession: return "Trading Sessions"
         case .nyOpenSetup:    return "NY Open Setup"
         case .fairValueGap:   return "Fair Value Gap"
+        case .sonarlabOrderBlock: return "Sonarlab OB"
+        case .fvgFirstOB:        return "FVG→OB"
         }
     }
 
@@ -77,6 +88,8 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .tradingSession:    return "Trading Sessions"
         case .nyOpenSetup:       return "NY Open Setup"
         case .fairValueGap:      return "Fair Value Gap"
+        case .sonarlabOrderBlock: return "Sonarlab Order Blocks"
+        case .fvgFirstOB:        return "FVG→OB"
         }
     }
 
@@ -105,6 +118,11 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         // FVG fills green/red per direction on the chart; the Layers swatch
         // is a soft teal that reads as "imbalance / gap zones layer".
         case .fairValueGap: return Color(red: 0.30, green: 0.80, blue: 0.75) // teal
+        // Sonarlab OB uses a warm violet to distinguish it from the
+        // standard Order Blocks' indigo.
+        case .sonarlabOrderBlock: return Color(red: 0.80, green: 0.45, blue: 0.90) // violet
+        // FVG→OB — soft lavender, the inverse flow indicator.
+        case .fvgFirstOB:        return Color(red: 0.70, green: 0.60, blue: 1.00) // lavender
         }
     }
 }
@@ -250,6 +268,10 @@ enum Indicators {
             // FVG renders as zone rectangles in ChartView's `indicatorFvgMarks`
             // (see `FairValueGap`), not a line series.
             case .fairValueGap: pts = []
+            // Sonarlab OB renders as zone rectangles in ChartView's
+            // `sonarlabOBMarks`, not a line series.
+            case .sonarlabOrderBlock: pts = []
+            case .fvgFirstOB:        pts = []
             }
             return pts.isEmpty ? nil : (kind, pts)
         }

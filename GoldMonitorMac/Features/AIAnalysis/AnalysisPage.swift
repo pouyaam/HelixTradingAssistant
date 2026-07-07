@@ -1046,11 +1046,11 @@ struct AnalysisPage: View {
     /// starter questions, not analysis recipes.
     private var customChips: [AnalysisReportColumn.InputChip] {
         [
-            .init(label: "Setup?",       body: "What's the cleanest trade setup on this pair right now? Give me entry, TP, SL."),
-            .init(label: "Key levels",   body: "List the 3-5 most important support and resistance levels and emit a LEVELS_JSON block."),
-            .init(label: "Find FVGs",    body: "Identify any unmitigated fair-value gaps in the visible bars and emit an FVG_JSON block."),
-            .init(label: "Long bias",    body: "I want to go long. Where would you enter, where's TP, where's the invalidation? Emit SCENARIO_JSON."),
-            .init(label: "Short bias",   body: "I want to go short. Where would you enter, where's TP, where's the invalidation? Emit SCENARIO_JSON."),
+            .init(id: "setup",    label: "Setup?",       body: "What's the cleanest trade setup on this pair right now? Give me entry, TP, SL."),
+            .init(id: "levels",   label: "Key levels",   body: "List the 3-5 most important support and resistance levels and emit a LEVELS_JSON block."),
+            .init(id: "fvgs",     label: "Find FVGs",    body: "Identify any unmitigated fair-value gaps in the visible bars and emit an FVG_JSON block."),
+            .init(id: "long",     label: "Long bias",    body: "I want to go long. Where would you enter, where's TP, where's the invalidation? Emit SCENARIO_JSON."),
+            .init(id: "short",    label: "Short bias",   body: "I want to go short. Where would you enter, where's TP, where's the invalidation? Emit SCENARIO_JSON."),
         ]
     }
 

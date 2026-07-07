@@ -37,7 +37,13 @@ struct ChartGridView<FullscreenToolbar: View>: View {
     /// pane can be fullscreen at a time — going fullscreen hides every
     /// sibling pane (and, via `app.isChartFullscreen`, the sidebar and
     /// pair header too) so exactly one chart fills the window.
-    @State private var fullscreenPaneID: UUID?
+    /// Lifted to MultiChartLayoutStore so the parent DashboardView can
+    /// observe it and sync toolbar controls to the pane's state. (Grid
+    /// fullscreen toolbar binding fix.)
+    private var fullscreenPaneID: UUID? {
+        get { layoutStore.fullscreenPaneID }
+        nonmutating set { layoutStore.fullscreenPaneID = newValue }
+    }
 
     var body: some View {
         let panes = layoutStore.panes
@@ -148,6 +154,11 @@ struct ChartGridView<FullscreenToolbar: View>: View {
         .onChange(of: fullscreenPaneID) { id in
             app.isChartFullscreen = id != nil
         }
+        // When the chartCard's fullscreen button exits fullscreen,
+        // clear the local pane fullscreen state so the grid restores.
+        .onChange(of: app.isChartFullscreen) { isFull in
+            if !isFull { fullscreenPaneID = nil }
+        }
         // A layout change (e.g. 2×2 → 2 columns) can drop the
         // fullscreen pane entirely — always land back in the grid
         // rather than showing a stale, now-nonexistent pane.
@@ -192,6 +203,7 @@ struct ChartGridView<FullscreenToolbar: View>: View {
             .help(app.isChartFullscreen ? "Exit fullscreen" : "Fullscreen the whole grid")
         }
     }
+
 
     // MARK: - Pane slot (fixed grid cell)
 

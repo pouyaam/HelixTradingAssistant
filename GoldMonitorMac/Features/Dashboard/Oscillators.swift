@@ -124,6 +124,23 @@ struct OscillatorConfig: Codable, Equatable {
     var fvgThreshold: Double = 0.0
     var fvgShowMitigated: Bool = true
 
+    // Sonarlab Order Blocks parameters (ClayeWeight PineScript v5 port).
+    // `sonarlabSensitivity` is the ROC threshold (Pine default 26 → 0.26
+    // after /100). `sonarlabMitigationType` is "Close" (default) or "Wick"
+    // — how a block is invalidated once price revisits it.
+    var sonarlabSensitivity: Double = 26.0
+    var sonarlabMitigationType: String = "Close"
+
+    // FVG→OB parameters.
+    var fvobFVGThreshold: Double = 0.0
+    var fvobShowMitigated: Bool = false
+    var fvobSearchMin: Int = 4
+    var fvobSearchMax: Int = 15
+    var fvobShowExhausted: Bool = true
+    var fvobDetectVolume: Bool = false
+    var fvobVolumeMultiplier: Double = 1.2
+    var fvobNotifyEvents: Bool = false
+
     // We decode every field with `decodeIfPresent` (see init(from:)) so
     // adding a field no longer requires bumping this key — an older
     // payload that predates the field just falls back to its default
@@ -173,6 +190,16 @@ struct OscillatorConfig: Codable, Equatable {
         nyAMOnly           = try c.decodeIfPresent(Bool.self,   forKey: .nyAMOnly)           ?? true
         fvgThreshold       = try c.decodeIfPresent(Double.self, forKey: .fvgThreshold)       ?? 0.0
         fvgShowMitigated   = try c.decodeIfPresent(Bool.self,   forKey: .fvgShowMitigated)   ?? true
+        sonarlabSensitivity = try c.decodeIfPresent(Double.self, forKey: .sonarlabSensitivity) ?? 26.0
+        sonarlabMitigationType = try c.decodeIfPresent(String.self, forKey: .sonarlabMitigationType) ?? "Close"
+        fvobFVGThreshold   = try c.decodeIfPresent(Double.self, forKey: .fvobFVGThreshold)   ?? 0.0
+        fvobShowMitigated  = try c.decodeIfPresent(Bool.self,   forKey: .fvobShowMitigated)  ?? false
+        fvobSearchMin      = try c.decodeIfPresent(Int.self,    forKey: .fvobSearchMin)      ?? 4
+        fvobSearchMax      = try c.decodeIfPresent(Int.self,    forKey: .fvobSearchMax)      ?? 15
+        fvobShowExhausted  = try c.decodeIfPresent(Bool.self,   forKey: .fvobShowExhausted)  ?? true
+        fvobDetectVolume   = try c.decodeIfPresent(Bool.self,   forKey: .fvobDetectVolume)   ?? false
+        fvobVolumeMultiplier = try c.decodeIfPresent(Double.self, forKey: .fvobVolumeMultiplier) ?? 1.2
+        fvobNotifyEvents   = try c.decodeIfPresent(Bool.self,   forKey: .fvobNotifyEvents)   ?? false
     }
 
     /// Whether the given `TradingSessions` preset id is toggled on. Used

@@ -78,12 +78,12 @@ enum FarazHistorySource {
             (data, response) = try await URLSession.shared.data(for: req)
         } catch {
             await log(url: url, status: nil, durationMs: Date().timeIntervalSince(start) * 1000,
-                      response: nil, error: error)
+                      response: nil, error: error, headers: req.allHTTPHeaderFields)
             throw error
         }
         let durationMs = Date().timeIntervalSince(start) * 1000
         let status = (response as? HTTPURLResponse)?.statusCode
-        await log(url: url, status: status, durationMs: durationMs, response: data, error: nil)
+        await log(url: url, status: status, durationMs: durationMs, response: data, error: nil, headers: req.allHTTPHeaderFields)
 
         guard let http = response as? HTTPURLResponse else { throw FarazError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else {
@@ -186,7 +186,8 @@ enum FarazHistorySource {
     }
 
     private static func log(
-        url: URL, status: Int?, durationMs: Double, response: Data?, error: Error?
+        url: URL, status: Int?, durationMs: Double, response: Data?, error: Error?,
+        headers: [String: String]? = nil
     ) async {
         await MainActor.run {
             NetworkLog.shared.record(
@@ -196,7 +197,8 @@ enum FarazHistorySource {
                 status: status,
                 durationMs: durationMs,
                 response: response,
-                error: error
+                error: error,
+                headers: headers
             )
         }
     }

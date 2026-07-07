@@ -85,7 +85,7 @@ struct AlertSheet: View {
                 .font(.system(size: 14, weight: .bold))
                 .foregroundStyle(Theme.Color.textPrimary)
             if let live = livePrice {
-                Text("· \(ChartView.priceExact(live))")
+                Text("· \(PriceFormat.exact(live))")
                     .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(Theme.Color.textMuted)
             }
@@ -226,10 +226,10 @@ struct AlertSheet: View {
 
     private func alertSummary(_ a: PriceAlert) -> String {
         switch a.kind {
-        case .crossUp:        return "Cross UP @ \(ChartView.priceExact(a.level))"
-        case .crossDown:      return "Cross DOWN @ \(ChartView.priceExact(a.level))"
-        case .scenarioEntry:  return "Entry @ \(ChartView.priceExact(a.level))"
-        case .scenarioSL:     return "Stop loss @ \(ChartView.priceExact(a.level))"
+        case .crossUp:        return "Cross UP @ \(PriceFormat.exact(a.level))"
+        case .crossDown:      return "Cross DOWN @ \(PriceFormat.exact(a.level))"
+        case .scenarioEntry:  return "Entry @ \(PriceFormat.exact(a.level))"
+        case .scenarioSL:     return "Stop loss @ \(PriceFormat.exact(a.level))"
         case .rsiCrossAbove:  return "RSI crosses above \(String(format: "%.0f", a.level))"
         case .rsiCrossBelow:  return "RSI crosses below \(String(format: "%.0f", a.level))"
         }
@@ -412,8 +412,8 @@ struct AlertSheet: View {
                 pairID: pairID,
                 kind: direction.kind,
                 level: level,
-                title: "\(pairName) — \(direction.label.lowercased()) \(ChartView.priceExact(level))",
-                body: "Price \(direction == .crossUp ? "rose through" : "fell through") \(ChartView.priceExact(level)).",
+                title: "\(pairName) — \(direction.label.lowercased()) \(PriceFormat.exact(level))",
+                body: "Price \(direction == .crossUp ? "rose through" : "fell through") \(PriceFormat.exact(level)).",
                 createdAt: Date(),
                 firedAt: nil,
                 enabled: true,

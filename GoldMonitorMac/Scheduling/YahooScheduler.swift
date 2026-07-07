@@ -29,6 +29,11 @@ final class YahooScheduler: ObservableObject {
     /// rather than a separate stored field.
     var latestOuncePrice: Double? { latestPrices["ounce"] }
 
+    /// When set, only this pair is actively synced (all other pairs
+    /// are paused). Set to `nil` to sync all pairs (macOS default).
+    /// iPad sets this to the selected pair to reduce CPU usage.
+    var focusedPairID: String?
+
     /// Timestamp of the last successful update (any source). Drives
     /// the dashboard's "fresh as of …" indicator and the countdown.
     @Published private(set) var lastUpdateAt: Date?
@@ -706,17 +711,25 @@ final class YahooScheduler: ObservableObject {
         defer { isFetching = false }
         tickCount += 1
 
-        // Faraz-driven pairs: the WebSocket provides live price ticks and
-        // 1m / 1D candle updates in real time, so the HTTP poll is only
-        // needed when the WS is stale/disconnected (live fallback) OR every
-        // Nth tick to refresh 5m / 1h / 1d bars the WS doesn't broadcast.
+        // Filter pairs to only the focused one (iPad optimization) or all (macOS).
+        let activePairs: [PairConfig]
+        if let focused = focusedPairID {
+            activePairs = pairs.filter { $0.pairID == focused }
+        } else {
+            activePairs = pairs
+        }
+
+        // Faraz-driven pairs: the WebSocket now provides live price ticks
+        // and candle updates for ALL timeframes (1m/5m/15m/1h/4h/1D) in
+        // real time. HTTP polling is only needed as a fallback when the
+        // WS is stale/disconnected.
         if goldSource == .faraz {
             let wsFresh = farazWSIsFresh()
             let historyTick = tickCount % yahooEveryNTicks == 0
             if !wsFresh {
                 // WS is stale or never connected — HTTP poll every tick as
                 // the primary source for all timeframes.
-                await syncFarazPairs(repo: repo)
+                await syncFarazPairs(repo: repo, pairs: activePairs)
             } else if historyTick {
                 // WS is fresh — only poll for 1h/1d history the WS doesn't
                 // broadcast. 1m/5m come from the WS live ticks.
@@ -732,7 +745,7 @@ final class YahooScheduler: ObservableObject {
         // restore Yahoo-driven history for those pairs.
         if tickCount % yahooEveryNTicks == 0 && goldSource != .faraz {
             await withTaskGroup(of: Void.self) { group in
-                for cfg in pairs {
+                for cfg in activePairs {
                     group.addTask { [self] in
                         await syncYahoo(cfg: cfg, repo: repo)
                     }
@@ -745,12 +758,13 @@ final class YahooScheduler: ObservableObject {
     /// Faraz live/trailing sync for every Faraz-driven pair (gold +
     /// BTC/SOL/ETH). Fans out across pairs so one slow request doesn't
     /// stall the others within a 10s tick.
-    private func syncFarazPairs(repo: OHLCRepo) async {
+    private func syncFarazPairs(repo: OHLCRepo, pairs activePairs: [PairConfig]? = nil) async {
         guard !DataSourceConfig.shared.farazCookie.isEmpty else {
             self.lastError = "faraz: session cookie not set (Settings)."
             return
         }
-        let faraz = pairs.filter { FarazHistorySource.symbolByPairID[$0.pairID] != nil }
+        let allPairs = activePairs ?? pairs
+        let faraz = allPairs.filter { FarazHistorySource.symbolByPairID[$0.pairID] != nil }
         await withTaskGroup(of: Void.self) { group in
             for cfg in faraz {
                 group.addTask { [self] in await self.syncFarazPair(cfg: cfg, repo: repo) }
@@ -789,13 +803,12 @@ final class YahooScheduler: ObservableObject {
         }
     }
 
-    /// Refresh one Faraz pair's fast series (1m + 5m) every tick so the
-    /// chart tail tracks the latest price, and the slow series (1h + 1d)
-    /// every Nth tick (they barely change intra-bar). The newest 1m close
-    /// becomes the published spot price.
+    /// Fallback sync for one Faraz pair when the WS is stale/disconnected.
+    /// Fetches all timeframes (1m/5m/15m/30m/1h/4h/1d) via HTTP so the
+    /// chart stays current even without a live WS connection. The newest
+    /// 1m close becomes the published spot price.
     private func syncFarazPair(cfg: PairConfig, repo: OHLCRepo) async {
-        var tfs = ["1m", "5m"]
-        if tickCount % yahooEveryNTicks == 0 { tfs += ["1h", "1d"] }
+        let tfs = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 
         var newestClose: Double?
         for tf in tfs {

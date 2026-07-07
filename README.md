@@ -134,6 +134,45 @@ You can re-run the wizard any time from **Settings → Run setup wizard**.
 
 ---
 
+## iPad app
+
+A native iPad target (`HelixTradingAppiPad`) shares the same data model, AI
+engines, indicators, and storage as the Mac app. It runs independently — no
+Mac required at runtime.
+
+### Building for iPad
+
+```bash
+# Simulator
+./run.sh --ipad          # lists devices, pick one, build & run
+
+# Real device (requires Apple ID in Xcode → Settings → Accounts)
+DEVELOPMENT_TEAM=<your-team-id> ./run.sh --ipad
+```
+
+`./run.sh --ipad` lists all iPad simulators (with iOS version and boot state)
+and connected real devices. Pick a number and it builds, installs, and launches.
+
+### iPad-specific design
+
+| Feature | iPad |
+|---|---|
+| Navigation | `NavigationSplitView` sidebar (Dashboard, News, Portfolio, Journal, Inbox, Settings) |
+| Pair selection | Dropdown menu in dashboard header (replaces sidebar pair list) |
+| Chart controls | Full toolbar: timeframe, chart type, indicators, layers, drawings, replay, alerts, AI analyze, debug, fullscreen |
+| Fullscreen | Single chart and grid pane fullscreen — same chromeless chartCard |
+| AI engines | OpenCode (remote mode) — Claude/Codex CLI engines are macOS-only |
+| Data syncing | Only the selected pair is synced (`focusedPairID`), reducing CPU usage |
+| Grid charts | Hidden panes skip data loading entirely |
+
+### Requirements
+
+- **iOS 16+** (Apple Charts baseline)
+- **Xcode 15+**
+- A development team for real device deployment (free Apple ID works)
+
+---
+
 ## Manual build (without `run.sh`)
 
 ```bash
@@ -164,6 +203,7 @@ xcodebuild \
 ```
 ./run.sh                # debug build, regen + build + launch
 ./run.sh --release      # release configuration
+./run.sh --ipad         # list iPad devices, pick, build & run
 ./run.sh --clean        # wipe ./build before building (forces SPM re-resolve)
 ./run.sh --no-launch    # build only, don't open the .app
 ./run.sh --quiet        # suppress xcodebuild noise

@@ -43,6 +43,10 @@ final class NetworkLog: ObservableObject {
         let responsePreview: String
         /// `Error.localizedDescription` when the call failed.
         let error: String?
+        /// Request headers captured at call time. Nil for entries
+        /// logged before headers support was added, or for non-HTTP
+        /// sources (WebSocket messages, process spawns).
+        let headers: [String: String]?
     }
 
     @Published private(set) var entries: [Entry] = []
@@ -94,7 +98,8 @@ final class NetworkLog: ObservableObject {
         status: Int?,
         durationMs: Double,
         response: Data?,
-        error: Error?
+        error: Error?,
+        headers: [String: String]? = nil
     ) {
         guard isEnabled else { return }
         let preview = Self.makePreview(from: response)
@@ -107,7 +112,8 @@ final class NetworkLog: ObservableObject {
             status: status,
             durationMs: durationMs,
             responsePreview: preview,
-            error: error?.localizedDescription
+            error: error?.localizedDescription,
+            headers: headers
         )
         entries.insert(entry, at: 0)
         if entries.count > Self.cap {

@@ -360,6 +360,55 @@ struct DashboardView: View {
         userChartType
     }
 
+    // ── Grid fullscreen pane sync ─────────────────────────────────
+    //
+    // When a grid pane goes fullscreen, the toolbar at the top of the
+    // screen binds to the DashboardView's @AppStorage state. The pane's
+    // chart, however, reads from its own per-pane ChartPane struct.
+    // These helpers bridge the gap: on fullscreen entry we copy the
+    // pane's state → dashboard; on each toolbar change we write back
+    // dashboard → pane.
+
+    /// Write a single value to the current fullscreen pane. Returns
+    /// `true` if a pane was updated (callers can use this to skip
+    /// dashboard-specific work when the change is pane-owned).
+    @discardableResult
+    private func syncToFullscreenPane<T: Equatable>(
+        _ keyPath: WritableKeyPath<ChartPane, T>,
+        _ value: T
+    ) -> Bool {
+        guard let fsID = multiChart.fullscreenPaneID,
+              let pane = multiChart.panes.first(where: { $0.id == fsID }),
+              pane[keyPath: keyPath] != value
+        else { return false }
+        var p = pane
+        p[keyPath: keyPath] = value
+        multiChart.updatePane(p)
+        return true
+    }
+
+    /// Push the dashboard's decoded indicator set to the fullscreen pane.
+    private func syncIndicatorsToFullscreenPane() {
+        guard let fsID = multiChart.fullscreenPaneID,
+              let pane = multiChart.panes.first(where: { $0.id == fsID }),
+              pane.indicators != enabledIndicators
+        else { return }
+        var p = pane
+        p.indicators = enabledIndicators
+        multiChart.updatePane(p)
+    }
+
+    /// Push the dashboard's decoded oscillator set to the fullscreen pane.
+    private func syncOscillatorsToFullscreenPane() {
+        guard let fsID = multiChart.fullscreenPaneID,
+              let pane = multiChart.panes.first(where: { $0.id == fsID }),
+              pane.oscillators != enabledOscillators
+        else { return }
+        var p = pane
+        p.oscillators = enabledOscillators
+        multiChart.updatePane(p)
+    }
+
     var body: some View {
         let pair = app.pairs.first(where: { $0.id == app.selectedPairID })
 
@@ -519,11 +568,40 @@ struct DashboardView: View {
             }
         }
         .onChange(of: timeframe) { newValue in
+            // Sync to fullscreen grid pane if active — the pane's
+            // .task(id:) handles its own candle reload.
+            if syncToFullscreenPane(\.timeframe, newValue) { return }
             xDomain = nil   // different bucket size ⇒ refit to data
             yDomain = nil   // drop the manual price scale too
             alertStore.timeframeLabel = newValue.rawValue
             Task { await reloadCandles() }
             warmHistory()   // ensure this timeframe's deep series is filled
+        }
+        .onChange(of: userChartType) { newValue in
+            _ = syncToFullscreenPane(\.chartType, newValue)
+        }
+        .onChange(of: indicatorsRaw) { _ in
+            syncIndicatorsToFullscreenPane()
+        }
+        .onChange(of: oscillatorsRaw) { _ in
+            syncOscillatorsToFullscreenPane()
+        }
+        .onChange(of: showVolume) { newValue in
+            _ = syncToFullscreenPane(\.showVolume, newValue)
+        }
+        // When a grid pane goes fullscreen, copy its state to the
+        // dashboard's @AppStorage so the toolbar controls reflect
+        // the pane's current settings. (Grid fullscreen toolbar
+        // binding fix.)
+        .onChange(of: multiChart.fullscreenPaneID) { fsID in
+            guard let fsID,
+                  let pane = multiChart.panes.first(where: { $0.id == fsID })
+            else { return }
+            timeframe = pane.timeframe
+            userChartType = pane.chartType
+            indicatorsRaw = pane.indicators.map(\.rawValue).sorted().joined(separator: ",")
+            oscillatorsRaw = pane.oscillators.map(\.rawValue).sorted().joined(separator: ",")
+            showVolume = pane.showVolume
         }
         // Cache totalVolume so the O(n) candle iteration only runs
         // when candles change, not on every pan/zoom frame.
@@ -2688,7 +2766,7 @@ struct DashboardView: View {
     /// so users who don't have it turned on pay no extra compute.
     /// Mirrors the RSI-alert feed just above.
     private func notifyOrderBlockEvents(_ candles: [Candle], pairID: String) {
-        guard oscillatorConfig.obNotifyEvents || oscillatorConfig.sobNotifyEvents else { return }
+        guard oscillatorConfig.obNotifyEvents || oscillatorConfig.sobNotifyEvents || oscillatorConfig.fvobNotifyEvents else { return }
         let pairLabel = app.pairs.first(where: { $0.id == pairID })?.name ?? pairID
 
         // Each indicator's full-history `compute` runs on its own
@@ -2721,6 +2799,20 @@ struct DashboardView: View {
                     volumeMultiplier: config.sobVolumeMultiplier
                 )
                 await self.alertStore.evaluateSteroidOrderBlocks(zones, pairID: pairID, pairLabel: pairLabel)
+            }
+        }
+        if oscillatorConfig.fvobNotifyEvents {
+            let config = oscillatorConfig
+            Task.detached(priority: .utility) {
+                let zones = FVGFirstOB.compute(
+                    candles,
+                    fvgThreshold: config.fvobFVGThreshold,
+                    searchMin: config.fvobSearchMin,
+                    searchMax: config.fvobSearchMax,
+                    detectVolume: config.fvobDetectVolume,
+                    volumeMultiplier: config.fvobVolumeMultiplier
+                )
+                await self.alertStore.evaluateFVGFirstOB(zones, pairID: pairID, pairLabel: pairLabel)
             }
         }
     }

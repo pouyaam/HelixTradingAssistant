@@ -332,6 +332,38 @@ struct ChartView: View {
         return indicatorConfig.fvgShowMitigated ? all : all.filter { !$0.isMitigated }
     }
 
+    /// Sonarlab Order Block zones — momentum-based OB detection via ROC.
+    private var sonarlabOBZones: [SonarlabOrderBlocks.Zone] {
+        guard indicators.contains(.sonarlabOrderBlock) else { return [] }
+        let mitType: SonarlabOrderBlocks.MitigationType =
+            indicatorConfig.sonarlabMitigationType == "Wick" ? .wick : .close
+        let all = derived.sonarlabOrderBlocks(
+            candles: candles,
+            sensitivity: indicatorConfig.sonarlabSensitivity,
+            mitigationType: mitType
+        )
+        return Array(all.suffix(Self.maxSonarlabOBs))
+    }
+    private static let maxSonarlabOBs = 20
+
+    /// FVG→OB zones — FVG triggers backward search for originating OB.
+    /// With exhaustion lifecycle (fresh → tested → exhausted) and
+    /// optional volume validation.
+    private var fvgFirstOBZones: [FVGFirstOB.Zone] {
+        guard indicators.contains(.fvgFirstOB) else { return [] }
+        let all = derived.fvgFirstOB(
+            candles: candles,
+            fvgThreshold: indicatorConfig.fvobFVGThreshold,
+            searchMin: indicatorConfig.fvobSearchMin,
+            searchMax: indicatorConfig.fvobSearchMax,
+            detectVolume: indicatorConfig.fvobDetectVolume,
+            volumeMultiplier: indicatorConfig.fvobVolumeMultiplier
+        )
+        let filtered = indicatorConfig.fvobShowExhausted ? all : all.filter { $0.status != .exhausted }
+        return Array(filtered.suffix(Self.maxFVGFirstOB))
+    }
+    private static let maxFVGFirstOB = 10
+
     /// Session runs to draw: the *current day only* instance of every
     /// enabled preset — i.e. each venue's most recent run, not its whole
     /// history. `TradingSessions.compute` appends runs per-session in
@@ -448,6 +480,8 @@ struct ChartView: View {
             supplyDemandMarks
             orderBlockMarks
             steroidOrderBlockMarks
+            sonarlabOBMarks
+            fvgFirstOBMarks
             scenarioMarks
             tradeMarks
             journalMarks
@@ -1767,6 +1801,162 @@ struct ChartView: View {
     }
 
 
+    /// Sonarlab Order Block zones — momentum-based OB detection via ROC
+    /// of opens over 4 bars. Like the standard OBs, each block is a
+    /// translucent rectangle extending from the originating candle to
+    /// the right edge. Uses the Sonarlab-specific violet accent for the
+    /// midline tag to distinguish from the standard OB layer.
+    @ChartContentBuilder
+    private var sonarlabOBMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(sonarlabOBZones) { zone in
+            sonarlabOBMark(for: zone, lastIndex: lastIndex)
+        }
+    }
+
+    @ChartContentBuilder
+    private func sonarlabOBMark(for zone: SonarlabOrderBlocks.Zone, lastIndex: Int) -> some ChartContent {
+        let baseColor: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
+        let accentColor = IndicatorKind.sonarlabOrderBlock.color
+        let xStart = Double(zone.index)
+        let xEnd   = Double(lastIndex)
+
+        // Fill
+        RectangleMark(
+            xStart: .value("SOB start", xStart),
+            xEnd:   .value("SOB end",   xEnd),
+            yStart: .value("SOB low",   zone.low),
+            yEnd:   .value("SOB high",  zone.high)
+        )
+        .foregroundStyle(baseColor.opacity(0.12))
+
+        // Top edge
+        RuleMark(
+            xStart: .value("SOB start hi", xStart),
+            xEnd:   .value("SOB end hi",   xEnd),
+            y:      .value("SOB hi",       zone.high)
+        )
+        .foregroundStyle(baseColor.opacity(0.70))
+        .lineStyle(StrokeStyle(lineWidth: 1.0))
+
+        // Bottom edge
+        RuleMark(
+            xStart: .value("SOB start lo", xStart),
+            xEnd:   .value("SOB end lo",   xEnd),
+            y:      .value("SOB lo",       zone.low)
+        )
+        .foregroundStyle(baseColor.opacity(0.70))
+        .lineStyle(StrokeStyle(lineWidth: 1.0))
+
+        // Direction tag at the right edge
+        let tagText = zone.isBullish ? "SOB↑" : "SOB↓"
+        PointMark(
+            x: .value("SOB label", xEnd),
+            y: .value("SOB hi",    zone.high)
+        )
+        .symbolSize(0)
+        .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+            Text(tagText)
+                .font(.system(size: 8, weight: .heavy))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(accentColor))
+        }
+    }
+
+    // MARK: - FVG→OB marks
+
+    @ChartContentBuilder
+    private var fvgFirstOBMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(fvgFirstOBZones) { zone in
+            fvgFirstOBMark(for: zone, lastIndex: lastIndex)
+        }
+    }
+
+    private struct FVGFirstOBStyle {
+        let fillOpacity: Double
+        let borderOpacity: Double
+        let borderStyle: StrokeStyle
+        let midLineStyle: StrokeStyle
+        let tagSuffix: String
+        let tagColor: Color
+    }
+
+    private func styleForFVGFirstOB(_ zone: FVGFirstOB.Zone, accentColor: Color) -> FVGFirstOBStyle {
+        switch zone.status {
+        case .fresh:
+            return FVGFirstOBStyle(
+                fillOpacity: 0.14, borderOpacity: 0.70,
+                borderStyle: StrokeStyle(lineWidth: 1.0),
+                midLineStyle: StrokeStyle(lineWidth: 1, dash: [3, 3]),
+                tagSuffix: "", tagColor: accentColor
+            )
+        case .tested:
+            return FVGFirstOBStyle(
+                fillOpacity: 0.07, borderOpacity: 0.35,
+                borderStyle: StrokeStyle(lineWidth: 0.9, dash: [2, 2]),
+                midLineStyle: StrokeStyle(lineWidth: 0.9, dash: [2, 4]),
+                tagSuffix: " · T", tagColor: accentColor.opacity(0.7)
+            )
+        case .exhausted:
+            return FVGFirstOBStyle(
+                fillOpacity: 0.03, borderOpacity: 0.18,
+                borderStyle: StrokeStyle(lineWidth: 0.8, dash: [2, 6]),
+                midLineStyle: StrokeStyle(lineWidth: 0.8, dash: [1, 8]),
+                tagSuffix: " · X", tagColor: Theme.Color.textMuted.opacity(0.8)
+            )
+        }
+    }
+
+    @ChartContentBuilder
+    private func fvgFirstOBMark(for zone: FVGFirstOB.Zone, lastIndex: Int) -> some ChartContent {
+        let baseColor: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
+        let accentColor = IndicatorKind.fvgFirstOB.color
+        let xStart = Double(zone.index)
+        let xEnd   = Double(lastIndex)
+        let style = styleForFVGFirstOB(zone, accentColor: accentColor)
+
+        // Fill
+        RectangleMark(
+            xStart: .value("FVOB start", xStart), xEnd: .value("FVOB end", xEnd),
+            yStart: .value("FVOB low", zone.low),  yEnd: .value("FVOB high", zone.high)
+        )
+        .foregroundStyle(baseColor.opacity(style.fillOpacity))
+
+        // Top edge
+        RuleMark(xStart: .value("FVOB start hi", xStart), xEnd: .value("FVOB end hi", xEnd),
+                 y: .value("FVOB hi", zone.high))
+            .foregroundStyle(baseColor.opacity(style.borderOpacity))
+            .lineStyle(style.borderStyle)
+
+        // Bottom edge
+        RuleMark(xStart: .value("FVOB start lo", xStart), xEnd: .value("FVOB end lo", xEnd),
+                 y: .value("FVOB lo", zone.low))
+            .foregroundStyle(baseColor.opacity(style.borderOpacity))
+            .lineStyle(style.borderStyle)
+
+        // Equilibrium midline
+        RuleMark(xStart: .value("FVOB start avg", xStart), xEnd: .value("FVOB end avg", xEnd),
+                 y: .value("FVOB avg", zone.avg))
+            .foregroundStyle(accentColor.opacity(style.borderOpacity * 0.7))
+            .lineStyle(style.midLineStyle)
+
+        // Tag
+        let tagText = (zone.isBullish ? "FVOB↑" : "FVOB↓") + style.tagSuffix
+        PointMark(x: .value("FVOB label", xEnd), y: .value("FVOB hi", zone.high))
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                Text(tagText)
+                    .font(.system(size: 8, weight: .heavy))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(style.tagColor))
+            }
+    }
+
     /// Indicator-computed FVG zones. Each gap is a translucent rectangle
     /// from the bar where it formed to the right edge of the chart
     /// (extending into the future so the user can watch price approach).
@@ -3066,6 +3256,8 @@ struct ChartView: View {
             + indicatorFvgZones.map { .init(low: $0.low, high: $0.high) }
             + orderBlockZones.map { .init(low: $0.low, high: $0.high) }
             + steroidOrderBlockZones.map { .init(low: $0.low, high: $0.high) }
+            + sonarlabOBZones.map { .init(low: $0.low, high: $0.high) }
+            + fvgFirstOBZones.map { .init(low: $0.low, high: $0.high) }
             + sessionRuns.map { .init(low: $0.low, high: $0.high) }
             + nySetupResults.map { .init(low: $0.orLow, high: $0.orHigh) }
         let drawingPoints: [ChartDerivedCache.PricePoint] = drawings

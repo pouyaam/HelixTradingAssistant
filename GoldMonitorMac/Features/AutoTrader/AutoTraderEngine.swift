@@ -100,8 +100,8 @@ final class AutoTraderEngine: ObservableObject {
     /// AppStorage the analysis page reads from so a model swap in
     /// Settings affects auto-trader runs too.
     private var selectedEngine: AIEngineKind {
-        let raw = UserDefaults.standard.string(forKey: "ai.engine") ?? "claude"
-        return AIEngineKind(rawValue: raw) ?? .claude
+        let raw = UserDefaults.standard.string(forKey: "ai.engine") ?? "opencode"
+        return AIEngineKind(rawValue: raw) ?? .opencode
     }
 
     private var cancellables = Set<AnyCancellable>()

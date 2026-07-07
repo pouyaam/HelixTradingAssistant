@@ -123,20 +123,20 @@ struct ActivateTradeSheet: View {
                     .padding(.vertical, 2)
                     .background(Capsule().fill(biasColor))
                 if let entry = scenario.entry {
-                    Text("Entry \(ChartView.priceShort(entry))")
+                    Text("Entry \(PriceFormat.short(entry))")
                         .font(.system(size: 11, weight: .semibold).monospacedDigit())
                         .foregroundStyle(Theme.Color.textPrimary)
                 }
-                Text("TP \(ChartView.priceShort(scenario.takeProfit))")
+                Text("TP \(PriceFormat.short(scenario.takeProfit))")
                     .font(.system(size: 11, weight: .semibold).monospacedDigit())
                     .foregroundStyle(Theme.Color.success)
-                Text("SL \(ChartView.priceShort(scenario.stopLoss))")
+                Text("SL \(PriceFormat.short(scenario.stopLoss))")
                     .font(.system(size: 11, weight: .semibold).monospacedDigit())
                     .foregroundStyle(Theme.Color.danger)
                 Spacer()
             }
             if let live = livePrice {
-                Text("Current price: \(ChartView.priceShort(live))")
+                Text("Current price: \(PriceFormat.short(live))")
                     .font(.system(size: 10).monospacedDigit())
                     .foregroundStyle(Theme.Color.textMuted)
             }

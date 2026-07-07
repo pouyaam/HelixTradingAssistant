@@ -168,8 +168,12 @@ private struct DayReviewDetailView: View {
                 }
                 Spacer()
                 Button {
+                    #if os(iOS)
+                    UIPasteboard.general.string = review.report
+                    #else
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(review.report, forType: .string)
+                    #endif
                 } label: {
                     Label("Copy", systemImage: "doc.on.doc")
                         .font(.system(size: 11, weight: .semibold))

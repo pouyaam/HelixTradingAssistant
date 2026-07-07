@@ -136,11 +136,19 @@ struct IndicatorSettingsSheet: View {
                 Toggle(isOn: $config.utShowTrailingStop) {
                     checkboxLabel("Show ATR trailing-stop line")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
                 Toggle(isOn: $config.utUseHeikinAshi) {
                     checkboxLabel("Use Heikin Ashi for signals")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
             }
 
             Divider().background(Theme.Color.border)
@@ -156,19 +164,35 @@ struct IndicatorSettingsSheet: View {
                 Toggle(isOn: $config.obUseWicks) {
                     checkboxLabel("Use whole high/low range")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
                 Toggle(isOn: $config.obShowExhausted) {
                     checkboxLabel("Show exhausted blocks")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
                 Toggle(isOn: $config.obDetectSteroids) {
                     checkboxLabel("Filter by volume (Steroids)")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
                 Toggle(isOn: $config.obNotifyEvents) {
                     checkboxLabel("Notify on appear / retest / exhaust")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
             }
 
             Divider().background(Theme.Color.border)
@@ -184,7 +208,11 @@ struct IndicatorSettingsSheet: View {
                 Toggle(isOn: $config.sobUseWicks) {
                     checkboxLabel("Use whole high/low range")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
                 doubleStepper(
                     label: "Volume multiplier",
                     value: $config.sobVolumeMultiplier,
@@ -194,15 +222,27 @@ struct IndicatorSettingsSheet: View {
                 Toggle(isOn: $config.sobShowExhausted) {
                     checkboxLabel("Show exhausted blocks")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
                 Toggle(isOn: $config.sobDetectSteroids) {
                     checkboxLabel("Filter by volume (Steroids)")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
                 Toggle(isOn: $config.sobNotifyEvents) {
                     checkboxLabel("Notify on appear / retest / exhaust")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
             }
 
             Divider().background(Theme.Color.border)
@@ -217,7 +257,82 @@ struct IndicatorSettingsSheet: View {
                 Toggle(isOn: $config.fvgShowMitigated) {
                     checkboxLabel("Show mitigated gaps")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+            }
+
+            Divider().background(Theme.Color.border)
+
+            section(title: "Sonarlab Order Blocks") {
+                doubleStepper(
+                    label: "Sensitivity (ROC threshold)",
+                    value: $config.sonarlabSensitivity,
+                    range: 1.0...100.0,
+                    step: 1.0
+                )
+                Text("Lower = more blocks, higher = fewer blocks. Pine default: 26.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                Picker("Mitigation type", selection: $config.sonarlabMitigationType) {
+                    Text("Close").tag("Close")
+                    Text("Wick").tag("Wick")
+                }
+                .pickerStyle(.segmented)
+                Text("Close: block removed when prior close crosses boundary. Wick: uses current bar's high/low.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider().background(Theme.Color.border)
+
+            section(title: "FVG→OB") {
+                doubleStepper(
+                    label: "Min. FVG gap size %",
+                    value: $config.fvobFVGThreshold,
+                    range: 0.0...5.0,
+                    step: 0.1
+                )
+                periodStepper(label: "Search range (min bars back)", value: $config.fvobSearchMin, range: 1...20)
+                periodStepper(label: "Search range (max bars back)", value: $config.fvobSearchMax, range: 2...30)
+                Toggle(isOn: $config.fvobShowExhausted) {
+                    checkboxLabel("Show exhausted blocks")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                Toggle(isOn: $config.fvobDetectVolume) {
+                    checkboxLabel("Filter by volume (Steroids)")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                doubleStepper(
+                    label: "Volume multiplier",
+                    value: $config.fvobVolumeMultiplier,
+                    range: 0.5...3.0,
+                    step: 0.1
+                )
+                Toggle(isOn: $config.fvobNotifyEvents) {
+                    checkboxLabel("Notify on appear / retest / exhaust")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                Text("Detects FVGs first, then looks backward for the originating counter-trend candle. Zones track fresh → tested → exhausted lifecycle.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Divider().background(Theme.Color.border)
@@ -228,34 +343,62 @@ struct IndicatorSettingsSheet: View {
                 Toggle(isOn: $config.sessShowTokyo) {
                     checkboxLabel("Tokyo · 09:00–15:00 JST")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
                 Toggle(isOn: $config.sessShowLondon) {
                     checkboxLabel("London · 08:30–16:30 UK")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
                 Toggle(isOn: $config.sessShowNewYork) {
                     checkboxLabel("New York · 09:30–16:00 ET")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
 
                 Divider().background(Theme.Color.border.opacity(0.4))
 
                 Toggle(isOn: $config.sessShowNames) {
                     checkboxLabel("Show session names")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
                 Toggle(isOn: $config.sessShowOpenClose) {
                     checkboxLabel("Draw open & close lines")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
                 Toggle(isOn: $config.sessShowRange) {
                     checkboxLabel("Show session range")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
                 Toggle(isOn: $config.sessShowAverage) {
                     checkboxLabel("Show average price line")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
             }
 
             Divider().background(Theme.Color.border)
@@ -273,7 +416,11 @@ struct IndicatorSettingsSheet: View {
                 Toggle(isOn: $config.nyAMOnly) {
                     checkboxLabel("AM kill-zone only (09:35–11:00 ET)")
                 }
-                .toggleStyle(.checkbox)
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
                 Text("Entry at FVG 50%, stop beyond the opening range, target 2R. 1m and 5m charts.")
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.Color.textMuted)

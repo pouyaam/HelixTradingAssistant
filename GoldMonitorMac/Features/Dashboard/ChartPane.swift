@@ -96,6 +96,12 @@ final class MultiChartLayoutStore: ObservableObject {
     /// people splitting a chart want *different* symbols side by side,
     /// not the same symbol at different zoom levels.
     @Published var syncSymbol: Bool { didSet { save() } }
+    /// Which pane (if any) the user has expanded to fullscreen in the
+    /// grid. Nil ⇒ no pane is fullscreen. Lifted from ChartGridView's
+    /// @State so the parent DashboardView can observe it and sync
+    /// toolbar controls to the pane's state. (Grid fullscreen toolbar
+    /// binding fix.)
+    @Published var fullscreenPaneID: UUID?
 
     private static let storageKey = "dashboard.multichart.v3"
 
