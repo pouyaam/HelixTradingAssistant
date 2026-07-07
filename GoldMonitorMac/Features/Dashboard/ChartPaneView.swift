@@ -176,7 +176,8 @@ struct ChartPaneView: View {
                         onSelectDrawing: { id in
                             selectedDrawingID = id
                         },
-                        livePrice: yahoo.latestPrices[pane.pairID]
+                        livePrice: yahoo.latestPrices[pane.pairID],
+                        showHoverTooltip: isFullscreen
                     )
                     #endif
                 }
@@ -244,6 +245,10 @@ struct ChartPaneView: View {
                 Text(displayedPrice(pair))
                     .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(Theme.Color.textMuted)
+            }
+
+            if isFullscreen {
+                indicatorsMenu
             }
 
             Spacer()
@@ -320,6 +325,50 @@ struct ChartPaneView: View {
         }
         .buttonStyle(.plain)
         .help(isFullscreen ? "Exit fullscreen" : "Fullscreen")
+    }
+
+    private var indicatorsMenu: some View {
+        Menu {
+            ForEach(IndicatorKind.allCases) { kind in
+                Button {
+                    var updated = pane
+                    if updated.indicators.contains(kind) { updated.indicators.remove(kind) }
+                    else { updated.indicators.insert(kind) }
+                    onUpdate(updated)
+                } label: {
+                    Label(kind.label, systemImage: pane.indicators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                }
+            }
+            Divider()
+            ForEach(OscillatorKind.allCases) { kind in
+                Button {
+                    var updated = pane
+                    if updated.oscillators.contains(kind) { updated.oscillators.remove(kind) }
+                    else { updated.oscillators.insert(kind) }
+                    onUpdate(updated)
+                } label: {
+                    Label(kind.displayName(config: indicatorConfig), systemImage: pane.oscillators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                }
+            }
+            Divider()
+            Button {
+                var updated = pane
+                updated.showVolume.toggle()
+                onUpdate(updated)
+            } label: {
+                Label("Volume", systemImage: pane.showVolume ? "checkmark.circle.fill" : "circle")
+            }
+        } label: {
+            Text("Indicators")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
     }
 
     /// Right-click menu with every chart option that used to live in

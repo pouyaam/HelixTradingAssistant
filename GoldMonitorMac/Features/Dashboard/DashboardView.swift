@@ -574,8 +574,7 @@ struct DashboardView: View {
             xDomain = nil   // different bucket size ⇒ refit to data
             yDomain = nil   // drop the manual price scale too
             alertStore.timeframeLabel = newValue.rawValue
-            Task { await reloadCandles() }
-            warmHistory()   // ensure this timeframe's deep series is filled
+            warmHistory()   // ensure deep series is filled, then reloads candles
         }
         .onChange(of: userChartType) { newValue in
             _ = syncToFullscreenPane(\.chartType, newValue)
@@ -1040,13 +1039,13 @@ struct DashboardView: View {
                 // sits inside the plot area (overlay-position annotation)
                 // so it's safe to clip here.
                 .clipped()
-                // TradingView-style indicator legend — top-right of chart.
+                // TradingView-style indicator legend — top-left of chart.
                 // Shows every active indicator/oscillator with a per-item
                 // gear button. Applied after .clipped() so it floats freely.
-                .overlay(alignment: .topTrailing) {
+                .overlay(alignment: .topLeading) {
                     indicatorLegendOverlay
                         .padding(.top, 6)
-                        .padding(.trailing, 8)
+                        .padding(.leading, 8)
                 }
                 // Floating chart controls — zoom in/out, reset zoom,
                 // maximise. Lives ON the chart (bottom-right) rather
@@ -1208,9 +1207,31 @@ struct DashboardView: View {
                           ? "checkmark.circle.fill" : "circle")
                 }
                 ForEach(IndicatorKind.allCases) { kind in
-                    Toggle(isOn: indicatorBinding(kind)) {
-                        Label(kind.label, systemImage: enabledIndicators.contains(kind)
-                              ? "checkmark.circle.fill" : "circle")
+                    let isOn = enabledIndicators.contains(kind)
+                    let isHidden = isOn && hiddenIndicators.contains(kind)
+                    Button {
+                        if isOn {
+                            // Toggle visibility (fast show/hide)
+                            setIndicatorHidden(kind, hidden: !isHidden)
+                        } else {
+                            // Enable indicator
+                            setIndicator(kind, enabled: true)
+                        }
+                    } label: {
+                        Label {
+                            HStack(spacing: 6) {
+                                Text(kind.label)
+                                if isOn {
+                                    Image(systemName: isHidden ? "eye.slash" : "eye")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(isHidden ? Theme.Color.textMuted.opacity(0.4) : kind.color)
+                                }
+                            }
+                        } icon: {
+                            Image(systemName: isOn
+                                  ? (isHidden ? "eye.slash" : "checkmark.circle.fill")
+                                  : "circle")
+                        }
                     }
                 }
             }
@@ -1332,7 +1353,7 @@ struct DashboardView: View {
         let panels   = Array(enabledOscillators).sorted { $0.rawValue < $1.rawValue }
         guard !overlays.isEmpty || !panels.isEmpty else { return AnyView(EmptyView()) }
         return AnyView(
-            VStack(alignment: .trailing, spacing: 2) {
+            VStack(alignment: .leading, spacing: 2) {
                 // Collapse / expand toggle
                 Button {
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
@@ -1359,13 +1380,9 @@ struct DashboardView: View {
                 .buttonStyle(.plain)
 
                 if indicatorLegendExpanded {
-                    VStack(alignment: .trailing, spacing: 1) {
+                    VStack(alignment: .leading, spacing: 1) {
                         ForEach(overlays) { kind in
-                            legendRow(
-                                label: kind.label,
-                                color: kind.color,
-                                settingsSection: kind.settingsSection
-                            )
+                            legendOverlayRow(for: kind)
                         }
                         ForEach(panels) { kind in
                             legendRow(
@@ -1379,6 +1396,57 @@ struct DashboardView: View {
                 }
             }
         )
+    }
+
+    /// One row in the expanded indicator legend for overlay indicators,
+    /// with color swatch + name + eye + gear.
+    private func legendOverlayRow(for kind: IndicatorKind) -> some View {
+        let isHidden = hiddenIndicators.contains(kind)
+        return HStack(spacing: 5) {
+            // Color swatch
+            RoundedRectangle(cornerRadius: 2)
+                .fill(isHidden ? kind.color.opacity(0.35) : kind.color)
+                .frame(width: 12, height: 3)
+
+            Text(kind.label)
+                .font(.system(size: 10, weight: .medium).monospacedDigit())
+                .foregroundStyle(isHidden ? kind.color.opacity(0.35) : kind.color)
+                .lineLimit(1)
+
+            // Eye — toggle show/hide.
+            Button {
+                setIndicatorHidden(kind, hidden: !isHidden)
+            } label: {
+                Image(systemName: isHidden ? "eye.slash" : "eye")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(isHidden ? Theme.Color.textMuted.opacity(0.4) : Theme.Color.textSecondary)
+                    .frame(width: 16, height: 16)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Theme.Color.surface.opacity(0.7))
+                    )
+            }
+            .buttonStyle(.plain)
+            .help(isHidden ? "Show on chart" : "Hide on chart")
+
+            // Gear — opens settings.
+            Button {
+                settingsFocusSection = kind.settingsSection
+                showIndicatorSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .frame(width: 16, height: 16)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Theme.Color.surface.opacity(0.7))
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("Settings for \(kind.label)")
+        }
+        .padding(.horizontal, 6)
     }
 
     @ViewBuilder

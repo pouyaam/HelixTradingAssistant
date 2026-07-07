@@ -1599,8 +1599,7 @@ struct ChartViewiPad: View {
             )
             .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
             .padding(12)
-            .transition(.opacity)
-            .animation(.easeOut(duration: 0.1), value: hovered != nil)
+            .transition(.opacity.animation(.easeOut(duration: 0.1)))
         }
     }
 

@@ -144,6 +144,11 @@ struct ChartView: View {
     /// instead of deselecting drawings; panning still works.
     var isPickingReplayAnchor: Bool = false
 
+    /// Whether to show the floating OHLC + Δ tooltip on hover.
+    /// Displayed in the primary chart and fullscreen panes; hidden
+    /// in compact grid panes so it doesn't crowd the small chart area.
+    var showHoverTooltip: Bool = true
+
     /// Called with the clicked bar's index (into `candles`) when the
     /// user picks a replay start bar. DashboardView maps it to that
     /// candle's date and sets the cursor.
@@ -236,7 +241,7 @@ struct ChartView: View {
                 // it stays interactive, and on the right so it doesn't
                 // steal pan/hover from the main canvas.
                 .overlay(alignment: .trailing) { priceAxisScaleStrip }
-                .overlay(alignment: .topLeading) { hoverTooltip }
+                .overlay(alignment: .topTrailing) { Group { if showHoverTooltip { hoverTooltip } } }
                 // No global .animation() modifiers here. Previously:
                 //   .animation(.easeOut(0.15), value: hovered)
                 //   .animation(.easeInOut(0.4), value: candles.count)
@@ -671,7 +676,11 @@ struct ChartView: View {
                         hovered = nil
                     }
                     // 2) Otherwise hit-test the body of any visible drawing.
-                    else if let hit = hitTestDrawing(
+                    //    Skip hit-testing when no drawings exist and no tool
+                    //    is armed — saves iterating all drawings on every
+                    //    mouse-pixel during plain panning.
+                    else if (!drawings.isEmpty || activeTool != .none),
+                            let hit = hitTestDrawing(
                         at: value.startLocation,
                         plotOrigin: plotOrigin,
                         proxy: proxy
@@ -3010,9 +3019,8 @@ struct ChartView: View {
                     )
             )
             .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
-            .padding(12)
-            .transition(.opacity)
-            .animation(.easeOut(duration: 0.1), value: hovered != nil)
+            .padding(EdgeInsets(top: 12, leading: 12, bottom: 12, trailing: 72))
+            .transition(.opacity.animation(.easeOut(duration: 0.1)))
         }
     }
 

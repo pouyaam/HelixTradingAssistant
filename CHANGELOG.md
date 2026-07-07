@@ -39,8 +39,29 @@ All notable changes to Helix Trading App are documented here.
 
 - **Info.plist keys survive regeneration** — `UILaunchStoryboardName` and `UISupportedInterfaceOrientations~ipad` are now set in `project.yml` properties instead of directly in the plist, so `xcodegen generate` doesn't strip them.
 - **Removed hardcoded credentials** — OpenCode server URL, model, and password no longer baked into the iPad entry point.
+---
+
+## [v1.4 build 6] — 2026-07-07
+
+**Chart interaction polish, iPad live-tick performance, and gesture optimizations.**
+
+### Performance — macOS Chart
+
+- **Drawing hit-test now skipped when no drawings exist** — `ChartView`'s drag gesture no longer iterates all drawings on every mouse-pixel during pan unless there are drawings on screen or a drawing tool is armed.
+- **Hover tooltip uses transition instead of value animation** — replaced `.animation(easeOut, value: hovered)` with `.transition(opacity.animation(easeOut))` so rapid mouse sweeps no longer queue up animation transactions.
+
+### Performance — iPad Chart
+
+- **iPad now uses trailing-window splice for live ticks** — `refreshTrailingCandles()` reads only the last ~6h window from DB and splices onto in-memory candles instead of doing a full synchronous DB read + fold on every 1 Hz tick, eliminating main-thread blocking during live streaming.
+- **iPad deep-history backfill on pair/timeframe change** — `warmHistory()` calls `ensureDeepHistory` before reloading, so switching timeframes no longer risks showing an empty chart while the backfill completes.
+
+### Bug Fixes
+
+- **iPad timeframe change race condition** — removed the redundant immediate `reloadCandles()` task from timeframe `onChange` (same fix as the macOS bug in build 5). `warmHistory()` now handles the reload in the correct order — after deep history is populated.
+- **iPad pair change now also warms history** — `warmHistory()` called from the pair-selection `.task(id:)` modifier, matching the macOS behaviour.
 
 ---
+
 ## [v1.4 build 5] — 2026-07-05
 
 **Async data pipeline, incremental fetching, and streaming AI performance.**

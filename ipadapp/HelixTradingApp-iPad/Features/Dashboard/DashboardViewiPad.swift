@@ -236,15 +236,14 @@ struct DashboardViewiPad: View {
                 alertStore.timeframeLabel = timeframe.rawValue
             }
             await reloadCandles()
+            warmHistory()
         }
         .onChange(of: timeframe) { _ in
             if syncToFullscreenPane(\.timeframe, timeframe) { return }
-            Task { @MainActor in
-                xDomain = nil
-                yDomain = nil
-                alertStore.timeframeLabel = timeframe.rawValue
-                await reloadCandles()
-            }
+            xDomain = nil
+            yDomain = nil
+            alertStore.timeframeLabel = timeframe.rawValue
+            warmHistory()
         }
         .onChange(of: userChartType) { newValue in
             _ = syncToFullscreenPane(\.chartType, newValue)
@@ -275,7 +274,7 @@ struct DashboardViewiPad: View {
         ) { _ in
             if let cur = app.pairs.first(where: { $0.id == app.selectedPairID }),
                cur.usesLiveStream {
-                Task { await reloadCandles() }
+                Task { await refreshTrailingCandles() }
             }
         }
         .sheet(isPresented: $showIndicatorSettings) {
@@ -438,11 +437,29 @@ struct DashboardViewiPad: View {
                 // Indicators menu
                 Menu {
                     ForEach(IndicatorKind.allCases) { kind in
+                        let isOn = enabledIndicators.contains(kind)
+                        let isHidden = isOn && hiddenIndicators.contains(kind)
                         Button {
-                            setIndicator(kind, enabled: !enabledIndicators.contains(kind))
+                            if isOn {
+                                setIndicatorHidden(kind, hidden: !isHidden)
+                            } else {
+                                setIndicator(kind, enabled: true)
+                            }
                         } label: {
-                            Label(kind.label,
-                                  systemImage: enabledIndicators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                            Label {
+                                HStack(spacing: 6) {
+                                    Text(kind.label)
+                                    if isOn {
+                                        Image(systemName: isHidden ? "eye.slash" : "eye")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(isHidden ? Theme.Color.textMuted.opacity(0.4) : kind.color)
+                                    }
+                                }
+                            } icon: {
+                                Image(systemName: isOn
+                                      ? (isHidden ? "eye.slash" : "checkmark.circle.fill")
+                                      : "circle")
+                            }
                         }
                     }
                     Divider()
@@ -921,6 +938,39 @@ struct DashboardViewiPad: View {
     private func reloadCandles() async {
         guard let pairID = app.selectedPairID else { return }
         candles = candles(for: pairID, tf: timeframe)
+    }
+
+    private func warmHistory() {
+        guard let pairID = app.selectedPairID else { return }
+        let currentSrc = OHLCCandleLoader.sourceTimeframeTag(for: timeframe)
+        Task {
+            await yahoo.ensureDeepHistory(pairID: pairID, sourceTF: currentSrc)
+            await reloadCandles()
+            await yahoo.backfillAll(pairID: pairID)
+            await reloadCandles()
+        }
+    }
+
+    /// Cheap live-tick path: reads only a short trailing window, folds it,
+    /// and splices onto the tail of in-memory `candles`. Avoids the full
+    /// DB read + fold that `reloadCandles()` does.
+    @MainActor
+    private func refreshTrailingCandles() async {
+        guard let db = app.database, let pairID = app.selectedPairID else { return }
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        let respectsWeekend = pair?.category != .crypto
+        let until = Date()
+        let margin = Double(max(timeframe.seconds * 3, 6 * 3600))
+        let since = until.addingTimeInterval(-margin)
+        let recent = OHLCCandleLoader.load(
+            repo: db.ohlcRepo, pairID: pairID, tf: timeframe,
+            since: since, until: until, dropClosedDays: respectsWeekend
+        )
+        guard let cutoff = recent.first?.bucketStart else { return }
+        var merged = candles
+        while let last = merged.last, last.bucketStart >= cutoff { merged.removeLast() }
+        merged.append(contentsOf: recent)
+        candles = merged
     }
 
     @MainActor
