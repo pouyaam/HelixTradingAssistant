@@ -124,40 +124,36 @@ final class MultiChartLayoutStore: ObservableObject {
         }
     }
 
-    /// Grows/shrinks `panes` to match `layout.paneCount`. Call whenever
-    /// the layout changes or the dashboard first mounts a non-single
-    /// layout. New panes seed from `defaultPairID` at a spread of
-    /// common timeframes so a freshly opened grid is immediately
-    /// useful (15m/1h/4h/1d) instead of four identical 1h charts.
-    /// Only appends or truncates — existing panes are never touched,
-    /// so their UUIDs (and mounted `ChartPaneView`s) survive.
+    /// Grows `panes` to match `layout.paneCount`. Never truncates —
+    /// switching from a larger layout (2x2) to a smaller one (single)
+    /// keeps every pane in the array so switching back restores the
+    /// user's exact configuration (pair, timeframe, indicators, etc.).
+    /// Only appends new panes when the current array is shorter than
+    /// the layout needs. Existing panes are never touched, so their
+    /// UUIDs (and mounted `ChartPaneView`s) survive layout switches.
     func ensurePaneCount(defaultPairID: String) {
         let target = layout.paneCount
-        guard panes.count != target else { return }
-        if panes.count < target {
-            // Inherit the primary chart's indicator / oscillator / volume
-            // selections so grid panes open with the same sub-charts the
-            // user already sees in single-chart mode — instead of empty
-            // panes that require re-enabling everything from scratch.
-            let indicatorsRaw = UserDefaults.standard.string(forKey: "dashboard.indicators") ?? ""
-            let indicators = Set(indicatorsRaw.split(separator: ",").compactMap { IndicatorKind(rawValue: String($0)) })
-            let oscillatorsRaw = UserDefaults.standard.string(forKey: "dashboard.oscillators") ?? ""
-            let oscillators = Set(oscillatorsRaw.split(separator: ",").compactMap { OscillatorKind(rawValue: String($0)) })
-            let showVolume: Bool = (UserDefaults.standard.object(forKey: "dashboard.showVolume") as? Bool) ?? true
+        guard panes.count < target else { return }
+        // Inherit the primary chart's indicator / oscillator / volume
+        // selections so grid panes open with the same sub-charts the
+        // user already sees in single-chart mode — instead of empty
+        // panes that require re-enabling everything from scratch.
+        let indicatorsRaw = UserDefaults.standard.string(forKey: "dashboard.indicators") ?? ""
+        let indicators = Set(indicatorsRaw.split(separator: ",").compactMap { IndicatorKind(rawValue: String($0)) })
+        let oscillatorsRaw = UserDefaults.standard.string(forKey: "dashboard.oscillators") ?? ""
+        let oscillators = Set(oscillatorsRaw.split(separator: ",").compactMap { OscillatorKind(rawValue: String($0)) })
+        let showVolume: Bool = (UserDefaults.standard.object(forKey: "dashboard.showVolume") as? Bool) ?? true
 
-            let seedTFs: [Timeframe] = [.m15, .h1, .h4, .d1]
-            while panes.count < target {
-                let tf = seedTFs[panes.count % seedTFs.count]
-                panes.append(ChartPane(
-                    pairID: panes.last?.pairID ?? defaultPairID,
-                    timeframe: tf,
-                    indicators: indicators,
-                    oscillators: oscillators,
-                    showVolume: showVolume
-                ))
-            }
-        } else {
-            panes = Array(panes.prefix(target))
+        let seedTFs: [Timeframe] = [.m1, .m5, .m15, .h1]
+        while panes.count < target {
+            let tf = seedTFs[panes.count % seedTFs.count]
+            panes.append(ChartPane(
+                pairID: panes.last?.pairID ?? defaultPairID,
+                timeframe: tf,
+                indicators: indicators,
+                oscillators: oscillators,
+                showVolume: showVolume
+            ))
         }
     }
 

@@ -84,60 +84,61 @@ final class ChartDerivedCache: ObservableObject {
 
     // ── Display candles (Heikin-Ashi + live-price patch) ──────────────
     //
-    // Deliberately left synchronous — it's a cheap O(n) transform and
-    // the chart needs it immediately (deferring it would flash the
-    // wrong candle shape on every live tick).
+    // Two-layer cache: the expensive HA transform is keyed on a
+    // *structural* signature (bar count + first timestamp) so it only
+    // recomputes when new bars arrive or the series is reloaded. The
+    // cheap live-price patch on the last bar is applied on top every
+    // call — it's an O(1) array-CoW copy, not a full O(n) transform.
+    //
+    // Previously the signature included `lastClose`/`lastTS`/`lastHigh`
+    // /`lastLow`/`livePrice`, all of which change on every tick,
+    // forcing the full HA recomputation ~10×/sec/pane — the primary
+    // source of grid lag.
 
-    private struct DisplaySig: Equatable {
+    /// Structural signature for the base HA transform. Only changes
+    /// when the candle array's shape changes (new bars, pair/timeframe
+    /// switch, full reload) — NOT on a trailing live-price update.
+    private struct BaseDisplaySig: Equatable {
         let count: Int
         let firstTS: TimeInterval
-        let lastTS: TimeInterval
-        let lastClose: Double
-        let lastHigh: Double
-        let lastLow: Double
         let heikinAshi: Bool
-        let livePrice: Double?
     }
-    private var displaySig: DisplaySig?
-    private var displayCache: [Candle] = []
+    private var baseDisplaySig: BaseDisplaySig?
+    private var baseDisplayCache: [Candle] = []
 
-    /// Candles actually drawn: HA-transformed when requested, with the
-    /// in-progress (last) bar patched to the live price. Mirrors the old
-    /// inline `displayCandles` logic exactly — just memoized.
-    func displayCandles(candles: [Candle], heikinAshi: Bool, livePrice: Double?) -> [Candle] {
-        let last = candles.last
-        let sig = DisplaySig(
+    /// The cached base (possibly HA-transformed) candles before the
+    /// live-price overlay. Only recomputes on structural changes.
+    private func baseDisplayCandles(candles: [Candle], heikinAshi: Bool) -> [Candle] {
+        let sig = BaseDisplaySig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            lastTS: last?.id.timeIntervalSince1970 ?? 0,
-            lastClose: last?.close ?? 0,
-            lastHigh: last?.high ?? 0,
-            lastLow: last?.low ?? 0,
-            heikinAshi: heikinAshi,
-            livePrice: livePrice
+            heikinAshi: heikinAshi
         )
-        if sig == displaySig { return displayCache }
-
-        let base = heikinAshi ? HeikinAshi.transform(candles) : candles
-        let result: [Candle]
-        if let live = livePrice, let b = base.last, b.close != 0,
-           abs(live - b.close) / b.close < 0.10 {
-            var patched = base
-            patched[patched.count - 1] = Candle(
-                id: b.id,
-                open: b.open,
-                high: max(b.high, live),
-                low: min(b.low, live),
-                close: live,
-                volume: b.volume
-            )
-            result = patched
-        } else {
-            result = base
-        }
-        displaySig = sig
-        displayCache = result
+        if sig == baseDisplaySig { return baseDisplayCache }
+        let result = heikinAshi ? HeikinAshi.transform(candles) : candles
+        baseDisplaySig = sig
+        baseDisplayCache = result
         return result
+    }
+
+    /// Candles actually drawn: HA-transformed when requested, with the
+    /// in-progress (last) bar patched to the live price. The expensive
+    /// HA transform is cached structurally; the live-price overlay is
+    /// a cheap O(1) CoW copy applied on top.
+    func displayCandles(candles: [Candle], heikinAshi: Bool, livePrice: Double?) -> [Candle] {
+        let base = baseDisplayCandles(candles: candles, heikinAshi: heikinAshi)
+        guard let live = livePrice, let b = base.last, b.close != 0,
+              abs(live - b.close) / b.close < 0.10 else { return base }
+        var patched = base
+        patched[patched.count - 1] = Candle(
+            id: b.id,
+            open: b.open,
+            high: max(b.high, live),
+            low: min(b.low, live),
+            close: live,
+            volume: b.volume
+        )
+        return patched
     }
 
     // ── Indicators (SMA / EMA / Bollinger) ────────────────────────────
@@ -145,8 +146,6 @@ final class ChartDerivedCache: ObservableObject {
     private struct IndicatorSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
-        let lastTS: TimeInterval
-        let lastClose: Double
         let enabled: Set<IndicatorKind>
     }
     private let indicatorSlot = Slot<IndicatorSig, [(kind: IndicatorKind, points: [IndicatorPoint])]>([])
@@ -157,8 +156,6 @@ final class ChartDerivedCache: ObservableObject {
         let sig = IndicatorSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
-            lastClose: candles.last?.close ?? 0,
             enabled: enabled
         )
         return resolve(indicatorSlot, signature: sig) {
@@ -171,8 +168,6 @@ final class ChartDerivedCache: ObservableObject {
     private struct UTSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
-        let lastTS: TimeInterval
-        let lastClose: Double
         let keyValue: Double
         let atrPeriod: Int
         let useHeikinAshi: Bool
@@ -183,8 +178,6 @@ final class ChartDerivedCache: ObservableObject {
         let sig = UTSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
-            lastClose: candles.last?.close ?? 0,
             keyValue: keyValue,
             atrPeriod: atrPeriod,
             useHeikinAshi: useHeikinAshi
@@ -199,8 +192,6 @@ final class ChartDerivedCache: ObservableObject {
     private struct OBSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
-        let lastTS: TimeInterval
-        let lastClose: Double
         let periods: Int
         let threshold: Double
         let useWicks: Bool
@@ -218,8 +209,6 @@ final class ChartDerivedCache: ObservableObject {
         let sig = OBSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
-            lastClose: candles.last?.close ?? 0,
             periods: periods,
             threshold: threshold,
             useWicks: useWicks,
@@ -241,8 +230,6 @@ final class ChartDerivedCache: ObservableObject {
     private struct SteroidOBSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
-        let lastTS: TimeInterval
-        let lastClose: Double
         let periods: Int
         let threshold: Double
         let useWicks: Bool
@@ -262,8 +249,6 @@ final class ChartDerivedCache: ObservableObject {
         let sig = SteroidOBSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
-            lastClose: candles.last?.close ?? 0,
             periods: periods,
             threshold: threshold,
             useWicks: useWicks,
@@ -287,8 +272,6 @@ final class ChartDerivedCache: ObservableObject {
     private struct FVGSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
-        let lastTS: TimeInterval
-        let lastClose: Double
         let threshold: Double
     }
     private let fvgSlot = Slot<FVGSig, [FairValueGap.Zone]>([])
@@ -297,8 +280,6 @@ final class ChartDerivedCache: ObservableObject {
         let sig = FVGSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
-            lastClose: candles.last?.close ?? 0,
             threshold: threshold
         )
         return resolve(fvgSlot, signature: sig) {
@@ -311,8 +292,6 @@ final class ChartDerivedCache: ObservableObject {
     private struct FVGFirstOBSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
-        let lastTS: TimeInterval
-        let lastClose: Double
         let fvgThreshold: Double
         let searchMin: Int
         let searchMax: Int
@@ -329,8 +308,6 @@ final class ChartDerivedCache: ObservableObject {
         let sig = FVGFirstOBSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
-            lastClose: candles.last?.close ?? 0,
             fvgThreshold: fvgThreshold,
             searchMin: searchMin, searchMax: searchMax,
             detectVolume: detectVolume, volumeMultiplier: volumeMultiplier
@@ -349,8 +326,6 @@ final class ChartDerivedCache: ObservableObject {
     private struct SonarlabOBSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
-        let lastTS: TimeInterval
-        let lastClose: Double
         let sensitivity: Double
         let mitigationType: String
     }
@@ -364,8 +339,6 @@ final class ChartDerivedCache: ObservableObject {
         let sig = SonarlabOBSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
-            lastClose: candles.last?.close ?? 0,
             sensitivity: sensitivity,
             mitigationType: mitigationType.rawValue
         )
@@ -383,8 +356,6 @@ final class ChartDerivedCache: ObservableObject {
     private struct SessionSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
-        let lastTS: TimeInterval
-        let lastClose: Double
     }
     private let sessionSlot = Slot<SessionSig, [TradingSessions.SessionRun]>([])
 
@@ -395,9 +366,7 @@ final class ChartDerivedCache: ObservableObject {
     func tradingSessions(candles: [Candle]) -> [TradingSessions.SessionRun] {
         let sig = SessionSig(
             count: candles.count,
-            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
-            lastClose: candles.last?.close ?? 0
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0
         )
         return resolve(sessionSlot, signature: sig) {
             TradingSessions.compute(candles)
@@ -409,8 +378,6 @@ final class ChartDerivedCache: ObservableObject {
     private struct NYSetupSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
-        let lastTS: TimeInterval
-        let lastClose: Double
         let lastHigh: Double
         let lastLow: Double
         let atrMult: Double
@@ -427,8 +394,6 @@ final class ChartDerivedCache: ObservableObject {
         let sig = NYSetupSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            lastTS: last?.id.timeIntervalSince1970 ?? 0,
-            lastClose: last?.close ?? 0,
             lastHigh: last?.high ?? 0,
             lastLow: last?.low ?? 0,
             atrMult: atrMult,
@@ -450,8 +415,6 @@ final class ChartDerivedCache: ObservableObject {
         let kind: OscillatorKind
         let count: Int
         let firstTS: TimeInterval
-        let lastTS: TimeInterval
-        let lastClose: Double
         let rsiPeriod: Int
         let macdFast: Int
         let macdSlow: Int
@@ -466,8 +429,6 @@ final class ChartDerivedCache: ObservableObject {
             kind: kind,
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
-            lastClose: candles.last?.close ?? 0,
             rsiPeriod: config.rsiPeriod,
             macdFast: config.macdFast,
             macdSlow: config.macdSlow,
