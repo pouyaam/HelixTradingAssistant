@@ -137,7 +137,6 @@ struct ChartPaneView: View {
                         yDomain: $yDomain,
                         indicators: Set(pane.indicatorInstances.map(\.kind)),
                         indicatorConfig: indicatorConfig,
-                        indicatorInstances: pane.indicatorInstances.filter { !$0.hidden },
                         drawings: drawingStore.drawings(for: pane.pairID),
                         activeTool: effectiveDrawingTool,
                         onCommitDrawing: { drawing in

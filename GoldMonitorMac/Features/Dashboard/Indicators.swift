@@ -242,6 +242,10 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
             return [
                 .double(key: "bucketCount", label: "Buckets per session", default: 24, step: 2, range: 10...100),
                 .double(key: "valueAreaPct", label: "Value area %", default: 70.0, step: 5.0, range: 50...95),
+                .bool(key: "useZigzag", label: "ZigZag trend mode (last trend only)", default: true),
+                .bool(key: "showZigzag", label: "Show ZigZag lines", default: true),
+                .double(key: "zzDepth", label: "ZigZag depth", default: 5, step: 1, range: 2...50),
+                .double(key: "zzMinChange", label: "ZigZag min change %", default: 1.0, step: 0.5, range: 0.1...10),
             ]
         }
     }

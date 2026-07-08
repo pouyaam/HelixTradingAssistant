@@ -131,20 +131,20 @@ struct DashboardViewiPad: View {
     private func syncIndicatorsToFullscreenPane() {
         guard let fsID = multiChart.fullscreenPaneID,
               let pane = multiChart.panes.first(where: { $0.id == fsID }),
-              pane.indicators != enabledIndicators
+              Set(pane.indicatorInstances.map(\.kind)) != enabledIndicators
         else { return }
         var p = pane
-        p.indicators = enabledIndicators
+        p.indicatorInstances = enabledIndicators.map { IndicatorInstance(kind: $0) }
         multiChart.updatePane(p)
     }
 
     private func syncOscillatorsToFullscreenPane() {
         guard let fsID = multiChart.fullscreenPaneID,
               let pane = multiChart.panes.first(where: { $0.id == fsID }),
-              pane.oscillators != enabledOscillators
+              Set(pane.oscillatorInstances.map(\.kind)) != enabledOscillators
         else { return }
         var p = pane
-        p.oscillators = enabledOscillators
+        p.oscillatorInstances = enabledOscillators.map { OscillatorInstance(kind: $0) }
         multiChart.updatePane(p)
     }
 
@@ -263,8 +263,8 @@ struct DashboardViewiPad: View {
             else { return }
             timeframe = pane.timeframe
             userChartType = pane.chartType
-            indicatorsRaw = pane.indicators.map(\.rawValue).sorted().joined(separator: ",")
-            oscillatorsRaw = pane.oscillators.map(\.rawValue).sorted().joined(separator: ",")
+            indicatorsRaw = pane.indicatorInstances.map(\.kind.rawValue).sorted().joined(separator: ",")
+            oscillatorsRaw = pane.oscillatorInstances.map(\.kind.rawValue).sorted().joined(separator: ",")
             showVolume = pane.showVolume
         }
         .onReceive(
@@ -589,10 +589,10 @@ struct DashboardViewiPad: View {
             if !visibleOscillators.isEmpty {
                 Divider().background(Theme.Color.border)
                 ForEach(Array(visibleOscillators)) { kind in
+                    let instance = OscillatorInstance(kind: kind)
                     OscillatorPanel(
-                        kind: kind,
+                        instance: instance,
                         candles: candles,
-                        config: oscillatorConfig,
                         xDomain: xDomain
                     )
                     .padding(.horizontal, Theme.Spacing.lg)

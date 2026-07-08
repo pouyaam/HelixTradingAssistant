@@ -430,6 +430,31 @@ struct IndicatorSettingsSheet: View {
             Divider().background(Theme.Color.border)
 
             section(title: "Volume Profile") {
+                Toggle(isOn: $config.vpUseZigzag) {
+                    checkboxLabel("ZigZag trend mode (last trend only)")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                if config.vpUseZigzag {
+                    Toggle(isOn: $config.vpShowZigzag) {
+                        checkboxLabel("Show ZigZag lines on chart")
+                    }
+                    #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                    periodStepper(label: "ZigZag depth", value: $config.vpZZDepth, range: 2...50)
+                    doubleStepper(
+                        label: "ZigZag min change %",
+                        value: $config.vpZZMinChange,
+                        range: 0.1...10,
+                        step: 0.5
+                    )
+                }
                 periodStepper(label: "Buckets per session", value: $config.vpBucketCount, range: 10...100)
                 doubleStepper(
                     label: "Value Area %",
@@ -437,7 +462,9 @@ struct IndicatorSettingsSheet: View {
                     range: 50...95,
                     step: 5.0
                 )
-                Text("Computes a per-day volume profile with POC and value area (VAH/VAL). Works best on intraday timeframes with volume data.")
+                Text(config.vpUseZigzag
+                     ? "Shows a volume profile for the current ZigZag trend segment only, placed on the right side of the chart."
+                     : "Computes a per-day volume profile with POC and value area (VAH/VAL). Works best on intraday timeframes with volume data.")
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.Color.textMuted)
                     .fixedSize(horizontal: false, vertical: true)

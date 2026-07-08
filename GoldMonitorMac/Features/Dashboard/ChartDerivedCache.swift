@@ -373,6 +373,66 @@ final class ChartDerivedCache: ObservableObject {
         }
     }
 
+    // ── ZigZag-based Volume Profile (last trend segment) ───────────────
+
+    private struct ZigzagVPSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let bucketCount: Int
+        let valueAreaPct: Double
+        let zzDepth: Int
+        let zzMinChange: Double
+    }
+    private let zigzagVPSlot = Slot<ZigzagVPSig, VolumeProfile.TrendVP?>(nil)
+
+    func zigzagVolumeProfile(
+        candles: [Candle],
+        bucketCount: Int,
+        valueAreaPct: Double,
+        zzDepth: Int,
+        zzMinChange: Double
+    ) -> VolumeProfile.TrendVP? {
+        let sig = ZigzagVPSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            bucketCount: bucketCount,
+            valueAreaPct: valueAreaPct,
+            zzDepth: zzDepth,
+            zzMinChange: zzMinChange
+        )
+        return resolve(zigzagVPSlot, signature: sig) {
+            VolumeProfile.computeLastTrend(
+                candles,
+                bucketCount: bucketCount,
+                valueAreaPct: valueAreaPct,
+                zigzagDepth: zzDepth,
+                zigzagMinChange: zzMinChange
+            )
+        }
+    }
+
+    // ── ZigZag pivots (for rendering the zigzag line overlay) ──────────
+
+    private struct ZigzagLineSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let depth: Int
+        let minChange: Double
+    }
+    private let zigzagLineSlot = Slot<ZigzagLineSig, [ZigZag.Pivot]>([])
+
+    func zigzagPivots(candles: [Candle], depth: Int, minChange: Double) -> [ZigZag.Pivot] {
+        let sig = ZigzagLineSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            depth: depth,
+            minChange: minChange
+        )
+        return resolve(zigzagLineSlot, signature: sig) {
+            ZigZag.compute(candles, depth: depth, minChangePct: minChange)
+        }
+    }
+
     // ── Trading Sessions ──────────────────────────────────────────────
 
     private struct SessionSig: Equatable {

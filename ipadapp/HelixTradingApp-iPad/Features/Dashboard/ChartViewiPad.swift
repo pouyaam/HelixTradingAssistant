@@ -163,6 +163,37 @@ struct ChartViewiPad: View {
         }
     }
 
+    private var volumeProfileSessions: [VolumeProfile.SessionVP] {
+        guard indicators.contains(.volumeProfile), !indicatorConfig.vpUseZigzag else { return [] }
+        return derived.volumeProfile(
+            candles: candles,
+            bucketCount: indicatorConfig.vpBucketCount,
+            valueAreaPct: indicatorConfig.vpValueAreaPct
+        )
+    }
+
+    private var zigzagTrendVP: VolumeProfile.TrendVP? {
+        guard indicators.contains(.volumeProfile), indicatorConfig.vpUseZigzag else { return nil }
+        return derived.zigzagVolumeProfile(
+            candles: candles,
+            bucketCount: indicatorConfig.vpBucketCount,
+            valueAreaPct: indicatorConfig.vpValueAreaPct,
+            zzDepth: indicatorConfig.vpZZDepth,
+            zzMinChange: indicatorConfig.vpZZMinChange
+        )
+    }
+
+    private var zigzagPivots: [ZigZag.Pivot] {
+        guard indicators.contains(.volumeProfile),
+              indicatorConfig.vpUseZigzag,
+              indicatorConfig.vpShowZigzag else { return [] }
+        return derived.zigzagPivots(
+            candles: candles,
+            depth: indicatorConfig.vpZZDepth,
+            minChange: indicatorConfig.vpZZMinChange
+        )
+    }
+
     private var chart: some View {
         Group {
             let indices = renderIndices
@@ -198,6 +229,8 @@ struct ChartViewiPad: View {
                 }
 
                 sessionMarks
+                volumeProfileMarks
+                zigzagLineMarks
                 setupMarks
                 srLevelMarks
                 fvgMarks
@@ -711,6 +744,141 @@ struct ChartViewiPad: View {
         if indicatorConfig.sessShowAverage { lines.append("Avg \(Self.priceShort(run.average))") }
         if indicatorConfig.sessShowNames   { lines.append(run.name) }
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
+    // MARK: - Volume Profile marks
+
+    @ChartContentBuilder
+    private var volumeProfileMarks: some ChartContent {
+        if indicatorConfig.vpUseZigzag {
+            zigzagVPMarks
+        } else {
+            sessionVPMarks
+        }
+    }
+
+    @ChartContentBuilder
+    private var zigzagVPMarks: some ChartContent {
+        if let vp = zigzagTrendVP {
+            let maxVol = vp.buckets.map(\.volume).max() ?? 1
+            let lastBar = Double(candles.count - 1)
+            let marginStart = lastBar + 1.0
+            let marginWidth = 20.0
+            let bucketSize = vp.buckets.count > 1
+                ? (vp.buckets[1].priceLevel - vp.buckets[0].priceLevel)
+                : vp.buckets[0].priceLevel * 0.001
+
+            ForEach(Array(vp.buckets.enumerated()), id: \.offset) { _, bucket in
+                let barWidth = marginWidth * (bucket.volume / maxVol)
+                let isPOC = abs(bucket.priceLevel - vp.poc) < bucketSize * 0.01
+                RectangleMark(
+                    xStart: .value("ZVP x0", marginStart + marginWidth - barWidth),
+                    xEnd:   .value("ZVP x1", marginStart + marginWidth),
+                    yStart: .value("ZVP y0", bucket.priceLevel),
+                    yEnd:   .value("ZVP y1", bucket.priceLevel + bucketSize * 0.92)
+                )
+                .foregroundStyle(
+                    isPOC
+                        ? Color(red: 0.96, green: 0.36, blue: 0.36).opacity(0.85)
+                        : Theme.Color.info.opacity(0.45)
+                )
+            }
+
+            RuleMark(y: .value("ZVP POC", vp.poc))
+                .foregroundStyle(Color(red: 0.96, green: 0.36, blue: 0.36))
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+            RuleMark(y: .value("ZVP VAH", vp.vah))
+                .foregroundStyle(Theme.Color.info.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            RuleMark(y: .value("ZVP VAL", vp.val))
+                .foregroundStyle(Theme.Color.info.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+        }
+    }
+
+    @ChartContentBuilder
+    private var sessionVPMarks: some ChartContent {
+        let sessions = volumeProfileSessions
+        ForEach(sessions) { session in
+            let maxVol = session.buckets.map(\.volume).max() ?? 1
+            let sessionWidth = Double(session.endBar - session.startBar)
+            let maxBarWidth = sessionWidth * 0.25
+            let rightEdge = Double(session.endBar)
+            let bucketSize = session.buckets.count > 1
+                ? (session.buckets[1].priceLevel - session.buckets[0].priceLevel)
+                : session.buckets[0].priceLevel * 0.001
+
+            ForEach(Array(session.buckets.enumerated()), id: \.offset) { _, bucket in
+                let barWidth = maxBarWidth * (bucket.volume / maxVol)
+                let isPOC = abs(bucket.priceLevel - session.poc) < bucketSize * 0.01
+                RectangleMark(
+                    xStart: .value("VP x0", rightEdge - barWidth),
+                    xEnd:   .value("VP x1", rightEdge),
+                    yStart: .value("VP y0", bucket.priceLevel),
+                    yEnd:   .value("VP y1", bucket.priceLevel + bucketSize * 0.92)
+                )
+                .foregroundStyle(
+                    isPOC
+                        ? Color(red: 0.96, green: 0.36, blue: 0.36).opacity(0.85)
+                        : Theme.Color.info.opacity(0.45)
+                )
+            }
+
+            RuleMark(y: .value("VP POC", session.poc))
+                .foregroundStyle(Color(red: 0.96, green: 0.36, blue: 0.36))
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+            RuleMark(y: .value("VP VAH", session.vah))
+                .foregroundStyle(Theme.Color.info.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            RuleMark(y: .value("VP VAL", session.val))
+                .foregroundStyle(Theme.Color.info.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+
+            if session.startBar > 0 {
+                RuleMark(x: .value("VP sep", Double(session.startBar) - 0.5))
+                    .foregroundStyle(Theme.Color.textMuted.opacity(0.15))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 4]))
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private var zigzagLineMarks: some ChartContent {
+        let pivots = zigzagPivots
+        if pivots.count >= 2 {
+            ForEach(0..<(pivots.count - 1), id: \.self) { i in
+                let p0 = pivots[i]
+                let p1 = pivots[i + 1]
+                let color = p1.isHigh
+                    ? Color(red: 0.96, green: 0.36, blue: 0.36)
+                    : Color(red: 0.30, green: 0.80, blue: 0.40)
+                LineMark(
+                    x: .value("ZZ x0", Double(p0.barIndex)),
+                    y: .value("ZZ y0", p0.price),
+                    series: .value("ZZ", i)
+                )
+                .foregroundStyle(color.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+                LineMark(
+                    x: .value("ZZ x1", Double(p1.barIndex)),
+                    y: .value("ZZ y1", p1.price),
+                    series: .value("ZZ", i)
+                )
+                .foregroundStyle(color.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+            }
+            ForEach(pivots) { pivot in
+                let color = pivot.isHigh
+                    ? Color(red: 0.96, green: 0.36, blue: 0.36)
+                    : Color(red: 0.30, green: 0.80, blue: 0.40)
+                PointMark(
+                    x: .value("ZZ dot x", Double(pivot.barIndex)),
+                    y: .value("ZZ dot y", pivot.price)
+                )
+                .foregroundStyle(color)
+                .symbolSize(18)
+            }
+        }
     }
 
     // MARK: - NY Open Setup marks
@@ -1408,15 +1576,15 @@ struct ChartViewiPad: View {
 
     @ChartContentBuilder
     private func indicatorMarks(visible: Set<Int>) -> some ChartContent {
-        let computed = derived.indicators(enabled: indicators, candles: candles)
-        ForEach(computed, id: \.kind) { entry in
+        let computed = derived.indicators(instances: indicators.map { IndicatorInstance(kind: $0) }, candles: candles)
+        ForEach(computed, id: \.instance.id) { entry in
             ForEach(entry.points.filter { visible.contains($0.index) }) { p in
                 LineMark(
                     x: .value("Bar", Double(p.index)),
                     y: .value("Indicator", p.value),
-                    series: .value("Series", "\(entry.kind.rawValue)-\(p.band)")
+                    series: .value("Series", "\(entry.instance.kind.rawValue)-\(p.band)")
                 )
-                .foregroundStyle(indicatorColor(for: entry.kind, band: p.band))
+                .foregroundStyle(indicatorColor(for: entry.instance.kind, band: p.band))
                 .lineStyle(StrokeStyle(
                     lineWidth: p.band == "bb_mid" ? 1 : 1.6,
                     dash: p.band == "bb_mid" ? [3, 3] : []
@@ -1651,7 +1819,7 @@ struct ChartViewiPad: View {
         var hi = visibleCandles.map(\.high).max() ?? 1
 
         if !indicators.isEmpty, let b = bounds {
-            for entry in derived.indicators(enabled: indicators, candles: candles) {
+            for entry in derived.indicators(instances: indicators.map { IndicatorInstance(kind: $0) }, candles: candles) {
                 for p in entry.points where p.index >= b.lo && p.index <= b.hi {
                     if p.value < lo { lo = p.value }
                     if p.value > hi { hi = p.value }
@@ -1679,6 +1847,13 @@ struct ChartViewiPad: View {
             + fvgFirstOBZones.map { .init(low: $0.low, high: $0.high) }
             + sessionRuns.map { .init(low: $0.low, high: $0.high) }
             + nySetupResults.map { .init(low: $0.orLow, high: $0.orHigh) }
+            + volumeProfileSessions.flatMap { session in
+                session.buckets.map { .init(low: $0.priceLevel, high: $0.priceLevel) }
+            }
+            + (zigzagTrendVP.map { vp in
+                vp.buckets.map { .init(low: $0.priceLevel, high: $0.priceLevel) }
+            } ?? [])
+            + zigzagPivots.map { .init(low: $0.price, high: $0.price) }
         let drawingPoints: [ChartDerivedCache.PricePoint] = drawings
             .filter(\.visible)
             .flatMap { d -> [ChartDerivedCache.PricePoint] in

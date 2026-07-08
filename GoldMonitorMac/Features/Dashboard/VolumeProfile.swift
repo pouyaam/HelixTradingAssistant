@@ -144,4 +144,116 @@ enum VolumeProfile {
         // 3. Return the most recent 5 sessions.
         return Array(results.suffix(5))
     }
+
+    /// A single trend-based volume profile result (the last ZigZag segment).
+    struct TrendVP: Hashable {
+        /// POC price level.
+        let poc: Double
+        /// Value Area High.
+        let vah: Double
+        /// Value Area Low.
+        let val: Double
+        /// Volume histogram buckets covering the trend's price range.
+        let buckets: [Bucket]
+        /// Bar index where the trend segment starts.
+        let startBar: Int
+        /// Bar index where the trend segment ends.
+        let endBar: Double
+        /// Whether the trend is bullish (swing-low → swing-high) or bearish.
+        let isBullish: Bool
+    }
+
+    /// Compute a volume profile for the last ZigZag trend segment only.
+    ///
+    /// The histogram is built from the candles between the last two
+    /// confirmed ZigZag pivots (i.e. the current active trend). If
+    /// ZigZag produces fewer than 2 pivots the call falls back to
+    /// session-based VP.
+    ///
+    /// - Parameters:
+    ///   - candles:       Sorted OHLC candles (newest last).
+    ///   - bucketCount:   Number of equal-price bands (default 24).
+    ///   - valueAreaPct:  % of total volume that defines the value area.
+    ///   - zigzagDepth:   ZigZag `depth` parameter.
+    ///   - zigzagMinChange: ZigZag `minChangePct` parameter.
+    /// - Returns: A single `TrendVP` for the last segment, or nil.
+    static func computeLastTrend(
+        _ candles: [Candle],
+        bucketCount: Int = 24,
+        valueAreaPct: Double = 70.0,
+        zigzagDepth: Int = 5,
+        zigzagMinChange: Double = 1.0
+    ) -> TrendVP? {
+        let pivots = ZigZag.compute(candles, depth: zigzagDepth, minChangePct: zigzagMinChange)
+        guard pivots.count >= 2 else { return nil }
+
+        // Last two pivots define the current trend.
+        let p0 = pivots[pivots.count - 2]
+        let p1 = pivots[pivots.count - 1]
+        let segStart = min(p0.barIndex, p1.barIndex)
+        let segEnd   = max(p0.barIndex, p1.barIndex)
+        guard segEnd > segStart, segEnd < candles.count else { return nil }
+
+        let seg = Array(candles[segStart...segEnd])
+        guard !seg.isEmpty else { return nil }
+
+        let priceMin = seg.map(\.low).min()!
+        let priceMax = seg.map(\.high).max()!
+        guard priceMax > priceMin else { return nil }
+
+        let bucketSize = (priceMax - priceMin) / Double(bucketCount)
+        var volumes = [Double](repeating: 0, count: bucketCount)
+        var totalVol: Double = 0
+
+        for c in seg {
+            let typical = (c.high + c.low + c.close) / 3
+            let idx = min(bucketCount - 1, Int((typical - priceMin) / bucketSize))
+            let vol = c.volume.flatMap { $0 > 0 ? $0 : nil } ?? 1
+            volumes[idx] += vol
+            totalVol += vol
+        }
+
+        let maxVol = volumes.max() ?? 1
+        let pocIdx = volumes.firstIndex(of: maxVol) ?? 0
+        let poc = priceMin + Double(pocIdx) * bucketSize
+
+        let vaThreshold = totalVol * (valueAreaPct / 100.0)
+        var cumVol = volumes[pocIdx]
+        var loIdx = pocIdx
+        var hiIdx = pocIdx
+
+        while cumVol < vaThreshold {
+            let leftVol  = loIdx > 0              ? volumes[loIdx - 1] : -1
+            let rightVol = hiIdx < bucketCount - 1 ? volumes[hiIdx + 1] : -1
+            if leftVol >= rightVol {
+                loIdx -= 1
+                cumVol += volumes[loIdx]
+            } else if rightVol >= 0 {
+                hiIdx += 1
+                cumVol += volumes[hiIdx]
+            } else {
+                break
+            }
+        }
+
+        let val = priceMin + Double(loIdx) * bucketSize
+        let vah = priceMin + Double(hiIdx + 1) * bucketSize
+
+        let buckets: [Bucket] = (0..<bucketCount).map { i in
+            Bucket(priceLevel: priceMin + Double(i) * bucketSize,
+                   volume: volumes[i])
+        }
+
+        let isBullish = p1.price > p0.price
+
+        return TrendVP(
+            poc: poc,
+            vah: vah,
+            val: val,
+            buckets: buckets,
+            startBar: segStart,
+            endBar: Double(segEnd),
+            isBullish: isBullish
+        )
+    }
 }

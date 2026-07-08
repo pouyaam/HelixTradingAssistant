@@ -173,8 +173,15 @@ struct OscillatorConfig: Codable, Equatable {
     // Volume Profile parameters (session-based, see `VolumeProfile`).
     // `vpBucketCount` is the number of equal-price bands per session;
     // `vpValueAreaPct` is the % of total volume that defines the value area.
+    // ZigZag-based VP: `vpUseZigzag` enables last-trend-only mode,
+    // `vpShowZigzag` draws the zigzag lines on the chart,
+    // `vpZZDepth` / `vpZZMinChange` tune the zigzag sensitivity.
     var vpBucketCount: Int = 24
     var vpValueAreaPct: Double = 70.0
+    var vpUseZigzag: Bool = true
+    var vpShowZigzag: Bool = true
+    var vpZZDepth: Int = 5
+    var vpZZMinChange: Double = 1.0
 
     // We decode every field with `decodeIfPresent` (see init(from:)) so
     // adding a field no longer requires bumping this key — an older
@@ -237,6 +244,10 @@ struct OscillatorConfig: Codable, Equatable {
         fvobNotifyEvents   = try c.decodeIfPresent(Bool.self,   forKey: .fvobNotifyEvents)   ?? false
         vpBucketCount      = try c.decodeIfPresent(Int.self,    forKey: .vpBucketCount)      ?? 24
         vpValueAreaPct     = try c.decodeIfPresent(Double.self, forKey: .vpValueAreaPct)     ?? 70.0
+        vpUseZigzag        = try c.decodeIfPresent(Bool.self,   forKey: .vpUseZigzag)        ?? true
+        vpShowZigzag       = try c.decodeIfPresent(Bool.self,   forKey: .vpShowZigzag)       ?? true
+        vpZZDepth          = try c.decodeIfPresent(Int.self,    forKey: .vpZZDepth)          ?? 5
+        vpZZMinChange      = try c.decodeIfPresent(Double.self, forKey: .vpZZMinChange)      ?? 1.0
     }
 
     /// Whether the given `TradingSessions` preset id is toggled on. Used

@@ -122,7 +122,11 @@ struct IndicatorSettingsPanel: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.Color.textSecondary)
         }
+        #if os(iOS)
+        .toggleStyle(.switch)
+        #else
         .toggleStyle(.checkbox)
+        #endif
     }
 
     private func enumRow(key: String, label: String, def: String, options: [ParamOption]) -> some View {
@@ -264,7 +268,11 @@ struct OscillatorSettingsPanel: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.Color.textSecondary)
         }
+        #if os(iOS)
+        .toggleStyle(.switch)
+        #else
         .toggleStyle(.checkbox)
+        #endif
     }
 
     private func enumRow(key: String, label: String, def: String, options: [ParamOption]) -> some View {

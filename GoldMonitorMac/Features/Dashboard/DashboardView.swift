@@ -371,6 +371,7 @@ struct DashboardView: View {
         guard let idx = indicatorInstances.firstIndex(where: { $0.id == inst.id }) else { return }
         indicatorInstances[idx] = inst
         saveIndicators()
+        syncIndicatorParamsToConfig(inst)
     }
 
     /// Toggle hide/show for an indicator instance.
@@ -395,11 +396,129 @@ struct DashboardView: View {
         guard let idx = oscillatorInstances.firstIndex(where: { $0.id == inst.id }) else { return }
         oscillatorInstances[idx] = inst
         saveOscillators()
+        syncOscillatorParamsToConfig(inst)
     }
 
     private func toggleOscillatorHidden(id: UUID) {
         guard let idx = oscillatorInstances.firstIndex(where: { $0.id == id }) else { return }
         oscillatorInstances[idx].hidden.toggle()
+        saveOscillators()
+    }
+
+    // ── Config ↔ instance param sync ─────────────────────────────
+    //
+    // Two settings systems exist in parallel:
+    //   1. `oscillatorConfig` (OscillatorConfig) — the global config
+    //      persisted at "dashboard.indicator.config.v2", edited by the
+    //      IndicatorSettingsSheet.
+    //   2. `indicatorInstances` / `oscillatorInstances` — per-instance
+    //      params persisted at "dashboard.indicators.v2" /
+    //      "dashboard.oscillators.v2", edited by the floating
+    //      IndicatorSettingsPanel / OscillatorSettingsPanel.
+    //
+    // ChartView reads overlay indicators (UT Bot, OB, FVG, etc.) from
+    // `oscillatorConfig`, while OscillatorPanel reads from
+    // `instance.params`.  The methods below keep the two in sync so
+    // changes from either UI propagate to the chart immediately.
+
+    /// Push an overlay indicator instance's params into `oscillatorConfig`
+    /// so ChartView picks them up without a restart.
+    private func syncIndicatorParamsToConfig(_ inst: IndicatorInstance) {
+        let p = inst.params
+        switch inst.kind {
+        case .utBot:
+            if let v = p["keyValue"]         { oscillatorConfig.utKeyValue = v.doubleValue }
+            if let v = p["atrPeriod"]        { oscillatorConfig.utATRPeriod = Int(v.doubleValue) }
+            if let v = p["useHeikinAshi"]    { oscillatorConfig.utUseHeikinAshi = v.boolValue }
+            if let v = p["showTrailingStop"] { oscillatorConfig.utShowTrailingStop = v.boolValue }
+        case .orderBlock:
+            if let v = p["periods"]       { oscillatorConfig.obPeriods = Int(v.doubleValue) }
+            if let v = p["threshold"]     { oscillatorConfig.obThreshold = v.doubleValue }
+            if let v = p["useWicks"]      { oscillatorConfig.obUseWicks = v.boolValue }
+            if let v = p["showExhausted"] { oscillatorConfig.obShowExhausted = v.boolValue }
+            if let v = p["detectSteroids"]{ oscillatorConfig.obDetectSteroids = v.boolValue }
+            if let v = p["notifyEvents"]  { oscillatorConfig.obNotifyEvents = v.boolValue }
+        case .steroidOrderBlock:
+            if let v = p["periods"]        { oscillatorConfig.sobPeriods = Int(v.doubleValue) }
+            if let v = p["threshold"]      { oscillatorConfig.sobThreshold = v.doubleValue }
+            if let v = p["volumeMult"]     { oscillatorConfig.sobVolumeMultiplier = v.doubleValue }
+            if let v = p["useWicks"]       { oscillatorConfig.sobUseWicks = v.boolValue }
+            if let v = p["showExhausted"]  { oscillatorConfig.sobShowExhausted = v.boolValue }
+            if let v = p["detectSteroids"] { oscillatorConfig.sobDetectSteroids = v.boolValue }
+            if let v = p["notifyEvents"]   { oscillatorConfig.sobNotifyEvents = v.boolValue }
+        case .tradingSession:
+            if let v = p["showTokyo"]     { oscillatorConfig.sessShowTokyo = v.boolValue }
+            if let v = p["showLondon"]    { oscillatorConfig.sessShowLondon = v.boolValue }
+            if let v = p["showNewYork"]   { oscillatorConfig.sessShowNewYork = v.boolValue }
+            if let v = p["showNames"]     { oscillatorConfig.sessShowNames = v.boolValue }
+            if let v = p["showOpenClose"] { oscillatorConfig.sessShowOpenClose = v.boolValue }
+            if let v = p["showRange"]     { oscillatorConfig.sessShowRange = v.boolValue }
+            if let v = p["showAverage"]   { oscillatorConfig.sessShowAverage = v.boolValue }
+        case .nyOpenSetup:
+            if let v = p["atrMult"] { oscillatorConfig.nyAtrMult = v.doubleValue }
+            if let v = p["amOnly"]  { oscillatorConfig.nyAMOnly = v.boolValue }
+        case .fairValueGap:
+            if let v = p["threshold"]     { oscillatorConfig.fvgThreshold = v.doubleValue }
+            if let v = p["showMitigated"] { oscillatorConfig.fvgShowMitigated = v.boolValue }
+        case .sonarlabOrderBlock:
+            if let v = p["sensitivity"]     { oscillatorConfig.sonarlabSensitivity = v.doubleValue }
+            if let v = p["mitigationType"]  { oscillatorConfig.sonarlabMitigationType = v.stringValue }
+        case .fvgFirstOB:
+            if let v = p["threshold"]      { oscillatorConfig.fvobFVGThreshold = v.doubleValue }
+            if let v = p["searchMin"]      { oscillatorConfig.fvobSearchMin = Int(v.doubleValue) }
+            if let v = p["searchMax"]      { oscillatorConfig.fvobSearchMax = Int(v.doubleValue) }
+            if let v = p["showExhausted"]  { oscillatorConfig.fvobShowExhausted = v.boolValue }
+            if let v = p["detectVolume"]   { oscillatorConfig.fvobDetectVolume = v.boolValue }
+            if let v = p["volumeMult"]     { oscillatorConfig.fvobVolumeMultiplier = v.doubleValue }
+            if let v = p["notifyEvents"]   { oscillatorConfig.fvobNotifyEvents = v.boolValue }
+        case .volumeProfile:
+            if let v = p["bucketCount"]  { oscillatorConfig.vpBucketCount = Int(v.doubleValue) }
+            if let v = p["valueAreaPct"] { oscillatorConfig.vpValueAreaPct = v.doubleValue }
+            if let v = p["useZigzag"]   { oscillatorConfig.vpUseZigzag = v.boolValue }
+            if let v = p["showZigzag"]  { oscillatorConfig.vpShowZigzag = v.boolValue }
+            if let v = p["zzDepth"]     { oscillatorConfig.vpZZDepth = Int(v.doubleValue) }
+            if let v = p["zzMinChange"] { oscillatorConfig.vpZZMinChange = v.doubleValue }
+        default:
+            break // SMA/EMA/Bollinger — read from indicatorInstances, no config sync needed
+        }
+        oscillatorConfig.save()
+    }
+
+    /// Push an oscillator instance's params into `oscillatorConfig`
+    /// so the global settings sheet and any config-dependent code stay
+    /// in sync with the per-instance panel.
+    private func syncOscillatorParamsToConfig(_ inst: OscillatorInstance) {
+        let p = inst.params
+        switch inst.kind {
+        case .rsi:
+            if let v = p["period"] { oscillatorConfig.rsiPeriod = Int(v.doubleValue) }
+        case .macd:
+            if let v = p["fast"]   { oscillatorConfig.macdFast = Int(v.doubleValue) }
+            if let v = p["slow"]   { oscillatorConfig.macdSlow = Int(v.doubleValue) }
+            if let v = p["signal"] { oscillatorConfig.macdSignal = Int(v.doubleValue) }
+        case .stochastic:
+            if let v = p["k"] { oscillatorConfig.stochK = Int(v.doubleValue) }
+            if let v = p["d"] { oscillatorConfig.stochD = Int(v.doubleValue) }
+        }
+        oscillatorConfig.save()
+    }
+
+    /// Push `oscillatorConfig` values into all oscillator instances so
+    /// OscillatorPanel picks up changes from the global settings sheet.
+    private func syncConfigToOscillatorInstances() {
+        for i in oscillatorInstances.indices {
+            switch oscillatorInstances[i].kind {
+            case .rsi:
+                oscillatorInstances[i].params["period"] = .double(Double(oscillatorConfig.rsiPeriod))
+            case .macd:
+                oscillatorInstances[i].params["fast"]   = .double(Double(oscillatorConfig.macdFast))
+                oscillatorInstances[i].params["slow"]   = .double(Double(oscillatorConfig.macdSlow))
+                oscillatorInstances[i].params["signal"] = .double(Double(oscillatorConfig.macdSignal))
+            case .stochastic:
+                oscillatorInstances[i].params["k"] = .double(Double(oscillatorConfig.stochK))
+                oscillatorInstances[i].params["d"] = .double(Double(oscillatorConfig.stochD))
+            }
+        }
         saveOscillators()
     }
 
@@ -800,7 +919,10 @@ struct DashboardView: View {
         // evaluator above.
         .onChange(of: candles.count) { _ in refreshNYSetupScenario() }
         .onChange(of: indicatorInstances) { _ in refreshNYSetupScenario() }
-        .onChange(of: oscillatorConfig) { _ in refreshNYSetupScenario() }
+        .onChange(of: oscillatorConfig) { _ in
+            refreshNYSetupScenario()
+            syncConfigToOscillatorInstances()
+        }
         // Activation sheet — driven by `pendingActivation` so the
         // analysis sheet can dismiss first and this one presents on
         // the next render (SwiftUI is fussy about back-to-back modal

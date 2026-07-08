@@ -375,12 +375,38 @@ struct ChartView: View {
     private static let maxFVGFirstOB = 10
 
     /// Session-based Volume Profile sessions — per-day histograms with POC, VAH, VAL.
+    /// Only used when ZigZag mode is disabled.
     private var volumeProfileSessions: [VolumeProfile.SessionVP] {
-        guard indicators.contains(.volumeProfile) else { return [] }
+        guard indicators.contains(.volumeProfile), !indicatorConfig.vpUseZigzag else { return [] }
         return derived.volumeProfile(
             candles: candles,
             bucketCount: indicatorConfig.vpBucketCount,
             valueAreaPct: indicatorConfig.vpValueAreaPct
+        )
+    }
+
+    /// ZigZag-based Volume Profile for the last trend segment only.
+    /// Used when ZigZag mode is enabled.
+    private var zigzagTrendVP: VolumeProfile.TrendVP? {
+        guard indicators.contains(.volumeProfile), indicatorConfig.vpUseZigzag else { return nil }
+        return derived.zigzagVolumeProfile(
+            candles: candles,
+            bucketCount: indicatorConfig.vpBucketCount,
+            valueAreaPct: indicatorConfig.vpValueAreaPct,
+            zzDepth: indicatorConfig.vpZZDepth,
+            zzMinChange: indicatorConfig.vpZZMinChange
+        )
+    }
+
+    /// ZigZag pivot points for drawing the zigzag line overlay.
+    private var zigzagPivots: [ZigZag.Pivot] {
+        guard indicators.contains(.volumeProfile),
+              indicatorConfig.vpUseZigzag,
+              indicatorConfig.vpShowZigzag else { return [] }
+        return derived.zigzagPivots(
+            candles: candles,
+            depth: indicatorConfig.vpZZDepth,
+            minChange: indicatorConfig.vpZZMinChange
         )
     }
 
@@ -490,6 +516,10 @@ struct ChartView: View {
             // Volume Profile — per-day histograms with POC, VAH, VAL.
             // Behind price action so candles remain the visual focus.
             volumeProfileMarks
+
+            // ZigZag line overlay — on top of candles when VP is in
+            // zigzag mode, so the user can see the detected trend.
+            zigzagLineMarks
 
             // NY Open Setup — opening-range box, breakout FVG, and the
             // entry/SL/TP plan. Behind the price action like the zones.
@@ -1985,10 +2015,69 @@ struct ChartView: View {
             }
     }
 
-    /// Volume Profile — per-day histogram bars with POC (solid), VAH/VAL
-    /// (dashed) lines, and faint vertical session separators.
+    /// Volume Profile — either zigzag-based (last trend, right side) or
+    /// session-based (per-day histograms), depending on `vpUseZigzag`.
     @ChartContentBuilder
     private var volumeProfileMarks: some ChartContent {
+        if indicatorConfig.vpUseZigzag {
+            zigzagVPMarks
+        } else {
+            sessionVPMarks
+        }
+    }
+
+    /// ZigZag-based VP: a single histogram for the last trend segment,
+    /// drawn on the right side of the chart past the candles so it
+    /// doesn't overlap the price action.
+    @ChartContentBuilder
+    private var zigzagVPMarks: some ChartContent {
+        if let vp = zigzagTrendVP {
+            let maxVol = vp.buckets.map(\.volume).max() ?? 1
+            let lastBar = Double(candles.count - 1)
+            // VP sits in the margin to the right of the last candle.
+            // The histogram grows leftward from the right edge.
+            let marginStart = lastBar + 1.0
+            let marginWidth = 20.0  // visual width in bar-index units
+            let bucketSize = vp.buckets.count > 1
+                ? (vp.buckets[1].priceLevel - vp.buckets[0].priceLevel)
+                : vp.buckets[0].priceLevel * 0.001
+
+            ForEach(Array(vp.buckets.enumerated()), id: \.offset) { _, bucket in
+                let barWidth = marginWidth * (bucket.volume / maxVol)
+                let isPOC = abs(bucket.priceLevel - vp.poc) < bucketSize * 0.01
+                RectangleMark(
+                    xStart: .value("ZVP x0", marginStart + marginWidth - barWidth),
+                    xEnd:   .value("ZVP x1", marginStart + marginWidth),
+                    yStart: .value("ZVP y0", bucket.priceLevel),
+                    yEnd:   .value("ZVP y1", bucket.priceLevel + bucketSize * 0.92)
+                )
+                .foregroundStyle(
+                    isPOC
+                        ? Color(red: 0.96, green: 0.36, blue: 0.36).opacity(0.85)
+                        : Theme.Color.info.opacity(0.45)
+                )
+            }
+
+            // POC line — solid, extends across the trend segment
+            RuleMark(y: .value("ZVP POC", vp.poc))
+                .foregroundStyle(Color(red: 0.96, green: 0.36, blue: 0.36))
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+
+            // VAH line — dashed
+            RuleMark(y: .value("ZVP VAH", vp.vah))
+                .foregroundStyle(Theme.Color.info.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+
+            // VAL line — dashed
+            RuleMark(y: .value("ZVP VAL", vp.val))
+                .foregroundStyle(Theme.Color.info.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+        }
+    }
+
+    /// Session-based VP: per-day histograms (the original behavior).
+    @ChartContentBuilder
+    private var sessionVPMarks: some ChartContent {
         let sessions = volumeProfileSessions
         ForEach(sessions) { session in
             let maxVol = session.buckets.map(\.volume).max() ?? 1
@@ -2036,6 +2125,49 @@ struct ChartView: View {
                 RuleMark(x: .value("VP sep", Double(session.startBar) - 0.5))
                     .foregroundStyle(Theme.Color.textMuted.opacity(0.15))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 4]))
+            }
+        }
+    }
+
+    /// ZigZag line overlay — connects consecutive swing pivots with
+    /// alternating colored lines. Only rendered when VP is in zigzag
+    /// mode and "Show ZigZag lines" is enabled.
+    @ChartContentBuilder
+    private var zigzagLineMarks: some ChartContent {
+        let pivots = zigzagPivots
+        if pivots.count >= 2 {
+            ForEach(0..<(pivots.count - 1), id: \.self) { i in
+                let p0 = pivots[i]
+                let p1 = pivots[i + 1]
+                let color = p1.isHigh
+                    ? Color(red: 0.96, green: 0.36, blue: 0.36)  // red for swing high
+                    : Color(red: 0.30, green: 0.80, blue: 0.40)  // green for swing low
+                LineMark(
+                    x: .value("ZZ x0", Double(p0.barIndex)),
+                    y: .value("ZZ y0", p0.price),
+                    series: .value("ZZ", i)
+                )
+                .foregroundStyle(color.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+                LineMark(
+                    x: .value("ZZ x1", Double(p1.barIndex)),
+                    y: .value("ZZ y1", p1.price),
+                    series: .value("ZZ", i)
+                )
+                .foregroundStyle(color.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+            }
+            // Pivot dots
+            ForEach(pivots) { pivot in
+                let color = pivot.isHigh
+                    ? Color(red: 0.96, green: 0.36, blue: 0.36)
+                    : Color(red: 0.30, green: 0.80, blue: 0.40)
+                PointMark(
+                    x: .value("ZZ dot x", Double(pivot.barIndex)),
+                    y: .value("ZZ dot y", pivot.price)
+                )
+                .foregroundStyle(color)
+                .symbolSize(18)
             }
         }
     }
@@ -3348,6 +3480,10 @@ struct ChartView: View {
             + volumeProfileSessions.flatMap { session in
                 session.buckets.map { .init(low: $0.priceLevel, high: $0.priceLevel) }
             }
+            + (zigzagTrendVP.map { vp in
+                vp.buckets.map { .init(low: $0.priceLevel, high: $0.priceLevel) }
+            } ?? [])
+            + zigzagPivots.map { .init(low: $0.price, high: $0.price) }
         let drawingPoints: [ChartDerivedCache.PricePoint] = drawings
             .filter(\.visible)
             .flatMap { d -> [ChartDerivedCache.PricePoint] in
