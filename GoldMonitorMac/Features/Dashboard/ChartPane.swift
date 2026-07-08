@@ -13,8 +13,8 @@ struct ChartPane: Identifiable, Codable, Equatable {
     var pairID: String
     var timeframe: Timeframe
     var chartType: ChartType
-    var indicators: Set<IndicatorKind>
-    var oscillators: Set<OscillatorKind>
+    var indicatorInstances: [IndicatorInstance]
+    var oscillatorInstances: [OscillatorInstance]
     var showVolume: Bool
 
     init(
@@ -22,16 +22,16 @@ struct ChartPane: Identifiable, Codable, Equatable {
         pairID: String,
         timeframe: Timeframe = .h1,
         chartType: ChartType = .candle,
-        indicators: Set<IndicatorKind> = [],
-        oscillators: Set<OscillatorKind> = [],
+        indicatorInstances: [IndicatorInstance] = [],
+        oscillatorInstances: [OscillatorInstance] = [],
         showVolume: Bool = true
     ) {
         self.id = id
         self.pairID = pairID
         self.timeframe = timeframe
         self.chartType = chartType
-        self.indicators = indicators
-        self.oscillators = oscillators
+        self.indicatorInstances = indicatorInstances
+        self.oscillatorInstances = oscillatorInstances
         self.showVolume = showVolume
     }
 }
@@ -150,8 +150,8 @@ final class MultiChartLayoutStore: ObservableObject {
             panes.append(ChartPane(
                 pairID: panes.last?.pairID ?? defaultPairID,
                 timeframe: tf,
-                indicators: indicators,
-                oscillators: oscillators,
+                indicatorInstances: indicators.map { IndicatorInstance(kind: $0) },
+                oscillatorInstances: oscillators.map { OscillatorInstance(kind: $0) },
                 showVolume: showVolume
             ))
         }

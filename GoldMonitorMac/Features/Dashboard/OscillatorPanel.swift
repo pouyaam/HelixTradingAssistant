@@ -9,9 +9,8 @@ import Charts
 /// X axis is hidden — the main chart's X axis labels the time for the
 /// whole stack via shared `xDomain`.
 struct OscillatorPanel: View {
-    let kind: OscillatorKind
+    let instance: OscillatorInstance
     let candles: [Candle]
-    let config: OscillatorConfig
     /// Same bar-index domain the price chart uses; lets pan/zoom on the
     /// price chart move this panel in lock-step.
     let xDomain: ClosedRange<Double>?
@@ -34,7 +33,7 @@ struct OscillatorPanel: View {
 
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                Text(kind.displayName(config: config))
+                Text(instance.label)
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Theme.Color.textSecondary)
                 Spacer()
@@ -68,7 +67,7 @@ struct OscillatorPanel: View {
 
     @ChartContentBuilder
     private func marks(pts: [IndicatorPoint]) -> some ChartContent {
-        switch kind {
+        switch instance.kind {
         case .rsi:
             ForEach(pts) { p in
                 LineMark(
@@ -119,7 +118,7 @@ struct OscillatorPanel: View {
     /// 30/70 (oversold/overbought), Stochastic uses 20/80, MACD uses 0.
     @ChartContentBuilder
     private var referenceLines: some ChartContent {
-        switch kind {
+        switch instance.kind {
         case .rsi:
             RuleMark(y: .value("Overbought", 70))
                 .foregroundStyle(Theme.Color.danger.opacity(0.35))
@@ -149,7 +148,7 @@ struct OscillatorPanel: View {
     @ViewBuilder
     private var latestReadout: some View {
         let pts = computedPoints
-        switch kind {
+        switch instance.kind {
         case .rsi:
             if let last = pts.last {
                 Text(String(format: "%.1f", last.value))
@@ -193,7 +192,21 @@ struct OscillatorPanel: View {
     /// and across pan/zoom frames reuse one computation instead of
     /// re-running it over the full history each time.
     private var computedPoints: [IndicatorPoint] {
-        derived.oscillatorPoints(kind: kind, candles: candles, config: config)
+        derived.oscillatorPoints(kind: instance.kind, candles: candles, config: oscillatorConfigFromParams(instance.params))
+    }
+
+    /// Build an OscillatorConfig from per-instance params for the cache
+    /// to use (the shared cache slot already keys on the individual
+    /// int fields, so the extra config fields are harmless).
+    private func oscillatorConfigFromParams(_ params: [String: ParamValue]) -> OscillatorConfig {
+        var c = OscillatorConfig()
+        if let v = params["period"] { c.rsiPeriod = Int(v.doubleValue); c.stochK = Int(v.doubleValue) }
+        if let v = params["fast"]   { c.macdFast = Int(v.doubleValue) }
+        if let v = params["slow"]   { c.macdSlow = Int(v.doubleValue) }
+        if let v = params["signal"] { c.macdSignal = Int(v.doubleValue) }
+        if let v = params["k"]      { c.stochK = Int(v.doubleValue) }
+        if let v = params["d"]      { c.stochD = Int(v.doubleValue) }
+        return c
     }
 
     /// computedPoints restricted to the bar indices actually rendered
@@ -213,12 +226,10 @@ struct OscillatorPanel: View {
     }
 
     private func yDomainForPoints(_ pts: [IndicatorPoint]) -> ClosedRange<Double> {
-        switch kind {
+        switch instance.kind {
         case .rsi, .stochastic:
             return 0 ... 100
         case .macd:
-            // Pad ±5% around the visible MACD range so the histogram
-            // bars don't sit flush against the top/bottom edges.
             let values = pts.map(\.value)
             let lo = values.min() ?? -1
             let hi = values.max() ?? 1
@@ -229,7 +240,7 @@ struct OscillatorPanel: View {
     }
 
     private func yAxisValues(for yDom: ClosedRange<Double>) -> [Double] {
-        switch kind {
+        switch instance.kind {
         case .rsi:        return [30, 50, 70]
         case .stochastic: return [20, 50, 80]
         case .macd:       return [yDom.lowerBound, 0, yDom.upperBound]
@@ -237,7 +248,7 @@ struct OscillatorPanel: View {
     }
 
     private func yLabel(_ v: Double) -> String {
-        switch kind {
+        switch instance.kind {
         case .rsi, .stochastic:
             return String(format: "%.0f", v)
         case .macd:

@@ -9,21 +9,27 @@ struct DashboardView: View {
     @EnvironmentObject private var notificationInbox: NotificationInbox
 
     // Persisted session state — every selection the user makes here gets
-    // restored on relaunch. RawRepresentable<String> enums and primitive
-    // toggles use @AppStorage directly; the indicator/oscillator Sets are
-    // backed by comma-separated rawValue strings (see helpers below).
+    // restored on relaunch.
     @AppStorage("dashboard.timeframe")  private var timeframe: Timeframe = .h1
     @AppStorage("dashboard.chartType")  private var userChartType: ChartType = .candle
     @AppStorage("dashboard.showVolume") private var showVolume: Bool = true
-    @AppStorage("dashboard.indicators")  private var indicatorsRaw: String = ""
-    @AppStorage("dashboard.oscillators") private var oscillatorsRaw: String = ""
-    /// Layers temporarily hidden by the Layers popover. Distinct from
-    /// "disabled" — a hidden indicator stays in `enabledIndicators`
-    /// (and so persists / shows up in the menu as toggled-on) but the
-    /// chart skips rendering it. Same shape as the enabled sets: CSV
-    /// of rawValues, persisted via @AppStorage.
-    @AppStorage("dashboard.hiddenIndicators")  private var hiddenIndicatorsRaw: String = ""
-    @AppStorage("dashboard.hiddenOscillators") private var hiddenOscillatorsRaw: String = ""
+    /// Multi-instance indicator/oscillator storage — JSON-encoded arrays
+    /// persisted to UserDefaults. Each instance holds its kind, params,
+    /// and hide/show state.
+    private static let indicatorStorageKey = "dashboard.indicators.v2"
+    private static let oscillatorStorageKey = "dashboard.oscillators.v2"
+
+    @State private var indicatorInstances: [IndicatorInstance] = []
+    @State private var oscillatorInstances: [OscillatorInstance] = []
+
+    /// Which instance's settings panel is open (if any). Setting this
+    /// presents the floating draggable panel for that instance.
+    @State private var editingIndicatorID: UUID? = nil
+    @State private var editingOscillatorID: UUID? = nil
+
+    /// Legacy global settings sheet state — kept for backward compat.
+    @State private var showIndicatorSettings: Bool = false
+    @State private var settingsFocusSection: String? = nil
 
     @State private var candles: [Candle] = []
     @State private var isLoading: Bool = false
@@ -45,10 +51,6 @@ struct DashboardView: View {
     /// fast/slow/signal, etc.). Loaded from UserDefaults on init so
     /// settings stick across launches.
     @State private var oscillatorConfig: OscillatorConfig = .load()
-    /// Indicator-settings sheet visibility.
-    @State private var showIndicatorSettings: Bool = false
-    /// When non-nil the sheet scrolls to this section on open.
-    @State private var settingsFocusSection: String? = nil
     /// Whether the chart-corner indicator legend is expanded.
     @State private var indicatorLegendExpanded: Bool = true
     /// Support / Resistance levels the user has chosen to draw on the
@@ -237,7 +239,7 @@ struct DashboardView: View {
     /// the displayed candles; the detector supports 1m and 5m and returns
     /// nothing on coarser timeframes.
     private func currentNYSetupScenario() -> PromptBuilder.TAScenario? {
-        guard enabledIndicators.contains(.nyOpenSetup), !candles.isEmpty else { return nil }
+        guard enabledIndicatorKinds.contains(.nyOpenSetup), !candles.isEmpty else { return nil }
         let results = NYOpenSetup.compute(
             candles,
             atrMultiple: oscillatorConfig.nyAtrMult,
@@ -298,58 +300,135 @@ struct DashboardView: View {
     /// Both are stored in @AppStorage as a comma-separated rawValue
     /// string — Set isn't a @AppStorage-supported type directly, so we
     /// translate at the boundary.
-    private var enabledIndicators: Set<IndicatorKind> {
-        Set(indicatorsRaw.split(separator: ",")
-            .compactMap { IndicatorKind(rawValue: String($0)) })
+    private var enabledIndicatorKinds: Set<IndicatorKind> {
+        Set(indicatorInstances.map(\.kind))
     }
+
+    private var visibleIndicatorInstances: [IndicatorInstance] {
+        indicatorInstances.filter { !$0.hidden }
+    }
+
+    private var visibleOscillatorInstances: [OscillatorInstance] {
+        oscillatorInstances.filter { !$0.hidden }
+    }
+
+    // ── Backward-compat helpers for legacy UI sections ──────────────
+
     private var enabledOscillators: Set<OscillatorKind> {
-        Set(oscillatorsRaw.split(separator: ",")
-            .compactMap { OscillatorKind(rawValue: String($0)) })
+        Set(oscillatorInstances.map(\.kind))
+    }
+    private var hiddenIndicators: Set<IndicatorKind> {
+        Set(indicatorInstances.filter(\.hidden).map(\.kind))
+    }
+    private var hiddenOscillators: Set<OscillatorKind> {
+        Set(oscillatorInstances.filter(\.hidden).map(\.kind))
     }
 
     private func setIndicator(_ kind: IndicatorKind, enabled: Bool) {
-        var s = enabledIndicators
-        if enabled { s.insert(kind) } else { s.remove(kind) }
-        // Sort so the persisted string is canonical — easier to eyeball
-        // in `defaults read` and avoids cache-busting on no-op writes.
-        indicatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+        if enabled, !indicatorInstances.contains(where: { $0.kind == kind }) {
+            addIndicator(kind)
+        } else if !enabled {
+            indicatorInstances.removeAll { $0.kind == kind }
+            saveIndicators()
+        }
     }
     private func setOscillator(_ kind: OscillatorKind, enabled: Bool) {
-        var s = enabledOscillators
-        if enabled { s.insert(kind) } else { s.remove(kind) }
-        oscillatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+        if enabled, !oscillatorInstances.contains(where: { $0.kind == kind }) {
+            addOscillator(kind)
+        } else if !enabled {
+            oscillatorInstances.removeAll { $0.kind == kind }
+            saveOscillators()
+        }
     }
-
-    /// Hidden indicators/oscillators — same persistence shape as the
-    /// enabled sets so visibility survives a relaunch.
-    private var hiddenIndicators: Set<IndicatorKind> {
-        Set(hiddenIndicatorsRaw.split(separator: ",")
-            .compactMap { IndicatorKind(rawValue: String($0)) })
-    }
-    private var hiddenOscillators: Set<OscillatorKind> {
-        Set(hiddenOscillatorsRaw.split(separator: ",")
-            .compactMap { OscillatorKind(rawValue: String($0)) })
-    }
-
-    /// What ChartView / the oscillator panel stack actually render:
-    /// enabled minus hidden. Lets the Layers popover hide a layer
-    /// without disturbing the menu's enabled state.
-    private var visibleIndicators: Set<IndicatorKind> {
-        enabledIndicators.subtracting(hiddenIndicators)
-    }
-    private var visibleOscillators: Set<OscillatorKind> {
-        enabledOscillators.subtracting(hiddenOscillators)
-    }
-
     private func setIndicatorHidden(_ kind: IndicatorKind, hidden: Bool) {
-        var s = hiddenIndicators
-        if hidden { s.insert(kind) } else { s.remove(kind) }
-        hiddenIndicatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+        for i in indicatorInstances.indices where indicatorInstances[i].kind == kind {
+            indicatorInstances[i].hidden = hidden
+        }
+        saveIndicators()
     }
     private func setOscillatorHidden(_ kind: OscillatorKind, hidden: Bool) {
-        var s = hiddenOscillators
-        if hidden { s.insert(kind) } else { s.remove(kind) }
-        hiddenOscillatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+        for i in oscillatorInstances.indices where oscillatorInstances[i].kind == kind {
+            oscillatorInstances[i].hidden = hidden
+        }
+        saveOscillators()
+    }
+
+    /// Add a new indicator instance with the given kind's default params.
+    private func addIndicator(_ kind: IndicatorKind) {
+        let inst = IndicatorInstance(kind: kind)
+        indicatorInstances.append(inst)
+        saveIndicators()
+    }
+
+    /// Remove an indicator instance by id.
+    private func removeIndicator(id: UUID) {
+        indicatorInstances.removeAll { $0.id == id }
+        saveIndicators()
+    }
+
+    /// Update an indicator instance in-place.
+    private func updateIndicator(_ inst: IndicatorInstance) {
+        guard let idx = indicatorInstances.firstIndex(where: { $0.id == inst.id }) else { return }
+        indicatorInstances[idx] = inst
+        saveIndicators()
+    }
+
+    /// Toggle hide/show for an indicator instance.
+    private func toggleIndicatorHidden(id: UUID) {
+        guard let idx = indicatorInstances.firstIndex(where: { $0.id == id }) else { return }
+        indicatorInstances[idx].hidden.toggle()
+        saveIndicators()
+    }
+
+    private func addOscillator(_ kind: OscillatorKind) {
+        let inst = OscillatorInstance(kind: kind)
+        oscillatorInstances.append(inst)
+        saveOscillators()
+    }
+
+    private func removeOscillator(id: UUID) {
+        oscillatorInstances.removeAll { $0.id == id }
+        saveOscillators()
+    }
+
+    private func updateOscillator(_ inst: OscillatorInstance) {
+        guard let idx = oscillatorInstances.firstIndex(where: { $0.id == inst.id }) else { return }
+        oscillatorInstances[idx] = inst
+        saveOscillators()
+    }
+
+    private func toggleOscillatorHidden(id: UUID) {
+        guard let idx = oscillatorInstances.firstIndex(where: { $0.id == id }) else { return }
+        oscillatorInstances[idx].hidden.toggle()
+        saveOscillators()
+    }
+
+    // ── Persistence ────────────────────────────────────────────────
+
+    private func loadIndicators() {
+        if let data = UserDefaults.standard.data(forKey: Self.indicatorStorageKey),
+           let decoded = try? JSONDecoder().decode([IndicatorInstance].self, from: data) {
+            indicatorInstances = decoded
+        }
+    }
+
+    private func saveIndicators() {
+        if let data = try? JSONEncoder().encode(indicatorInstances) {
+            UserDefaults.standard.set(data, forKey: Self.indicatorStorageKey)
+        }
+    }
+
+    private func loadOscillators() {
+        if let data = UserDefaults.standard.data(forKey: Self.oscillatorStorageKey),
+           let decoded = try? JSONDecoder().decode([OscillatorInstance].self, from: data) {
+            oscillatorInstances = decoded
+        }
+    }
+
+    private func saveOscillators() {
+        if let data = try? JSONEncoder().encode(oscillatorInstances) {
+            UserDefaults.standard.set(data, forKey: Self.oscillatorStorageKey)
+        }
     }
 
     /// The chart style to render. 1m used to be forced to line (candles at
@@ -387,25 +466,25 @@ struct DashboardView: View {
         return true
     }
 
-    /// Push the dashboard's decoded indicator set to the fullscreen pane.
+    /// Push the dashboard's indicator instances to the fullscreen pane.
     private func syncIndicatorsToFullscreenPane() {
         guard let fsID = multiChart.fullscreenPaneID,
               let pane = multiChart.panes.first(where: { $0.id == fsID }),
-              pane.indicators != enabledIndicators
+              pane.indicatorInstances != indicatorInstances
         else { return }
         var p = pane
-        p.indicators = enabledIndicators
+        p.indicatorInstances = indicatorInstances
         multiChart.updatePane(p)
     }
 
-    /// Push the dashboard's decoded oscillator set to the fullscreen pane.
+    /// Push the dashboard's oscillator instances to the fullscreen pane.
     private func syncOscillatorsToFullscreenPane() {
         guard let fsID = multiChart.fullscreenPaneID,
               let pane = multiChart.panes.first(where: { $0.id == fsID }),
-              pane.oscillators != enabledOscillators
+              pane.oscillatorInstances != oscillatorInstances
         else { return }
         var p = pane
-        p.oscillators = enabledOscillators
+        p.oscillatorInstances = oscillatorInstances
         multiChart.updatePane(p)
     }
 
@@ -551,6 +630,8 @@ struct DashboardView: View {
         // Confluence Trade Scanner after a trade closes without the user opening
         // the analysis page.
         .task {
+            loadIndicators()
+            loadOscillators()
             alertStore.attach(inbox: notificationInbox)
             alertStore.timeframeLabel = timeframe.rawValue
             autoTrader.candleLoader = { [weak app = self.app] pairID, tf in
@@ -579,10 +660,10 @@ struct DashboardView: View {
         .onChange(of: userChartType) { newValue in
             _ = syncToFullscreenPane(\.chartType, newValue)
         }
-        .onChange(of: indicatorsRaw) { _ in
+        .onChange(of: indicatorInstances) { _ in
             syncIndicatorsToFullscreenPane()
         }
-        .onChange(of: oscillatorsRaw) { _ in
+        .onChange(of: oscillatorInstances) { _ in
             syncOscillatorsToFullscreenPane()
         }
         .onChange(of: showVolume) { newValue in
@@ -598,8 +679,8 @@ struct DashboardView: View {
             else { return }
             timeframe = pane.timeframe
             userChartType = pane.chartType
-            indicatorsRaw = pane.indicators.map(\.rawValue).sorted().joined(separator: ",")
-            oscillatorsRaw = pane.oscillators.map(\.rawValue).sorted().joined(separator: ",")
+            indicatorInstances = pane.indicatorInstances
+            oscillatorInstances = pane.oscillatorInstances
             showVolume = pane.showVolume
         }
         // Cache totalVolume so the O(n) candle iteration only runs
@@ -718,7 +799,7 @@ struct DashboardView: View {
         // already-registered alerts fire on price touch via the tick
         // evaluator above.
         .onChange(of: candles.count) { _ in refreshNYSetupScenario() }
-        .onChange(of: indicatorsRaw) { _ in refreshNYSetupScenario() }
+        .onChange(of: indicatorInstances) { _ in refreshNYSetupScenario() }
         .onChange(of: oscillatorConfig) { _ in refreshNYSetupScenario() }
         // Activation sheet — driven by `pendingActivation` so the
         // analysis sheet can dismiss first and this one presents on
@@ -960,8 +1041,9 @@ struct DashboardView: View {
                     accent: pair.color,
                     xDomain: $xDomain,
                     yDomain: $yDomain,
-                    indicators: visibleIndicators,
+                    indicators: Set(visibleIndicatorInstances.map(\.kind)),
                     indicatorConfig: oscillatorConfig,
+                    indicatorInstances: visibleIndicatorInstances,
                     srLevels: srVisible ? srLevels : .init(support: [], resistance: []),
                     fvgZones: fvgVisible ? fvgZones : [],
                     supplyDemandZones: supplyDemandVisible ? supplyDemandZones : [],
@@ -1161,6 +1243,37 @@ struct DashboardView: View {
                         .padding(.trailing, Theme.Spacing.md)
                         .padding(.top, Theme.Spacing.md)
                 }
+                // Floating per-instance settings panel
+                .overlay(alignment: .topLeading) {
+                    if let id = editingIndicatorID,
+                       let idx = indicatorInstances.firstIndex(where: { $0.id == id }) {
+                        IndicatorSettingsPanel(
+                            instance: Binding(
+                                get: { indicatorInstances[idx] },
+                                set: { updateIndicator($0) }
+                            ),
+                            onUpdate: { inst in updateIndicator(inst) },
+                            onClose: { editingIndicatorID = nil }
+                        )
+                        .padding(.leading, Theme.Spacing.md)
+                        .padding(.top, Theme.Spacing.md)
+                    }
+                }
+                .overlay(alignment: .topLeading) {
+                    if let id = editingOscillatorID,
+                       let idx = oscillatorInstances.firstIndex(where: { $0.id == id }) {
+                        OscillatorSettingsPanel(
+                            instance: Binding(
+                                get: { oscillatorInstances[idx] },
+                                set: { updateOscillator($0) }
+                            ),
+                            onUpdate: { inst in updateOscillator(inst) },
+                            onClose: { editingOscillatorID = nil }
+                        )
+                        .padding(.leading, Theme.Spacing.md)
+                        .padding(.top, Theme.Spacing.md)
+                    }
+                }
 
                 volumeStrip(pair)
 
@@ -1183,16 +1296,13 @@ struct DashboardView: View {
     /// stays stable as the user flips them.
     @ViewBuilder
     private var oscillatorPanels: some View {
-        ForEach(OscillatorKind.allCases) { kind in
-            if visibleOscillators.contains(kind) {
-                OscillatorPanel(
-                    kind: kind,
-                    candles: candles,
-                    config: oscillatorConfig,
-                    xDomain: xDomain
-                )
-                .padding(.trailing, Theme.Spacing.sm)
-            }
+        ForEach(visibleOscillatorInstances) { inst in
+            OscillatorPanel(
+                instance: inst,
+                candles: candles,
+                xDomain: xDomain
+            )
+            .padding(.trailing, Theme.Spacing.sm)
         }
     }
 
@@ -1206,41 +1316,88 @@ struct DashboardView: View {
                     Label("Volume", systemImage: showVolume
                           ? "checkmark.circle.fill" : "circle")
                 }
-                ForEach(IndicatorKind.allCases) { kind in
-                    let isOn = enabledIndicators.contains(kind)
-                    let isHidden = isOn && hiddenIndicators.contains(kind)
+                ForEach(indicatorInstances) { inst in
+                    let isHidden = inst.hidden
                     Button {
-                        if isOn {
-                            // Toggle visibility (fast show/hide)
-                            setIndicatorHidden(kind, hidden: !isHidden)
-                        } else {
-                            // Enable indicator
-                            setIndicator(kind, enabled: true)
-                        }
+                        toggleIndicatorHidden(id: inst.id)
                     } label: {
                         Label {
                             HStack(spacing: 6) {
-                                Text(kind.label)
-                                if isOn {
-                                    Image(systemName: isHidden ? "eye.slash" : "eye")
+                                Text(inst.label)
+                                    .foregroundStyle(isHidden ? Theme.Color.textMuted : inst.kind.color)
+                                Spacer()
+                                if editingIndicatorID == inst.id {
+                                    Image(systemName: "slider.horizontal.3")
                                         .font(.system(size: 10))
-                                        .foregroundStyle(isHidden ? Theme.Color.textMuted.opacity(0.4) : kind.color)
+                                        .foregroundStyle(Theme.Color.info)
                                 }
                             }
                         } icon: {
-                            Image(systemName: isOn
-                                  ? (isHidden ? "eye.slash" : "checkmark.circle.fill")
-                                  : "circle")
+                            Image(systemName: isHidden ? "eye.slash" : "checkmark.circle.fill")
+                                .foregroundStyle(isHidden ? Theme.Color.textMuted : inst.kind.color)
+                        }
+                    }
+                    .contextMenu {
+                        Button {
+                            editingIndicatorID = inst.id
+                        } label: {
+                            Label("Settings", systemImage: "slider.horizontal.3")
+                        }
+                        Button(role: .destructive) {
+                            removeIndicator(id: inst.id)
+                        } label: {
+                            Label("Remove", systemImage: "trash")
+                        }
+                    }
+                }
+                Menu("Add indicator") {
+                    ForEach(IndicatorKind.allCases) { kind in
+                        Button {
+                            addIndicator(kind)
+                        } label: {
+                            Text(kind.label)
                         }
                     }
                 }
             }
             Section("Panels") {
-                ForEach(OscillatorKind.allCases) { kind in
-                    Toggle(isOn: oscillatorBinding(kind)) {
-                        Label(kind.displayName(config: oscillatorConfig),
-                              systemImage: enabledOscillators.contains(kind)
-                              ? "checkmark.circle.fill" : "circle")
+                ForEach(oscillatorInstances) { inst in
+                    Button {
+                        toggleOscillatorHidden(id: inst.id)
+                    } label: {
+                        Label {
+                            HStack(spacing: 6) {
+                                Text(inst.label)
+                                if editingOscillatorID == inst.id {
+                                    Image(systemName: "slider.horizontal.3")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Theme.Color.info)
+                                }
+                            }
+                        } icon: {
+                            Image(systemName: inst.hidden ? "eye.slash" : "checkmark.circle.fill")
+                        }
+                    }
+                    .contextMenu {
+                        Button {
+                            editingOscillatorID = inst.id
+                        } label: {
+                            Label("Settings", systemImage: "slider.horizontal.3")
+                        }
+                        Button(role: .destructive) {
+                            removeOscillator(id: inst.id)
+                        } label: {
+                            Label("Remove", systemImage: "trash")
+                        }
+                    }
+                }
+                Menu("Add panel") {
+                    ForEach(OscillatorKind.allCases) { kind in
+                        Button {
+                            addOscillator(kind)
+                        } label: {
+                            Text(kind.label)
+                        }
                     }
                 }
             }
@@ -1280,11 +1437,13 @@ struct DashboardView: View {
                     )
                 }
             }
-            if !enabledIndicators.isEmpty || !enabledOscillators.isEmpty {
+            if !enabledIndicatorKinds.isEmpty || !enabledOscillators.isEmpty {
                 Divider()
                 Button("Clear all") {
-                    indicatorsRaw = ""
-                    oscillatorsRaw = ""
+                    indicatorInstances = []
+                    oscillatorInstances = []
+                    saveIndicators()
+                    saveOscillators()
                 }
             }
         } label: {
@@ -1300,7 +1459,7 @@ struct DashboardView: View {
                     .background(
                         RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface)
                     )
-                let activeCount = enabledIndicators.count + enabledOscillators.count
+                let activeCount = enabledIndicatorKinds.count + enabledOscillators.count
                 if activeCount > 0 {
                     Circle()
                         .fill(Theme.accentGradient)
@@ -1312,7 +1471,7 @@ struct DashboardView: View {
                         .offset(x: 3, y: -3)
                 }
             }
-            .help(activeCount(label: enabledIndicators.count + enabledOscillators.count))
+            .help(activeCount(label: enabledIndicatorKinds.count + enabledOscillators.count))
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -1349,7 +1508,7 @@ struct DashboardView: View {
     /// button per row. Collapse/expand with the chevron.
     @ViewBuilder
     private var indicatorLegendOverlay: some View {
-        let overlays = Array(enabledIndicators).sorted { $0.rawValue < $1.rawValue }
+        let overlays = Array(enabledIndicatorKinds).sorted { $0.rawValue < $1.rawValue }
         let panels   = Array(enabledOscillators).sorted { $0.rawValue < $1.rawValue }
         guard !overlays.isEmpty || !panels.isEmpty else { return AnyView(EmptyView()) }
         return AnyView(
@@ -1381,15 +1540,11 @@ struct DashboardView: View {
 
                 if indicatorLegendExpanded {
                     VStack(alignment: .leading, spacing: 1) {
-                        ForEach(overlays) { kind in
-                            legendOverlayRow(for: kind)
+                        ForEach(indicatorInstances) { inst in
+                            legendInstanceRow(for: inst)
                         }
-                        ForEach(panels) { kind in
-                            legendRow(
-                                label: kind.displayName(config: oscillatorConfig),
-                                color: .white.opacity(0.6),
-                                settingsSection: kind.settingsSection
-                            )
+                        ForEach(oscillatorInstances) { inst in
+                            legendOscillatorRow(for: inst)
                         }
                     }
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -1398,93 +1553,67 @@ struct DashboardView: View {
         )
     }
 
-    /// One row in the expanded indicator legend for overlay indicators,
-    /// with color swatch + name + eye + gear.
-    private func legendOverlayRow(for kind: IndicatorKind) -> some View {
-        let isHidden = hiddenIndicators.contains(kind)
-        return HStack(spacing: 5) {
-            // Color swatch
+    /// One row in the expanded indicator legend for an indicator instance.
+    private func legendInstanceRow(for inst: IndicatorInstance) -> some View {
+        HStack(spacing: 5) {
             RoundedRectangle(cornerRadius: 2)
-                .fill(isHidden ? kind.color.opacity(0.35) : kind.color)
+                .fill(inst.hidden ? inst.kind.color.opacity(0.35) : inst.kind.color)
                 .frame(width: 12, height: 3)
 
-            Text(kind.label)
+            Text(inst.label)
                 .font(.system(size: 10, weight: .medium).monospacedDigit())
-                .foregroundStyle(isHidden ? kind.color.opacity(0.35) : kind.color)
+                .foregroundStyle(inst.hidden ? inst.kind.color.opacity(0.35) : inst.kind.color)
                 .lineLimit(1)
 
-            // Eye — toggle show/hide.
             Button {
-                setIndicatorHidden(kind, hidden: !isHidden)
+                toggleIndicatorHidden(id: inst.id)
             } label: {
-                Image(systemName: isHidden ? "eye.slash" : "eye")
+                Image(systemName: inst.hidden ? "eye.slash" : "eye")
                     .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(isHidden ? Theme.Color.textMuted.opacity(0.4) : Theme.Color.textSecondary)
+                    .foregroundStyle(inst.hidden ? Theme.Color.textMuted.opacity(0.4) : Theme.Color.textSecondary)
                     .frame(width: 16, height: 16)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Theme.Color.surface.opacity(0.7))
-                    )
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Theme.Color.surface.opacity(0.7)))
             }
             .buttonStyle(.plain)
-            .help(isHidden ? "Show on chart" : "Hide on chart")
 
-            // Gear — opens settings.
             Button {
-                settingsFocusSection = kind.settingsSection
-                showIndicatorSettings = true
+                editingIndicatorID = inst.id
             } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(Theme.Color.textMuted)
                     .frame(width: 16, height: 16)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Theme.Color.surface.opacity(0.7))
-                    )
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Theme.Color.surface.opacity(0.7)))
             }
             .buttonStyle(.plain)
-            .help("Settings for \(kind.label)")
+            .help("Settings for \(inst.label)")
         }
         .padding(.horizontal, 6)
     }
 
-    @ViewBuilder
-    private func legendRow(label: String, color: Color, settingsSection: String?) -> some View {
+    /// One row in the expanded indicator legend for an oscillator instance.
+    private func legendOscillatorRow(for inst: OscillatorInstance) -> some View {
         HStack(spacing: 5) {
-            // Per-indicator gear button — opens settings scrolled to that section.
             Button {
-                settingsFocusSection = settingsSection
-                showIndicatorSettings = true
+                editingOscillatorID = inst.id
             } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(Theme.Color.textMuted)
                     .frame(width: 16, height: 16)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Theme.Color.surface.opacity(0.7))
-                    )
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Theme.Color.surface.opacity(0.7)))
             }
             .buttonStyle(.plain)
-            .help("Settings for \(label)")
+            .help("Settings for \(inst.label)")
 
-            Text(label)
+            Text(inst.label)
                 .font(.system(size: 10, weight: .medium).monospacedDigit())
-                .foregroundStyle(color)
+                .foregroundStyle(.white.opacity(0.6))
                 .lineLimit(1)
-
-            // Color swatch
-            RoundedRectangle(cornerRadius: 2)
-                .fill(color)
-                .frame(width: 12, height: 3)
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
-        .background(
-            RoundedRectangle(cornerRadius: 5)
-                .fill(Theme.Color.surface.opacity(0.75))
-        )
+        .background(RoundedRectangle(cornerRadius: 5).fill(Theme.Color.surface.opacity(0.75)))
     }
 
     /// Two-way binding into the oscillator set. Same pattern as
@@ -1502,7 +1631,7 @@ struct DashboardView: View {
     /// a separate state property per indicator.
     private func indicatorBinding(_ kind: IndicatorKind) -> Binding<Bool> {
         Binding(
-            get: { enabledIndicators.contains(kind) },
+            get: { enabledIndicatorKinds.contains(kind) },
             set: { setIndicator(kind, enabled: $0) }
         )
     }
@@ -1616,7 +1745,7 @@ struct DashboardView: View {
     private var activeLayerCount: Int {
         var n = 0
         if showVolume { n += 1 }
-        n += enabledIndicators.count
+        n += enabledIndicatorKinds.count
         n += enabledOscillators.count
         if !srLevels.isEmpty { n += 1 }
         if !fvgZones.isEmpty { n += 1 }
@@ -1659,7 +1788,7 @@ struct DashboardView: View {
 
                 // Indicator overlays (SMA/EMA/Bollinger/UT Bot).
                 ForEach(IndicatorKind.allCases) { kind in
-                    if enabledIndicators.contains(kind) {
+                    if enabledIndicatorKinds.contains(kind) {
                         layerRow(
                             title: kind.label,
                             swatch: kind.color,
@@ -1676,7 +1805,7 @@ struct DashboardView: View {
                 ForEach(OscillatorKind.allCases) { kind in
                     if enabledOscillators.contains(kind) {
                         layerRow(
-                            title: kind.displayName(config: oscillatorConfig),
+                            title: kind.label,
                             swatch: Theme.Color.info,
                             visible: !hiddenOscillators.contains(kind),
                             onToggle: {
@@ -2607,9 +2736,9 @@ struct DashboardView: View {
         Menu("Indicators") {
             ForEach(IndicatorKind.allCases) { kind in
                 Button {
-                    setIndicator(kind, enabled: !enabledIndicators.contains(kind))
+                    setIndicator(kind, enabled: !enabledIndicatorKinds.contains(kind))
                 } label: {
-                    Label(kind.label, systemImage: enabledIndicators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                    Label(kind.label, systemImage: enabledIndicatorKinds.contains(kind) ? "checkmark.circle.fill" : "circle")
                 }
             }
         }

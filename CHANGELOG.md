@@ -41,6 +41,29 @@ All notable changes to Helix Trading App are documented here.
 - **Removed hardcoded credentials** — OpenCode server URL, model, and password no longer baked into the iPad entry point.
 ---
 
+## [v1.6] — 2026-07-08
+
+**Multi-instance indicator system with per-instance settings, new Volume Profile indicator, and floating settings panels.**
+
+### New Features
+
+- **Multi-instance indicators/oscillators** — indicators and oscillators are now stored as JSON-encoded `[IndicatorInstance]` arrays instead of `Set<IndicatorKind>` / comma-separated `@AppStorage`. This unlocks multiple instances of the same kind (e.g. two SMAs with different periods), per-instance hide/show, and per-instance parameter tuning without the old global settings sheet. Backward compatible — old persisted data decodes with defaults for missing fields.
+- **Volume Profile indicator (WIP)** — session-based volume profile overlay that groups candles by calendar day, builds per-day volume histograms, and identifies POC (Point of Control), VAH, and VAL (Value Area High/Low). Each session renders horizontal histogram bars, a solid POC line, dashed VAH/VAL boundaries, and faint vertical session separators. Configurable bucket count (10–100) and value area percentage (50–95%). Coexists with the existing VP drawing tool. Memoized via `ChartDerivedCache` with background Task recomputation.
+- **Per-instance floating settings panel** — `IndicatorSettingsPanel` replaces the old monolithic settings sheet for per-kind tuning. A draggable floating panel opens for the selected indicator/oscillator instance, applying changes in real-time so the user sees the effect on the chart immediately.
+- **`ParamSpec` / `ParamValue` / `ParamOption` model** — new generic parameter model supporting `Double`, `Bool`, and `String enum` parameter types, used by `IndicatorInstance.params` and `OscillatorInstance.params`. Enables the indicator menu, Layers popover, and settings panel to auto-discover each indicator's tunable knobs.
+
+### Performance
+
+- **OscillatorPanel reads per-instance params** — each oscillator pane now builds an `OscillatorConfig` from its instance's params dict rather than reading the global config, so per-instance tuning doesn't require an app-wide config republish.
+
+### Internal
+
+- **`ChartDerivedCache.indicators()` keyed on `[IndicatorInstance]`** — the indicator computation slot now uses the instances array (with their UUIDs and params) as its signature instead of `Set<IndicatorKind>`, so adding, removing, or re-tuning an instance correctly busts the cache per-instance.
+- **`ChartPane` stores instances** — pane state migrated from `Set<IndicatorKind>` / `Set<OscillatorKind>` to `[IndicatorInstance]` / `[OscillatorInstance]`, making multi-instance state survive across layout changes and relaunches.
+- **`OscillatorInstance` with display label** — each oscillator instance renders a label showing its kind + key params (e.g. "RSI (14)", "MACD (12, 26, 9)") in the oscillator panel header.
+
+---
+
 ## [v1.4 build 6] — 2026-07-07
 
 **Chart interaction polish, iPad live-tick performance, and gesture optimizations.**

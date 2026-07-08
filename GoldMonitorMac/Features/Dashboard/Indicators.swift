@@ -1,6 +1,70 @@
 import Foundation
 import SwiftUI
 
+/// A single parameter value — numeric, boolean, or string — stored in an
+/// indicator/oscillator instance's params dictionary.
+enum ParamValue: Codable, Equatable, Hashable {
+    case double(Double)
+    case bool(Bool)
+    case string(String)
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let v = try? c.decode(Double.self) { self = .double(v); return }
+        if let v = try? c.decode(Bool.self) { self = .bool(v); return }
+        if let v = try? c.decode(String.self) { self = .string(v); return }
+        throw DecodingError.typeMismatch(ParamValue.self, .init(
+            codingPath: c.codingPath,
+            debugDescription: "Expected Double, Bool, or String"
+        ))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .double(let v): try c.encode(v)
+        case .bool(let v):   try c.encode(v)
+        case .string(let v): try c.encode(v)
+        }
+    }
+
+    var doubleValue: Double {
+        switch self {
+        case .double(let v): return v
+        case .bool(let v):   return v ? 1 : 0
+        case .string:        return 0
+        }
+    }
+
+    var boolValue: Bool {
+        switch self {
+        case .bool(let v):   return v
+        case .double(let v): return v >= 0.5
+        case .string:        return false
+        }
+    }
+
+    var stringValue: String {
+        switch self {
+        case .string(let v): return v
+        case .double(let v): return String(format: "%.1f", v)
+        case .bool(let v):   return v ? "true" : "false"
+        }
+    }
+}
+
+/// Describes one tunable parameter for an indicator/oscillator kind.
+struct ParamOption: Equatable {
+    let label: String
+    let value: String
+}
+
+enum ParamSpec: Equatable {
+    case double(key: String, label: String, default: Double, step: Double, range: ClosedRange<Double>)
+    case bool(key: String, label: String, default: Bool)
+    case `enum`(key: String, label: String, default: String, options: [ParamOption])
+}
+
 /// Catalog of technical indicators the user can overlay on the price
 /// chart. Each kind is self-describing (label, colour, computation) so
 /// ChartView can iterate without a giant switch. New indicators get
@@ -51,6 +115,8 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     case sonarlabOrderBlock
     /// FVG-First → OB Back — FVG triggers backward search for originating OB.
     case fvgFirstOB
+    /// Session-based Volume Profile — per-day volume histogram with POC, VAH, VAL.
+    case volumeProfile
 
     var id: String { rawValue }
 
@@ -61,7 +127,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .sma200:         return "SMA 200"
         case .ema9:           return "EMA 9"
         case .ema21:          return "EMA 21"
-        case .bollinger:      return "Bollinger (20, 2)"
+        case .bollinger:      return "Bollinger"
         case .utBot:          return "UT Bot Alerts"
         case .orderBlock:     return "Order Blocks"
         case .steroidOrderBlock: return "Steroid OB"
@@ -70,59 +136,164 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .fairValueGap:   return "Fair Value Gap"
         case .sonarlabOrderBlock: return "Sonarlab OB"
         case .fvgFirstOB:        return "FVG→OB"
-        }
-    }
-
-    /// Distinct hue per indicator. Chosen to stay readable on the dark
-    /// surface and to not collide with the candle red/green or accent
-    /// colours used for the price line.
-    /// Title of the corresponding section in `IndicatorSettingsSheet`.
-    /// `nil` = indicator has no tunables (SMA/EMA/Bollinger are on/off only),
-    /// so the gear button opens the full settings sheet without scrolling.
-    var settingsSection: String? {
-        switch self {
-        case .sma20, .sma50, .sma200, .ema9, .ema21, .bollinger: return nil
-        case .utBot:             return "UT Bot Alerts"
-        case .orderBlock:        return "Order Blocks"
-        case .steroidOrderBlock: return "Steroid Order Blocks"
-        case .tradingSession:    return "Trading Sessions"
-        case .nyOpenSetup:       return "NY Open Setup"
-        case .fairValueGap:      return "Fair Value Gap"
-        case .sonarlabOrderBlock: return "Sonarlab Order Blocks"
-        case .fvgFirstOB:        return "FVG→OB"
+        case .volumeProfile:     return "Volume Profile"
         }
     }
 
     var color: Color {
         switch self {
-        case .sma20:     return Color(red: 1.00, green: 0.78, blue: 0.20) // gold
-        case .sma50:     return Color(red: 0.38, green: 0.65, blue: 1.00) // blue
-        case .sma200:    return Color(red: 0.85, green: 0.35, blue: 0.95) // magenta
-        case .ema9:      return Color(red: 1.00, green: 0.45, blue: 0.65) // pink
-        case .ema21:     return Color(red: 0.45, green: 0.85, blue: 0.95) // teal
-        case .bollinger: return Color(red: 0.55, green: 0.85, blue: 1.00) // cyan
-        case .utBot:     return Color(red: 0.95, green: 0.62, blue: 0.18) // amber
-        // Order blocks colour their fill green/red per direction on the
-        // chart; this hue is only the Layers-popover swatch, so a neutral
-        // indigo reads as "the zones layer" without implying a bias.
-        case .orderBlock: return Color(red: 0.55, green: 0.50, blue: 0.95) // indigo
-        // Steroid Order Blocks has a vibrant coral/orange highlight.
-        case .steroidOrderBlock: return Color(red: 1.00, green: 0.40, blue: 0.20) // coral
-        // Trading sessions each carry their own hue (blue/orange/green) on
-        // the chart; this single swatch is just the Layers-popover marker,
-        // so a muted steel-blue reads as "the sessions layer".
-        case .tradingSession: return Color(red: 0.40, green: 0.55, blue: 0.70) // steel
-        // NY Open Setup colours its plan green/red by direction; the
-        // Layers swatch is a neutral amber that reads as "the setup layer".
-        case .nyOpenSetup: return Color(red: 0.95, green: 0.75, blue: 0.30) // amber
-        // FVG fills green/red per direction on the chart; the Layers swatch
-        // is a soft teal that reads as "imbalance / gap zones layer".
-        case .fairValueGap: return Color(red: 0.30, green: 0.80, blue: 0.75) // teal
-        // Sonarlab OB uses a warm violet to distinguish it from the
-        // standard Order Blocks' indigo.
-        case .sonarlabOrderBlock: return Color(red: 0.80, green: 0.45, blue: 0.90) // violet
-        // FVG→OB — soft lavender, the inverse flow indicator.
-        case .fvgFirstOB:        return Color(red: 0.70, green: 0.60, blue: 1.00) // lavender
+        case .sma20:     return Color(red: 1.00, green: 0.78, blue: 0.20)
+        case .sma50:     return Color(red: 0.38, green: 0.65, blue: 1.00)
+        case .sma200:    return Color(red: 0.85, green: 0.35, blue: 0.95)
+        case .ema9:      return Color(red: 1.00, green: 0.45, blue: 0.65)
+        case .ema21:     return Color(red: 0.45, green: 0.85, blue: 0.95)
+        case .bollinger: return Color(red: 0.55, green: 0.85, blue: 1.00)
+        case .utBot:     return Color(red: 0.95, green: 0.62, blue: 0.18)
+        case .orderBlock: return Color(red: 0.55, green: 0.50, blue: 0.95)
+        case .steroidOrderBlock: return Color(red: 1.00, green: 0.40, blue: 0.20)
+        case .tradingSession: return Color(red: 0.40, green: 0.55, blue: 0.70)
+        case .nyOpenSetup: return Color(red: 0.95, green: 0.75, blue: 0.30)
+        case .fairValueGap: return Color(red: 0.30, green: 0.80, blue: 0.75)
+        case .sonarlabOrderBlock: return Color(red: 0.80, green: 0.45, blue: 0.90)
+        case .fvgFirstOB:        return Color(red: 0.70, green: 0.60, blue: 1.00)
+        case .volumeProfile:     return Color(red: 0.20, green: 0.80, blue: 0.75)
+        }
+    }
+
+    /// Keys (and defaults) for every tunable parameter this kind accepts.
+    var paramSpecs: [ParamSpec] {
+        switch self {
+        case .sma20:  return [.double(key: "period", label: "Period", default: 20, step: 1, range: 2...200)]
+        case .sma50:  return [.double(key: "period", label: "Period", default: 50, step: 1, range: 2...200)]
+        case .sma200: return [.double(key: "period", label: "Period", default: 200, step: 1, range: 2...200)]
+        case .ema9:   return [.double(key: "period", label: "Period", default: 9, step: 1, range: 2...200)]
+        case .ema21:  return [.double(key: "period", label: "Period", default: 21, step: 1, range: 2...200)]
+        case .bollinger:
+            return [
+                .double(key: "period", label: "Period", default: 20, step: 1, range: 2...200),
+                .double(key: "stdDev", label: "Std Dev", default: 2.0, step: 0.1, range: 0.5...5.0),
+            ]
+        case .utBot:
+            return [
+                .double(key: "keyValue", label: "Key Value", default: 1.0, step: 0.1, range: 0.1...10.0),
+                .double(key: "atrPeriod", label: "ATR Period", default: 10, step: 1, range: 1...100),
+                .bool(key: "showTrailingStop", label: "Show ATR trailing-stop line", default: true),
+                .bool(key: "useHeikinAshi", label: "Use Heikin Ashi for signals", default: false),
+            ]
+        case .orderBlock:
+            return [
+                .double(key: "periods", label: "Run Length (periods)", default: 5, step: 1, range: 1...20),
+                .double(key: "threshold", label: "Min % Move", default: 0.0, step: 0.1, range: 0...10),
+                .bool(key: "useWicks", label: "Use whole high/low range", default: false),
+                .bool(key: "showExhausted", label: "Show exhausted blocks", default: true),
+                .bool(key: "detectSteroids", label: "Filter by volume (Steroids)", default: false),
+                .bool(key: "notifyEvents", label: "Notify on appear / retest / exhaust", default: false),
+            ]
+        case .steroidOrderBlock:
+            return [
+                .double(key: "periods", label: "Run Length (periods)", default: 5, step: 1, range: 1...20),
+                .double(key: "threshold", label: "Min % Move", default: 0.0, step: 0.1, range: 0...10),
+                .double(key: "volumeMult", label: "Volume Multiplier", default: 1.2, step: 0.1, range: 0.5...3.0),
+                .bool(key: "useWicks", label: "Use whole high/low range", default: false),
+                .bool(key: "showExhausted", label: "Show exhausted blocks", default: true),
+                .bool(key: "detectSteroids", label: "Filter by volume (Steroids)", default: true),
+                .bool(key: "notifyEvents", label: "Notify on appear / retest / exhaust", default: false),
+            ]
+        case .tradingSession:
+            return [
+                .bool(key: "showTokyo", label: "Tokyo · 09:00–15:00 JST", default: true),
+                .bool(key: "showLondon", label: "London · 08:30–16:30 UK", default: true),
+                .bool(key: "showNewYork", label: "New York · 09:30–16:00 ET", default: true),
+                .bool(key: "showNames", label: "Show session names", default: true),
+                .bool(key: "showOpenClose", label: "Draw open & close lines", default: true),
+                .bool(key: "showRange", label: "Show session range", default: true),
+                .bool(key: "showAverage", label: "Show average price line", default: true),
+            ]
+        case .nyOpenSetup:
+            return [
+                .double(key: "atrMult", label: "Breakout strength (× ATR)", default: 1.0, step: 0.1, range: 0...5),
+                .bool(key: "amOnly", label: "AM kill-zone only (09:35–11:00 ET)", default: true),
+            ]
+        case .fairValueGap:
+            return [
+                .double(key: "threshold", label: "Min Gap %", default: 0.0, step: 0.1, range: 0...5),
+                .bool(key: "showMitigated", label: "Show mitigated gaps", default: true),
+            ]
+        case .sonarlabOrderBlock:
+            return [
+                .double(key: "sensitivity", label: "Sensitivity (ROC threshold)", default: 26.0, step: 1, range: 1...100),
+                .enum(key: "mitigationType", label: "Mitigation type", default: "Close", options: [
+                    ParamOption(label: "Close", value: "Close"),
+                    ParamOption(label: "Wick", value: "Wick"),
+                ]),
+            ]
+        case .fvgFirstOB:
+            return [
+                .double(key: "threshold", label: "Min Gap %", default: 0.0, step: 0.1, range: 0...5),
+                .double(key: "searchMin", label: "Search range (min bars back)", default: 4, step: 1, range: 1...20),
+                .double(key: "searchMax", label: "Search range (max bars back)", default: 15, step: 1, range: 2...30),
+                .bool(key: "showMitigated", label: "Show mitigated gaps", default: false),
+                .bool(key: "showExhausted", label: "Show exhausted blocks", default: true),
+                .bool(key: "detectVolume", label: "Filter by volume (Steroids)", default: false),
+                .double(key: "volumeMult", label: "Volume Multiplier", default: 1.2, step: 0.1, range: 0.5...3.0),
+                .bool(key: "notifyEvents", label: "Notify on appear / retest / exhaust", default: false),
+            ]
+        case .volumeProfile:
+            return [
+                .double(key: "bucketCount", label: "Buckets per session", default: 24, step: 2, range: 10...100),
+                .double(key: "valueAreaPct", label: "Value area %", default: 70.0, step: 5.0, range: 50...95),
+            ]
+        }
+    }
+}
+
+/// One instance of an indicator on the chart. Users can add multiple
+/// instances of the same kind (e.g. two SMAs with different periods).
+struct IndicatorInstance: Identifiable, Hashable, Codable {
+    let id: UUID
+    let kind: IndicatorKind
+    var params: [String: ParamValue]
+    var hidden: Bool
+
+    init(id: UUID = UUID(), kind: IndicatorKind, params: [String: ParamValue] = [:], hidden: Bool = false) {
+        self.id = id
+        self.kind = kind
+        self.params = params
+        for spec in kind.paramSpecs {
+            if self.params[spec.key] == nil { self.params[spec.key] = spec.defaultValue }
+        }
+        self.hidden = hidden
+    }
+
+    var label: String {
+        switch kind {
+        case .sma20, .sma50, .sma200, .ema9, .ema21:
+            let p = Int(params["period"]?.doubleValue ?? 0)
+            return "\(kind.label) (\(p))"
+        case .bollinger:
+            let p = Int(params["period"]?.doubleValue ?? 20)
+            let k = params["stdDev"]?.doubleValue ?? 2.0
+            return "Bollinger (\(p), \(String(format: "%.1f", k)))"
+        default:
+            return kind.label
+        }
+    }
+}
+
+extension ParamSpec {
+    var key: String {
+        switch self {
+        case .double(let k, _, _, _, _): return k
+        case .bool(let k, _, _):         return k
+        case .enum(let k, _, _, _):      return k
+        }
+    }
+
+    var defaultValue: ParamValue {
+        switch self {
+        case .double(_, _, let d, _, _): return .double(d)
+        case .bool(_, _, let d):         return .bool(d)
+        case .enum(_, _, let d, _):      return .string(d)
         }
     }
 }
@@ -231,49 +402,28 @@ enum Indicators {
         return out
     }
 
-    /// Dispatch: compute all enabled indicators in one pass, flattened
-    /// into a single (kind, points[]) list the chart can iterate.
-    static func compute(_ enabled: Set<IndicatorKind>, candles: [Candle])
-        -> [(kind: IndicatorKind, points: [IndicatorPoint])]
+    /// Dispatch: compute each visible indicator instance, returning points.
+    static func compute(instances: [IndicatorInstance], candles: [Candle])
+        -> [(instance: IndicatorInstance, points: [IndicatorPoint])]
     {
-        // Stable order so the legend and z-order stay consistent across
-        // toggles instead of bouncing around based on Set hashing.
-        IndicatorKind.allCases.compactMap { kind in
-            guard enabled.contains(kind) else { return nil }
+        instances.compactMap { inst in
+            guard !inst.hidden else { return nil }
             let pts: [IndicatorPoint]
-            switch kind {
-            case .sma20:     pts = sma(candles, period: 20)
-            case .sma50:     pts = sma(candles, period: 50)
-            case .sma200:    pts = sma(candles, period: 200)
-            case .ema9:      pts = ema(candles, period: 9)
-            case .ema21:     pts = ema(candles, period: 21)
-            case .bollinger: pts = bollinger(candles)
-            // UT Bot is handled directly in ChartView's `utBotMarks` —
-            // its trailing-stop line and buy/sell labels don't fit the
-            // single-line `IndicatorPoint` shape and need config params
-            // (key value, ATR period) that the generic compute doesn't
-            // receive.
-            case .utBot:     pts = []
-            // Order Blocks render as zones (rectangles) in ChartView's
-            // `orderBlockMarks`, not as a line series — same reason
-            // UT Bot is empty here.
-            case .orderBlock: pts = []
-            case .steroidOrderBlock: pts = []
-            // Trading Sessions render as per-day boxes in ChartView's
-            // `sessionMarks` (see `TradingSessions`), not a line series.
-            case .tradingSession: pts = []
-            // NY Open Setup renders as an OR box + FVG + plan lines in
-            // ChartView's `setupMarks` (see `NYOpenSetup`), not a series.
-            case .nyOpenSetup: pts = []
-            // FVG renders as zone rectangles in ChartView's `indicatorFvgMarks`
-            // (see `FairValueGap`), not a line series.
-            case .fairValueGap: pts = []
-            // Sonarlab OB renders as zone rectangles in ChartView's
-            // `sonarlabOBMarks`, not a line series.
-            case .sonarlabOrderBlock: pts = []
-            case .fvgFirstOB:        pts = []
+            switch inst.kind {
+            case .sma20, .sma50, .sma200:
+                let period = Int(inst.params["period"]?.doubleValue ?? 20)
+                pts = sma(candles, period: period)
+            case .ema9, .ema21:
+                let period = Int(inst.params["period"]?.doubleValue ?? 9)
+                pts = ema(candles, period: period)
+            case .bollinger:
+                let period = Int(inst.params["period"]?.doubleValue ?? 20)
+                let k = inst.params["stdDev"]?.doubleValue ?? 2.0
+                pts = bollinger(candles, period: period, k: k)
+            default:
+                pts = []
             }
-            return pts.isEmpty ? nil : (kind, pts)
+            return pts.isEmpty ? nil : (inst, pts)
         }
     }
 }

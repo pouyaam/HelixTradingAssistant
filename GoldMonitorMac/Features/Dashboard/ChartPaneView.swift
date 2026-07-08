@@ -135,8 +135,9 @@ struct ChartPaneView: View {
                         accent: pair.color,
                         xDomain: $xDomain,
                         yDomain: $yDomain,
-                        indicators: pane.indicators,
+                        indicators: Set(pane.indicatorInstances.map(\.kind)),
                         indicatorConfig: indicatorConfig,
+                        indicatorInstances: pane.indicatorInstances.filter { !$0.hidden },
                         drawings: drawingStore.drawings(for: pane.pairID),
                         activeTool: effectiveDrawingTool,
                         onCommitDrawing: { drawing in
@@ -160,7 +161,7 @@ struct ChartPaneView: View {
                         accent: pair.color,
                         xDomain: $xDomain,
                         yDomain: $yDomain,
-                        indicators: pane.indicators,
+                        indicators: Set(pane.indicatorInstances.map(\.kind)),
                         indicatorConfig: indicatorConfig,
                         drawings: drawingStore.drawings(for: pane.pairID),
                         activeTool: effectiveDrawingTool,
@@ -213,8 +214,8 @@ struct ChartPaneView: View {
                     VolumeBarsView(candles: candles, accent: pair.color, xDomain: xDomain)
                         .frame(height: isCompact ? 28 : 36)
                 }
-                ForEach(pane.oscillators.sorted(by: { $0.rawValue < $1.rawValue })) { osc in
-                    OscillatorPanel(kind: osc, candles: candles, config: indicatorConfig, xDomain: xDomain)
+                ForEach(pane.oscillatorInstances) { inst in
+                    OscillatorPanel(instance: inst, candles: candles, xDomain: xDomain)
                         .frame(height: isCompact ? 56 : 80)
                 }
             } else {
@@ -330,24 +331,32 @@ struct ChartPaneView: View {
     private var indicatorsMenu: some View {
         Menu {
             ForEach(IndicatorKind.allCases) { kind in
+                let isOn = pane.indicatorInstances.contains(where: { $0.kind == kind })
                 Button {
                     var updated = pane
-                    if updated.indicators.contains(kind) { updated.indicators.remove(kind) }
-                    else { updated.indicators.insert(kind) }
+                    if isOn {
+                        updated.indicatorInstances.removeAll { $0.kind == kind }
+                    } else {
+                        updated.indicatorInstances.append(IndicatorInstance(kind: kind))
+                    }
                     onUpdate(updated)
                 } label: {
-                    Label(kind.label, systemImage: pane.indicators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                    Label(kind.label, systemImage: isOn ? "checkmark.circle.fill" : "circle")
                 }
             }
             Divider()
             ForEach(OscillatorKind.allCases) { kind in
+                let isOn = pane.oscillatorInstances.contains(where: { $0.kind == kind })
                 Button {
                     var updated = pane
-                    if updated.oscillators.contains(kind) { updated.oscillators.remove(kind) }
-                    else { updated.oscillators.insert(kind) }
+                    if isOn {
+                        updated.oscillatorInstances.removeAll { $0.kind == kind }
+                    } else {
+                        updated.oscillatorInstances.append(OscillatorInstance(kind: kind))
+                    }
                     onUpdate(updated)
                 } label: {
-                    Label(kind.displayName(config: indicatorConfig), systemImage: pane.oscillators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                    Label(kind.label, systemImage: isOn ? "checkmark.circle.fill" : "circle")
                 }
             }
             Divider()
@@ -413,25 +422,33 @@ struct ChartPaneView: View {
         }
         Menu("Indicators") {
             ForEach(IndicatorKind.allCases) { kind in
+                let isOn = pane.indicatorInstances.contains(where: { $0.kind == kind })
                 Button {
                     var updated = pane
-                    if updated.indicators.contains(kind) { updated.indicators.remove(kind) }
-                    else { updated.indicators.insert(kind) }
+                    if isOn {
+                        updated.indicatorInstances.removeAll { $0.kind == kind }
+                    } else {
+                        updated.indicatorInstances.append(IndicatorInstance(kind: kind))
+                    }
                     onUpdate(updated)
                 } label: {
-                    Label(kind.label, systemImage: pane.indicators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                    Label(kind.label, systemImage: isOn ? "checkmark.circle.fill" : "circle")
                 }
             }
         }
         Menu("Oscillators") {
             ForEach(OscillatorKind.allCases) { kind in
+                let isOn = pane.oscillatorInstances.contains(where: { $0.kind == kind })
                 Button {
                     var updated = pane
-                    if updated.oscillators.contains(kind) { updated.oscillators.remove(kind) }
-                    else { updated.oscillators.insert(kind) }
+                    if isOn {
+                        updated.oscillatorInstances.removeAll { $0.kind == kind }
+                    } else {
+                        updated.oscillatorInstances.append(OscillatorInstance(kind: kind))
+                    }
                     onUpdate(updated)
                 } label: {
-                    Label(kind.label, systemImage: pane.oscillators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                    Label(kind.label, systemImage: isOn ? "checkmark.circle.fill" : "circle")
                 }
             }
         }

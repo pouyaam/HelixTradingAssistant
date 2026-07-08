@@ -20,26 +20,55 @@ enum OscillatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         }
     }
 
-    /// Section title in `IndicatorSettingsSheet` for scroll-to routing.
-    var settingsSection: String {
+    /// Keys (and defaults) for every tunable parameter this oscillator accepts.
+    var paramSpecs: [ParamSpec] {
         switch self {
-        case .rsi:        return "RSI"
-        case .macd:       return "MACD"
-        case .stochastic: return "Stochastic"
+        case .rsi:        return [.double(key: "period", label: "Period", default: 14, step: 1, range: 2...100)]
+        case .macd:
+            return [
+                .double(key: "fast", label: "Fast EMA", default: 12, step: 1, range: 2...50),
+                .double(key: "slow", label: "Slow EMA", default: 26, step: 1, range: 3...100),
+                .double(key: "signal", label: "Signal EMA", default: 9, step: 1, range: 2...50),
+            ]
+        case .stochastic:
+            return [
+                .double(key: "k", label: "%K Period", default: 14, step: 1, range: 2...50),
+                .double(key: "d", label: "%D Period", default: 3, step: 1, range: 1...20),
+            ]
         }
     }
+}
 
-    /// Pretty header rendered above each panel, with the user's
-    /// configured parameters baked in so it's clear at a glance that
-    /// "RSI 14" is what's actually being plotted.
-    func displayName(config: OscillatorConfig) -> String {
-        switch self {
+/// One instance of an oscillator panel on the chart.
+struct OscillatorInstance: Identifiable, Hashable, Codable {
+    let id: UUID
+    let kind: OscillatorKind
+    var params: [String: ParamValue]
+    var hidden: Bool
+
+    init(id: UUID = UUID(), kind: OscillatorKind, params: [String: ParamValue] = [:], hidden: Bool = false) {
+        self.id = id
+        self.kind = kind
+        self.params = params
+        for spec in kind.paramSpecs {
+            if self.params[spec.key] == nil { self.params[spec.key] = spec.defaultValue }
+        }
+        self.hidden = hidden
+    }
+
+    var label: String {
+        switch kind {
         case .rsi:
-            return "RSI (\(config.rsiPeriod))"
+            return "RSI (\(Int(params["period"]?.doubleValue ?? 14)))"
         case .macd:
-            return "MACD (\(config.macdFast), \(config.macdSlow), \(config.macdSignal))"
+            let f = Int(params["fast"]?.doubleValue ?? 12)
+            let s = Int(params["slow"]?.doubleValue ?? 26)
+            let sig = Int(params["signal"]?.doubleValue ?? 9)
+            return "MACD (\(f), \(s), \(sig))"
         case .stochastic:
-            return "Stochastic (\(config.stochK), \(config.stochD))"
+            let k = Int(params["k"]?.doubleValue ?? 14)
+            let d = Int(params["d"]?.doubleValue ?? 3)
+            return "Stochastic (\(k), \(d))"
         }
     }
 }
@@ -141,6 +170,12 @@ struct OscillatorConfig: Codable, Equatable {
     var fvobVolumeMultiplier: Double = 1.2
     var fvobNotifyEvents: Bool = false
 
+    // Volume Profile parameters (session-based, see `VolumeProfile`).
+    // `vpBucketCount` is the number of equal-price bands per session;
+    // `vpValueAreaPct` is the % of total volume that defines the value area.
+    var vpBucketCount: Int = 24
+    var vpValueAreaPct: Double = 70.0
+
     // We decode every field with `decodeIfPresent` (see init(from:)) so
     // adding a field no longer requires bumping this key — an older
     // payload that predates the field just falls back to its default
@@ -200,6 +235,8 @@ struct OscillatorConfig: Codable, Equatable {
         fvobDetectVolume   = try c.decodeIfPresent(Bool.self,   forKey: .fvobDetectVolume)   ?? false
         fvobVolumeMultiplier = try c.decodeIfPresent(Double.self, forKey: .fvobVolumeMultiplier) ?? 1.2
         fvobNotifyEvents   = try c.decodeIfPresent(Bool.self,   forKey: .fvobNotifyEvents)   ?? false
+        vpBucketCount      = try c.decodeIfPresent(Int.self,    forKey: .vpBucketCount)      ?? 24
+        vpValueAreaPct     = try c.decodeIfPresent(Double.self, forKey: .vpValueAreaPct)     ?? 70.0
     }
 
     /// Whether the given `TradingSessions` preset id is toggled on. Used

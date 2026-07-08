@@ -426,6 +426,22 @@ struct IndicatorSettingsSheet: View {
                     .foregroundStyle(Theme.Color.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            Divider().background(Theme.Color.border)
+
+            section(title: "Volume Profile") {
+                periodStepper(label: "Buckets per session", value: $config.vpBucketCount, range: 10...100)
+                doubleStepper(
+                    label: "Value Area %",
+                    value: $config.vpValueAreaPct,
+                    range: 50...95,
+                    step: 5.0
+                )
+                Text("Computes a per-day volume profile with POC and value area (VAH/VAL). Works best on intraday timeframes with volume data.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 

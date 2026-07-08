@@ -146,20 +146,20 @@ final class ChartDerivedCache: ObservableObject {
     private struct IndicatorSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
-        let enabled: Set<IndicatorKind>
+        let instances: [IndicatorInstance]
     }
-    private let indicatorSlot = Slot<IndicatorSig, [(kind: IndicatorKind, points: [IndicatorPoint])]>([])
+    private let indicatorSlot = Slot<IndicatorSig, [(instance: IndicatorInstance, points: [IndicatorPoint])]>([])
 
-    func indicators(enabled: Set<IndicatorKind>, candles: [Candle])
-        -> [(kind: IndicatorKind, points: [IndicatorPoint])]
+    func indicators(instances: [IndicatorInstance], candles: [Candle])
+        -> [(instance: IndicatorInstance, points: [IndicatorPoint])]
     {
         let sig = IndicatorSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            enabled: enabled
+            instances: instances
         )
         return resolve(indicatorSlot, signature: sig) {
-            Indicators.compute(enabled, candles: candles)
+            Indicators.compute(instances: instances, candles: candles)
         }
     }
 
@@ -348,6 +348,28 @@ final class ChartDerivedCache: ObservableObject {
                 sensitivity: sensitivity,
                 mitigationType: mitigationType
             )
+        }
+    }
+
+    // ── Volume Profile ─────────────────────────────────────────────────
+
+    private struct VPSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let bucketCount: Int
+        let valueAreaPct: Double
+    }
+    private let vpSlot = Slot<VPSig, [VolumeProfile.SessionVP]>([])
+
+    func volumeProfile(candles: [Candle], bucketCount: Int, valueAreaPct: Double) -> [VolumeProfile.SessionVP] {
+        let sig = VPSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            bucketCount: bucketCount,
+            valueAreaPct: valueAreaPct
+        )
+        return resolve(vpSlot, signature: sig) {
+            VolumeProfile.compute(candles, bucketCount: bucketCount, valueAreaPct: valueAreaPct)
         }
     }
 

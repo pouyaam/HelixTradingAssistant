@@ -48,6 +48,11 @@ struct ChartView: View {
     /// signals from the same config the settings sheet edits.
     let indicatorConfig: OscillatorConfig
 
+    /// Per-instance indicator configuration for multi-instance support.
+    /// Used by `Indicators.compute` to render each instance with its own
+    /// params (e.g. two SMAs at different periods).
+    var indicatorInstances: [IndicatorInstance] = []
+
     /// Support / resistance levels the user added from an AI analysis.
     /// Empty by default; populated when the user clicks "Add to chart"
     /// on a Support & Resistance Claude run. Drawn as horizontal rules
@@ -369,6 +374,16 @@ struct ChartView: View {
     }
     private static let maxFVGFirstOB = 10
 
+    /// Session-based Volume Profile sessions — per-day histograms with POC, VAH, VAL.
+    private var volumeProfileSessions: [VolumeProfile.SessionVP] {
+        guard indicators.contains(.volumeProfile) else { return [] }
+        return derived.volumeProfile(
+            candles: candles,
+            bucketCount: indicatorConfig.vpBucketCount,
+            valueAreaPct: indicatorConfig.vpValueAreaPct
+        )
+    }
+
     /// Session runs to draw: the *current day only* instance of every
     /// enabled preset — i.e. each venue's most recent run, not its whole
     /// history. `TradingSessions.compute` appends runs per-session in
@@ -471,6 +486,10 @@ struct ChartView: View {
             // Trading-session boxes — the backmost overlay so the day's
             // price action and every other mark read on top of them.
             sessionMarks
+
+            // Volume Profile — per-day histograms with POC, VAH, VAL.
+            // Behind price action so candles remain the visual focus.
+            volumeProfileMarks
 
             // NY Open Setup — opening-range box, breakout FVG, and the
             // entry/SL/TP plan. Behind the price action like the zones.
@@ -1966,6 +1985,61 @@ struct ChartView: View {
             }
     }
 
+    /// Volume Profile — per-day histogram bars with POC (solid), VAH/VAL
+    /// (dashed) lines, and faint vertical session separators.
+    @ChartContentBuilder
+    private var volumeProfileMarks: some ChartContent {
+        let sessions = volumeProfileSessions
+        ForEach(sessions) { session in
+            let maxVol = session.buckets.map(\.volume).max() ?? 1
+            let sessionWidth = Double(session.endBar - session.startBar)
+            let maxBarWidth = sessionWidth * 0.25
+            let rightEdge = Double(session.endBar)
+            let bucketSize = session.buckets.count > 1
+                ? (session.buckets[1].priceLevel - session.buckets[0].priceLevel)
+                : session.buckets[0].priceLevel * 0.001
+
+            // Volume histogram bars — right-anchored, left-extending.
+            ForEach(Array(session.buckets.enumerated()), id: \.offset) { _, bucket in
+                let barWidth = maxBarWidth * (bucket.volume / maxVol)
+                let isPOC = abs(bucket.priceLevel - session.poc) < bucketSize * 0.01
+                RectangleMark(
+                    xStart: .value("VP x0", rightEdge - barWidth),
+                    xEnd:   .value("VP x1", rightEdge),
+                    yStart: .value("VP y0", bucket.priceLevel),
+                    yEnd:   .value("VP y1", bucket.priceLevel + bucketSize * 0.92)
+                )
+                .foregroundStyle(
+                    isPOC
+                        ? Color(red: 0.96, green: 0.36, blue: 0.36).opacity(0.85)
+                        : Theme.Color.info.opacity(0.45)
+                )
+            }
+
+            // POC line — solid
+            RuleMark(y: .value("VP POC", session.poc))
+                .foregroundStyle(Color(red: 0.96, green: 0.36, blue: 0.36))
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+
+            // VAH line — dashed
+            RuleMark(y: .value("VP VAH", session.vah))
+                .foregroundStyle(Theme.Color.info.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+
+            // VAL line — dashed
+            RuleMark(y: .value("VP VAL", session.val))
+                .foregroundStyle(Theme.Color.info.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+
+            // Session boundary — faint vertical
+            if session.startBar > 0 {
+                RuleMark(x: .value("VP sep", Double(session.startBar) - 0.5))
+                    .foregroundStyle(Theme.Color.textMuted.opacity(0.15))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 4]))
+            }
+        }
+    }
+
     /// Indicator-computed FVG zones. Each gap is a translucent rectangle
     /// from the bar where it formed to the right edge of the chart
     /// (extending into the future so the user can watch price approach).
@@ -2849,15 +2923,18 @@ struct ChartView: View {
     /// segment).
     @ChartContentBuilder
     private func indicatorMarks(visible: Set<Int>) -> some ChartContent {
-        let computed = derived.indicators(enabled: indicators, candles: candles)
-        ForEach(computed, id: \.kind) { entry in
+        let instances = indicatorInstances.isEmpty
+            ? indicators.map { IndicatorInstance(kind: $0) }
+            : indicatorInstances
+        let computed = derived.indicators(instances: instances, candles: candles)
+        ForEach(computed, id: \.instance.id) { entry in
             ForEach(entry.points.filter { visible.contains($0.index) }) { p in
                 LineMark(
                     x: .value("Bar", Double(p.index)),
                     y: .value("Indicator", p.value),
-                    series: .value("Series", "\(entry.kind.rawValue)-\(p.band)")
+                    series: .value("Series", "\(entry.instance.id)-\(p.band)")
                 )
-                .foregroundStyle(indicatorColor(for: entry.kind, band: p.band))
+                .foregroundStyle(indicatorColor(for: entry.instance.kind, band: p.band))
                 .lineStyle(StrokeStyle(
                     lineWidth: indicatorLineWidth(for: p.band),
                     dash: p.band == "bb_mid" ? [3, 3] : []
@@ -3232,8 +3309,8 @@ struct ChartView: View {
         // Pull in any indicator values that exceed the candle range so
         // SMA/EMA/Bollinger lines never get clipped off-screen. Restrict
         // to the visible index window to match the rendered marks.
-        if !indicators.isEmpty, let b = bounds {
-            for entry in derived.indicators(enabled: indicators, candles: candles) {
+        if !indicatorInstances.isEmpty, let b = bounds {
+            for entry in derived.indicators(instances: indicatorInstances, candles: candles) {
                 for p in entry.points where p.index >= b.lo && p.index <= b.hi {
                     if p.value < lo { lo = p.value }
                     if p.value > hi { hi = p.value }
@@ -3268,6 +3345,9 @@ struct ChartView: View {
             + fvgFirstOBZones.map { .init(low: $0.low, high: $0.high) }
             + sessionRuns.map { .init(low: $0.low, high: $0.high) }
             + nySetupResults.map { .init(low: $0.orLow, high: $0.orHigh) }
+            + volumeProfileSessions.flatMap { session in
+                session.buckets.map { .init(low: $0.priceLevel, high: $0.priceLevel) }
+            }
         let drawingPoints: [ChartDerivedCache.PricePoint] = drawings
             .filter(\.visible)
             .flatMap { d -> [ChartDerivedCache.PricePoint] in
