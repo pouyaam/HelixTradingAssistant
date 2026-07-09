@@ -23,10 +23,17 @@ enum ChartWindow {
     static let defaultVisibleBars = 180
 
     /// Upper bound on how many bars we hand to Swift Charts in one frame.
-    /// Beyond this we stride-decimate (see `renderIndices`). 1500 keeps
-    /// candlestick mark counts (≈2 marks/bar) comfortably under the lag
-    /// threshold while still looking continuous.
+    /// Beyond this we stride-decimate (see `renderIndices`). Swift Charts
+    /// renders every mark handed to it (≈2 marks/bar for candles), so this
+    /// directly caps per-frame layout cost on a deep zoom-out. iPad GPUs/CPUs
+    /// are weaker than the Macs the desktop app targets, so cap lower there —
+    /// 700 bars still reads as continuous while roughly halving the mark
+    /// count vs the 1500 the Mac uses.
+    #if os(iOS)
+    static let maxRenderedBars = 700
+    #else
     static let maxRenderedBars = 1500
+    #endif
 
     /// Domain to use when the caller hasn't pinned one: the most recent
     /// `visible` bars (with the usual half-bar edge padding), clamped to

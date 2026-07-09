@@ -50,14 +50,81 @@ final class ChartDerivedCache: ObservableObject {
         init(_ initial: Value) { value = initial }
     }
 
+    /// Coalescing flag for `objectWillChange`. Multiple resolve
+    /// slots may complete in the same run-loop frame (e.g. all
+    /// indicators recompute after a candle data reload). Without
+    /// coalescing, each completion fires `objectWillChange.send()`
+    /// independently, causing N full SwiftUI body re-evaluations
+    /// for what is logically one data change. The flag + async
+    /// dispatch collapses them into a single notification.
+    private var publishScheduled = false
+
+    private func coalescedObjectWillChange() {
+        guard !publishScheduled else { return }
+        publishScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.publishScheduled = false
+            self.objectWillChange.send()
+        }
+    }
+
+    /// Shared concurrency limiter across all `ChartDerivedCache`
+    /// instances. In grid mode, 4 panes × 12 indicator slots = 48
+    /// `Task.detached` calls competing for the cooperative thread
+    /// pool, which saturates every core on iPad. The limiter caps
+    /// in-flight background tasks at `maxConcurrent`; excess work
+    /// is queued and drains as slots open, keeping the main thread
+    /// free so the UI stays responsive during layout switches.
+    private static let maxConcurrent = 4
+    private nonisolated(unsafe) static var inflightTasks = 0
+    private static let inflightLock = NSLock()
+    /// Pending work items waiting for a pool slot. Each is a closure
+    /// that spawns the actual detached task — called from `release()`
+    /// when a slot opens.
+    private nonisolated(unsafe) static var pendingQueue: [() -> Void] = []
+
+    /// Try to acquire a concurrency slot. Returns `true` if we can
+    /// spawn a background task immediately; `false` if the pool is
+    /// full (caller should enqueue instead).
+    private nonisolated static func tryAcquire() -> Bool {
+        inflightLock.lock()
+        defer { inflightLock.unlock() }
+        guard inflightTasks < maxConcurrent else { return false }
+        inflightTasks += 1
+        return true
+    }
+
+    private nonisolated static func release() {
+        inflightLock.lock()
+        defer { inflightLock.unlock() }
+        inflightTasks -= 1
+        // Drain one queued item if any are waiting.
+        if !pendingQueue.isEmpty {
+            let next = pendingQueue.removeFirst()
+            inflightTasks += 1
+            // Run outside the lock to avoid deadlock.
+            next()
+        }
+    }
+
+    /// Enqueue work to run when a pool slot opens. The work closure
+    /// is expected to spawn a `Task.detached` that calls `release()`
+    /// when done.
+    private nonisolated static func enqueue(_ work: @escaping () -> Void) {
+        inflightLock.lock()
+        defer { inflightLock.unlock() }
+        pendingQueue.append(work)
+    }
+
     /// Fast path: `signature` unchanged ⇒ return the cached value
     /// synchronously (a couple of `Equatable` field comparisons — this
     /// is what keeps pan/zoom cheap). Slow path: `signature` changed ⇒
     /// cancel any in-flight recompute for this slot, kick off a new one
     /// on a background `Task`, and return the previous value right
     /// away so `body` never blocks. The task publishes its result via
-    /// `objectWillChange` when it lands, which redraws the chart with
-    /// the fresh data.
+    /// coalesced `objectWillChange` when it lands, which redraws the
+    /// chart with the fresh data.
     ///
     /// `compute` must be a pure function over value types — every call
     /// site here is (candles, config) → derived array, so that always
@@ -69,15 +136,24 @@ final class ChartDerivedCache: ObservableObject {
     ) -> Value {
         guard slot.signature != signature else { return slot.value }
         slot.task?.cancel()
-        slot.task = Task.detached(priority: .userInitiated) { [weak self] in
-            let fresh = compute()
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                guard let self else { return }
-                self.objectWillChange.send()
-                slot.value = fresh
-                slot.signature = signature
+        // Capture everything the detached task needs.
+        let spawn: () -> Void = { [weak self] in
+            slot.task = Task.detached(priority: .utility) {
+                let fresh = compute()
+                Self.release()
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard let self else { return }
+                    self.coalescedObjectWillChange()
+                    slot.value = fresh
+                    slot.signature = signature
+                }
             }
+        }
+        if Self.tryAcquire() {
+            spawn()
+        } else {
+            Self.enqueue(spawn)
         }
         return slot.value
     }
@@ -121,14 +197,36 @@ final class ChartDerivedCache: ObservableObject {
         return result
     }
 
+    /// Key for the live-price-patched cache: the base's structural
+    /// signature plus the patched-in live price. When both are unchanged
+    /// the patched array can be returned as-is.
+    private struct PatchedSig: Equatable {
+        let base: BaseDisplaySig
+        let live: Double
+    }
+    private var patchedSig: PatchedSig?
+    private var patchedCache: [Candle] = []
+
     /// Candles actually drawn: HA-transformed when requested, with the
-    /// in-progress (last) bar patched to the live price. The expensive
-    /// HA transform is cached structurally; the live-price overlay is
-    /// a cheap O(1) CoW copy applied on top.
+    /// in-progress (last) bar patched to the live price.
+    ///
+    /// The patched array is MEMOIZED. `ChartViewiPad` reads the
+    /// `displayCandles` computed property ~13× per render (candle marks,
+    /// line marks, UT Bot, hover, auto-Y-domain…), and patching mutates one
+    /// element of the cached base array — which, because the cache still
+    /// holds a reference, forces a full O(n) copy-on-write EVERY call. On
+    /// deep history that was ~13 full-array copies (tens of MB of
+    /// allocation) per frame, i.e. the dominant pan/zoom CPU cost. Keying
+    /// on (base signature + live price) collapses it to one rebuild per
+    /// tick, with every other read hitting the cache.
     func displayCandles(candles: [Candle], heikinAshi: Bool, livePrice: Double?) -> [Candle] {
         let base = baseDisplayCandles(candles: candles, heikinAshi: heikinAshi)
         guard let live = livePrice, let b = base.last, b.close != 0,
               abs(live - b.close) / b.close < 0.10 else { return base }
+        if let sig = patchedSig, let baseSig = baseDisplaySig,
+           sig.base == baseSig, sig.live == live {
+            return patchedCache
+        }
         var patched = base
         patched[patched.count - 1] = Candle(
             id: b.id,
@@ -138,15 +236,36 @@ final class ChartDerivedCache: ObservableObject {
             close: live,
             volume: b.volume
         )
+        if let baseSig = baseDisplaySig {
+            patchedSig = PatchedSig(base: baseSig, live: live)
+            patchedCache = patched
+        }
         return patched
     }
 
     // ── Indicators (SMA / EMA / Bollinger) ────────────────────────────
 
+    /// Stable identity for one instance's *computation* — kind + params +
+    /// hidden, deliberately WITHOUT the random `id`. `ChartViewiPad`
+    /// rebuilds `IndicatorInstance(kind:)` from a `Set<IndicatorKind>` on
+    /// every render, minting a fresh UUID each time. Keying the cache on the
+    /// full instance (id included) meant the signature never matched twice,
+    /// so the background recompute was cancelled and restarted forever —
+    /// and, because there are two call sites per render (indicatorMarks +
+    /// autoYDomain) each with different fresh UUIDs, the second call kept
+    /// cancelling the first's in-flight task before it could land. Net
+    /// effect: the line indicators (SMA/EMA/Bollinger) never computed, so
+    /// they never drew. Keying on the compute-relevant fields fixes the
+    /// draw AND stops the perpetual recompute. (iPad indicator fix.)
+    private struct IndicatorKey: Equatable {
+        let kind: IndicatorKind
+        let params: [String: ParamValue]
+        let hidden: Bool
+    }
     private struct IndicatorSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
-        let instances: [IndicatorInstance]
+        let instances: [IndicatorKey]
     }
     private let indicatorSlot = Slot<IndicatorSig, [(instance: IndicatorInstance, points: [IndicatorPoint])]>([])
 
@@ -156,7 +275,7 @@ final class ChartDerivedCache: ObservableObject {
         let sig = IndicatorSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            instances: instances
+            instances: instances.map { IndicatorKey(kind: $0.kind, params: $0.params, hidden: $0.hidden) }
         )
         return resolve(indicatorSlot, signature: sig) {
             Indicators.compute(instances: instances, candles: candles)

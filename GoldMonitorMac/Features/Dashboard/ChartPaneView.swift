@@ -99,11 +99,19 @@ struct ChartPaneView: View {
                 Task { await load() }
             }
             // Catch up on whatever ticks were skipped while a sibling
-            // pane was fullscreen — refreshTrailing's lookback window
-            // (`margin`) covers ordinary durations, so a cheap trailing
-            // refresh is enough rather than a full `load()`.
+            // pane was fullscreen. If this pane never got to load (its
+            // initial `.task` bailed on the `guard isVisible` because it
+            // was hidden behind a fullscreen sibling), `candles` is still
+            // empty — do a full `load()` so exiting fullscreen doesn't
+            // leave a blank chart. Otherwise a cheap trailing refresh is
+            // enough (refreshTrailing's `margin` lookback covers ordinary
+            // durations).
             .onChange(of: isVisible) { visible in
-                if visible { Task { await refreshTrailing() } }
+                guard visible else { return }
+                Task {
+                    if candles.isEmpty { await load() }
+                    else { await refreshTrailing() }
+                }
             }
     }
 
@@ -486,6 +494,15 @@ struct ChartPaneView: View {
             } label: {
                 Label("Clear Drawings", systemImage: "trash.slash")
             }
+        }
+        Divider()
+        Button {
+            // Drop the pinned window so the chart re-fits to the latest
+            // bars and auto-scales the price axis (same as a double-tap).
+            xDomain = nil
+            yDomain = nil
+        } label: {
+            Label("Reset Zoom", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
         }
         Divider()
         Button {

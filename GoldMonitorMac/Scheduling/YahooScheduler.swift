@@ -748,6 +748,11 @@ final class YahooScheduler: ObservableObject {
         // for dual-speed ticking.
         let activePairs: [PairConfig]
         if let focused = focusedPairID {
+            // On iPad, focusedPairID gates to just the focused pair.
+            // When the slow loop passes excludePair that matches the
+            // focused pair, this is a no-op — the fast loop already
+            // handles it.
+            if let exclude = excludePair, exclude == focused { return }
             activePairs = pairs.filter { $0.pairID == focused }
         } else if let only = onlyPair {
             activePairs = pairs.filter { $0.pairID == only }
@@ -771,7 +776,7 @@ final class YahooScheduler: ObservableObject {
             } else if historyTick {
                 // WS is fresh — only poll for 1h/1d history the WS doesn't
                 // broadcast. 1m/5m come from the WS live ticks.
-                await syncFarazPairsHistory(repo: repo)
+                await syncFarazPairsHistory(repo: repo, pairs: activePairs)
             }
         }
 
@@ -816,10 +821,12 @@ final class YahooScheduler: ObservableObject {
 
     /// History-only sync when the WS is fresh — fetches 1h + 1d bars
     /// that the WS doesn't broadcast, skipping 1m/5m (the WS handles
-    /// those live).
-    private func syncFarazPairsHistory(repo: OHLCRepo) async {
+    /// those live). Respects `activePairs` so iPad's focusedPairID
+    /// filtering isn't bypassed.
+    private func syncFarazPairsHistory(repo: OHLCRepo, pairs activePairs: [PairConfig]? = nil) async {
         guard !DataSourceConfig.shared.farazCookie.isEmpty else { return }
-        let faraz = pairs.filter { FarazHistorySource.symbolByPairID[$0.pairID] != nil }
+        let allPairs = activePairs ?? pairs
+        let faraz = allPairs.filter { FarazHistorySource.symbolByPairID[$0.pairID] != nil }
         await withTaskGroup(of: Void.self) { group in
             for cfg in faraz {
                 group.addTask { [self] in
@@ -842,27 +849,36 @@ final class YahooScheduler: ObservableObject {
     }
 
     /// Fallback sync for one Faraz pair when the WS is stale/disconnected.
-    /// Fetches all timeframes (1m/5m/15m/30m/1h/4h/1d) via HTTP so the
-    /// chart stays current even without a live WS connection. The newest
-    /// 1m close becomes the published spot price.
+    /// Fetches 1m bars every tick for the live price, and the remaining
+    /// timeframes (5m/15m/30m/1h/4h/1d) only every `yahooEveryNTicks`
+    /// ticks (~60s) to avoid hammering the API with redundant requests
+    /// for timeframes that rarely change.
     private func syncFarazPair(cfg: PairConfig, repo: OHLCRepo) async {
-        let tfs = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
-
+        // 1m every tick — this is the live-price source when WS is down.
         var newestClose: Double?
-        for tf in tfs {
-            do {
-                // Only the recent tail is needed each poll — deep history
-                // was filled at bootstrap / on source switch. A ~30-bar
-                // window covers the in-progress bar plus any that rolled
-                // over since the last 10s tick, keeping the payload small.
-                let bars = try await fetchFarazWindow(
-                    pairID: cfg.pairID, sourceTF: tf, cfg: cfg,
-                    to: Date(), countback: 30, firstDataRequest: false
-                )
-                try await repo.upsertMany(bars)
-                if tf == "1m", let last = bars.last { newestClose = last.close }
-            } catch {
-                self.lastError = "faraz \(cfg.pairID)/\(tf): \(error.localizedDescription)"
+        do {
+            let bars = try await fetchFarazWindow(
+                pairID: cfg.pairID, sourceTF: "1m", cfg: cfg,
+                to: Date(), countback: 30, firstDataRequest: false
+            )
+            try await repo.upsertMany(bars)
+            if let last = bars.last { newestClose = last.close }
+        } catch {
+            self.lastError = "faraz \(cfg.pairID)/1m: \(error.localizedDescription)"
+        }
+
+        // Coarser timeframes only on the history tick (~60s cadence).
+        if tickCount % yahooEveryNTicks == 0 {
+            for tf in ["5m", "15m", "30m", "1h", "4h", "1d"] {
+                do {
+                    let bars = try await fetchFarazWindow(
+                        pairID: cfg.pairID, sourceTF: tf, cfg: cfg,
+                        to: Date(), countback: 30, firstDataRequest: false
+                    )
+                    try await repo.upsertMany(bars)
+                } catch {
+                    self.lastError = "faraz \(cfg.pairID)/\(tf): \(error.localizedDescription)"
+                }
             }
         }
 

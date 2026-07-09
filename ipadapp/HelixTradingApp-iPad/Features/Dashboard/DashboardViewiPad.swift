@@ -22,8 +22,13 @@ struct DashboardViewiPad: View {
 
     @State private var candles: [Candle] = []
     @State private var isLoading: Bool = false
-    @State private var xDomain: ClosedRange<Double>? = nil
-    @State private var yDomain: ClosedRange<Double>? = nil
+    // NOTE: the chart's zoom window (xDomain/yDomain) deliberately does NOT
+    // live here. It's local @State inside `ChartPlotiPad` so a pan/zoom —
+    // which rewrites the domain on every gesture frame — re-renders only the
+    // chart subtree, not this whole 900-line dashboard body (pair header,
+    // multi-chart grid, hidden analysis overlay, stats, toolbar). Hoisting it
+    // up here is what made the iPad chart lag vs the Mac app. Reset-on-switch
+    // is handled by the `.id(pair|timeframe)` on that view instead.
     @State private var oscillatorConfig: OscillatorConfig = .load()
     @State private var srLevels: PromptBuilder.SRLevels = .init(support: [], resistance: [])
     @State private var fvgZones: [PromptBuilder.FVGZone] = []
@@ -55,9 +60,6 @@ struct DashboardViewiPad: View {
     // Phase 3: Replay controller
     @StateObject private var replay = ReplayController()
 
-    // Phase 3: Multi-chart grid
-    @StateObject private var multiChart = MultiChartLayoutStore()
-
     // Phase 2: Activate trade
     @State private var pendingActivation: PendingActivation?
 
@@ -67,85 +69,50 @@ struct DashboardViewiPad: View {
         var id: String { scenario.id }
     }
 
-    private var enabledIndicators: Set<IndicatorKind> {
-        Set(indicatorsRaw.split(separator: ",")
-            .compactMap { IndicatorKind(rawValue: String($0)) })
-    }
-    private var enabledOscillators: Set<OscillatorKind> {
-        Set(oscillatorsRaw.split(separator: ",")
-            .compactMap { OscillatorKind(rawValue: String($0)) })
-    }
-    private var hiddenIndicators: Set<IndicatorKind> {
-        Set(hiddenIndicatorsRaw.split(separator: ",")
-            .compactMap { IndicatorKind(rawValue: String($0)) })
-    }
-    private var hiddenOscillators: Set<OscillatorKind> {
-        Set(hiddenOscillatorsRaw.split(separator: ",")
-            .compactMap { OscillatorKind(rawValue: String($0)) })
-    }
+    // Cached parsed sets — avoids re-parsing @AppStorage strings on
+    // every body evaluation. Updated via .onChange below.
+    @State private var _enabledIndicators: Set<IndicatorKind> = Self.parseIndicators(UserDefaults.standard.string(forKey: "dashboard.indicators") ?? "")
+    @State private var _enabledOscillators: Set<OscillatorKind> = Self.parseOscillators(UserDefaults.standard.string(forKey: "dashboard.oscillators") ?? "")
+    @State private var _hiddenIndicators: Set<IndicatorKind> = Self.parseIndicators(UserDefaults.standard.string(forKey: "dashboard.hiddenIndicators") ?? "")
+    @State private var _hiddenOscillators: Set<OscillatorKind> = Self.parseOscillators(UserDefaults.standard.string(forKey: "dashboard.hiddenOscillators") ?? "")
+
+    private var enabledIndicators: Set<IndicatorKind> { _enabledIndicators }
+    private var enabledOscillators: Set<OscillatorKind> { _enabledOscillators }
+    private var hiddenIndicators: Set<IndicatorKind> { _hiddenIndicators }
+    private var hiddenOscillators: Set<OscillatorKind> { _hiddenOscillators }
     private var visibleIndicators: Set<IndicatorKind> {
-        enabledIndicators.subtracting(hiddenIndicators)
+        _enabledIndicators.subtracting(_hiddenIndicators)
     }
     private var visibleOscillators: Set<OscillatorKind> {
-        enabledOscillators.subtracting(hiddenOscillators)
+        _enabledOscillators.subtracting(_hiddenOscillators)
     }
 
     private func setIndicator(_ kind: IndicatorKind, enabled: Bool) {
-        var s = enabledIndicators
+        var s = _enabledIndicators
         if enabled { s.insert(kind) } else { s.remove(kind) }
         indicatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
     }
     private func setOscillator(_ kind: OscillatorKind, enabled: Bool) {
-        var s = enabledOscillators
+        var s = _enabledOscillators
         if enabled { s.insert(kind) } else { s.remove(kind) }
         oscillatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
     }
     private func setIndicatorHidden(_ kind: IndicatorKind, hidden: Bool) {
-        var s = hiddenIndicators
+        var s = _hiddenIndicators
         if hidden { s.insert(kind) } else { s.remove(kind) }
         hiddenIndicatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
     }
     private func setOscillatorHidden(_ kind: OscillatorKind, hidden: Bool) {
-        var s = hiddenOscillators
+        var s = _hiddenOscillators
         if hidden { s.insert(kind) } else { s.remove(kind) }
         hiddenOscillatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
     }
 
-    // ── Grid fullscreen pane sync ─────────────────────────────────
-    // Same helpers as DashboardView — see the comment there.
-    @discardableResult
-    private func syncToFullscreenPane<T: Equatable>(
-        _ keyPath: WritableKeyPath<ChartPane, T>,
-        _ value: T
-    ) -> Bool {
-        guard let fsID = multiChart.fullscreenPaneID,
-              let pane = multiChart.panes.first(where: { $0.id == fsID }),
-              pane[keyPath: keyPath] != value
-        else { return false }
-        var p = pane
-        p[keyPath: keyPath] = value
-        multiChart.updatePane(p)
-        return true
+    private static func parseIndicators(_ raw: String) -> Set<IndicatorKind> {
+        Set(raw.split(separator: ",").compactMap { IndicatorKind(rawValue: String($0)) })
     }
-
-    private func syncIndicatorsToFullscreenPane() {
-        guard let fsID = multiChart.fullscreenPaneID,
-              let pane = multiChart.panes.first(where: { $0.id == fsID }),
-              Set(pane.indicatorInstances.map(\.kind)) != enabledIndicators
-        else { return }
-        var p = pane
-        p.indicatorInstances = enabledIndicators.map { IndicatorInstance(kind: $0) }
-        multiChart.updatePane(p)
-    }
-
-    private func syncOscillatorsToFullscreenPane() {
-        guard let fsID = multiChart.fullscreenPaneID,
-              let pane = multiChart.panes.first(where: { $0.id == fsID }),
-              Set(pane.oscillatorInstances.map(\.kind)) != enabledOscillators
-        else { return }
-        var p = pane
-        p.oscillatorInstances = enabledOscillators.map { OscillatorInstance(kind: $0) }
-        multiChart.updatePane(p)
+    private static func parseOscillators(_ raw: String) -> Set<OscillatorKind> {
+        Set(raw.split(separator: ",").compactMap { OscillatorKind(rawValue: String($0)) })
     }
 
     var body: some View {
@@ -159,30 +126,12 @@ struct DashboardViewiPad: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    let showsGrid = multiChart.layout != .single && !app.isChartFullscreen
                     let isFull = app.isChartFullscreen
-                    ZStack {
-                        chartCard(pair)
-                            .frame(maxWidth: showsGrid ? 0 : .infinity,
-                                   maxHeight: showsGrid ? 0 : .infinity)
-                            .opacity(showsGrid ? 0 : 1)
-                            .allowsHitTesting(!showsGrid)
-                        ChartGridView(
-                            layoutStore: multiChart,
-                            indicatorConfig: oscillatorConfig,
-                            drawingStore: drawingStore,
-                            activeDrawingTool: $activeDrawingTool
-                        ) { gridFullscreenToolbar }
-                        .environmentObject(app)
-                        .environmentObject(yahoo)
-                        .frame(maxWidth: showsGrid ? .infinity : 0,
-                               maxHeight: showsGrid ? .infinity : 0)
-                        .opacity(showsGrid ? 1 : 0)
-                        .allowsHitTesting(showsGrid)
-                    }
-                    .clipped()
+                    chartCard(pair)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
 
-                    if !showsGrid && !isFull {
+                    if !isFull {
                         statsRow(pair)
                     }
                 } else {
@@ -192,9 +141,13 @@ struct DashboardViewiPad: View {
             .padding(app.isChartFullscreen ? 0 : 16)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-            // Phase 2: Analysis overlay
-            if let pair = pair {
-                let showAP = showAnalysis
+            // Phase 2: Analysis overlay. Built ONLY while shown — previously
+            // it was always mounted (collapsed to frame 0), so its body — which
+            // renders the AI report markdown — re-evaluated on every dashboard
+            // re-render (each 1 Hz candle tick, each fullscreen toggle) even
+            // while hidden. Gating it behind `showAnalysis` keeps it off the
+            // hot path; the one-time build cost lands only when the user opens it.
+            if let pair = pair, showAnalysis {
                 AnalysisPageiPad(
                     pair: pair,
                     timeframe: timeframe,
@@ -216,17 +169,13 @@ struct DashboardViewiPad: View {
                     }
                 )
                 .environmentObject(analysisStore)
-                .frame(maxWidth: showAP ? .infinity : 0,
-                       maxHeight: showAP ? .infinity : 0)
-                .opacity(showAP ? 1 : 0)
-                .allowsHitTesting(showAP)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(Theme.Color.canvas)
         .task(id: app.selectedPairID) {
             await MainActor.run {
-                xDomain = nil
-                yDomain = nil
+                // Domain reset happens via ChartPlotiPad's `.id` changing.
                 srLevels = .init(support: [], resistance: [])
                 fvgZones = []
                 supplyDemandZones = []
@@ -239,34 +188,18 @@ struct DashboardViewiPad: View {
             warmHistory()
         }
         .onChange(of: timeframe) { _ in
-            if syncToFullscreenPane(\.timeframe, timeframe) { return }
-            xDomain = nil
-            yDomain = nil
+            // Domain reset happens via ChartPlotiPad's `.id` changing.
             alertStore.timeframeLabel = timeframe.rawValue
             warmHistory()
         }
-        .onChange(of: userChartType) { newValue in
-            _ = syncToFullscreenPane(\.chartType, newValue)
+        .onChange(of: userChartType) { _ in }
+        .onChange(of: indicatorsRaw) { newValue in
+            _enabledIndicators = Self.parseIndicators(newValue)
         }
-        .onChange(of: indicatorsRaw) { _ in
-            syncIndicatorsToFullscreenPane()
+        .onChange(of: oscillatorsRaw) { newValue in
+            _enabledOscillators = Self.parseOscillators(newValue)
         }
-        .onChange(of: oscillatorsRaw) { _ in
-            syncOscillatorsToFullscreenPane()
-        }
-        .onChange(of: showVolume) { newValue in
-            _ = syncToFullscreenPane(\.showVolume, newValue)
-        }
-        .onChange(of: multiChart.fullscreenPaneID) { fsID in
-            guard let fsID,
-                  let pane = multiChart.panes.first(where: { $0.id == fsID })
-            else { return }
-            timeframe = pane.timeframe
-            userChartType = pane.chartType
-            indicatorsRaw = pane.indicatorInstances.map(\.kind.rawValue).sorted().joined(separator: ",")
-            oscillatorsRaw = pane.oscillatorInstances.map(\.kind.rawValue).sorted().joined(separator: ",")
-            showVolume = pane.showVolume
-        }
+        .onChange(of: showVolume) { _ in }
         .onReceive(
             yahoo.$lastUpdateAt
                 .compactMap { $0 }
@@ -367,25 +300,6 @@ struct DashboardViewiPad: View {
                 Task { await reloadCandles() }
             } label: {
                 Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Theme.Color.textSecondary)
-                    .frame(width: 44, height: 44)
-                    .background(Circle().fill(Theme.Color.surface))
-            }
-
-            // Grid layout toggle
-            Menu {
-                ForEach(ChartLayoutKind.allCases) { layout in
-                    Button {
-                        if let pairID = app.selectedPairID {
-                            multiChart.setLayout(layout, defaultPairID: pairID)
-                        }
-                    } label: {
-                        Label(layout.label, systemImage: layout.icon)
-                    }
-                }
-            } label: {
-                Image(systemName: multiChart.layout.icon)
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Theme.Color.textSecondary)
                     .frame(width: 44, height: 44)
@@ -549,14 +463,17 @@ struct DashboardViewiPad: View {
 
             Divider().background(Theme.Color.border)
 
-            // Chart body — Phase 2: wired with drawing store
-            ChartViewiPad(
+            // Chart body + oscillators + volume, isolated in ChartPlotiPad.
+            // That view owns xDomain/yDomain, so pan/zoom re-renders only its
+            // subtree — never this dashboard body, the multi-chart grid, or
+            // the analysis overlay. The `.id` gives each pair/timeframe a
+            // fresh (auto-fit) zoom window, replacing the old explicit resets.
+            ChartPlotiPad(
                 candles: candles,
                 chartType: userChartType,
                 accent: pair.color,
-                xDomain: $xDomain,
-                yDomain: $yDomain,
                 indicators: visibleIndicators,
+                oscillators: visibleOscillators,
                 indicatorConfig: oscillatorConfig,
                 srLevels: srVisible ? srLevels : .init(support: [], resistance: []),
                 fvgZones: fvgVisible ? fvgZones : [],
@@ -580,35 +497,10 @@ struct DashboardViewiPad: View {
                 journalEntries: app.selectedPairID == app.journalChartEntry?.pairID
                     ? (app.journalChartEntry.map { [$0] } ?? []) : [],
                 livePrice: yahoo.latestPrices[pair.id],
-                replayActive: replay.isActive
+                replayActive: replay.isActive,
+                showVolume: showVolume
             )
-            .frame(maxHeight: .infinity)
-            .clipped()
-
-            // Oscillator panels
-            if !visibleOscillators.isEmpty {
-                Divider().background(Theme.Color.border)
-                ForEach(Array(visibleOscillators)) { kind in
-                    let instance = OscillatorInstance(kind: kind)
-                    OscillatorPanel(
-                        instance: instance,
-                        candles: candles,
-                        xDomain: xDomain
-                    )
-                    .padding(.horizontal, Theme.Spacing.lg)
-                }
-            }
-
-            // Volume bars
-            if showVolume {
-                let volView = VolumeBarsView(candles: candles, accent: pair.color, xDomain: xDomain)
-                if volView.hasVolume {
-                    Divider().background(Theme.Color.border)
-                    volView
-                        .frame(height: 50)
-                        .padding(.horizontal, Theme.Spacing.lg)
-                }
-            }
+            .id("\(pair.id)|\(timeframe.rawValue)")
         }
         .background(
             RoundedRectangle(cornerRadius: app.isChartFullscreen ? 0 : Theme.Radius.lg, style: .continuous)
@@ -747,142 +639,6 @@ struct DashboardViewiPad: View {
         }
     }
 
-    // MARK: - Grid fullscreen toolbar
-
-    private var gridFullscreenToolbar: some View {
-        HStack(spacing: Theme.Spacing.md) {
-            if let pairID = app.selectedPairID,
-               let pair = app.pairs.first(where: { $0.id == pairID }) {
-                Text(pair.name)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.Color.textPrimary)
-                Text(timeframe.label)
-                    .font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(Theme.Color.textMuted)
-                Divider().frame(height: 20).background(Theme.Color.border)
-            }
-            HStack(spacing: 6) {
-                // AI Analyze
-                Button { showAnalysis = true } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 12, weight: .bold))
-                        Text("Analyze")
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Capsule().fill(Theme.accentGradient))
-                }
-
-                // Replay
-                if replay.isActive {
-                    HStack(spacing: 4) {
-                        Button { replay.exit() } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 14))
-                                .foregroundStyle(Theme.Color.danger)
-                        }
-                        Text("REPLAY")
-                            .font(.system(size: 9, weight: .heavy))
-                            .foregroundStyle(Theme.Color.warn)
-                    }
-                } else {
-                    Button { replay.arm() } label: {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Theme.Color.textSecondary)
-                            .frame(width: 32, height: 32)
-                    }
-                }
-
-                // Alerts
-                Button { showAlertSheet = true } label: {
-                    Image(systemName: "bell")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Theme.Color.textSecondary)
-                        .frame(width: 32, height: 32)
-                }
-
-                Divider().frame(height: 20).background(Theme.Color.border)
-
-                // Indicators
-                Menu {
-                    ForEach(IndicatorKind.allCases) { kind in
-                        Button {
-                            setIndicator(kind, enabled: !enabledIndicators.contains(kind))
-                        } label: {
-                            Label(kind.label,
-                                  systemImage: enabledIndicators.contains(kind) ? "checkmark.circle.fill" : "circle")
-                        }
-                    }
-                    Divider()
-                    ForEach(OscillatorKind.allCases) { kind in
-                        Button {
-                            setOscillator(kind, enabled: !enabledOscillators.contains(kind))
-                        } label: {
-                            Label(kind.label,
-                                  systemImage: enabledOscillators.contains(kind) ? "checkmark.circle.fill" : "circle")
-                        }
-                    }
-                    Divider()
-                    Button { showIndicatorSettings = true } label: {
-                        Label("Indicator Settings...", systemImage: "slider.horizontal.3")
-                    }
-                } label: {
-                    Image(systemName: "chart.line.uptrend.xyaxis")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Theme.Color.textSecondary)
-                        .frame(width: 32, height: 32)
-                }
-
-                // Layers
-                Menu {
-                    layersMenuContent
-                } label: {
-                    Image(systemName: "square.3.layers.3d")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Theme.Color.textSecondary)
-                        .frame(width: 32, height: 32)
-                }
-
-                // Drawing tools
-                drawingToolbar
-
-                Divider().frame(height: 20).background(Theme.Color.border)
-
-                ChartTypeToggle(selected: $userChartType, isDisabled: false)
-                TimeframeSelector(selected: $timeframe)
-
-                Divider().frame(height: 20).background(Theme.Color.border)
-
-                // Debug
-                Button {
-                    showDebugLogSheet = true
-                } label: {
-                    Image(systemName: "ladybug.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(NetworkLog.shared.isEnabled
-                                         ? Theme.Color.warn
-                                         : Theme.Color.textSecondary)
-                        .frame(width: 32, height: 32)
-                }
-
-                // Fullscreen
-                Button {
-                    app.isChartFullscreen = false
-                } label: {
-                    Image(systemName: "arrow.down.right.and.arrow.up.left")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Theme.Color.textSecondary)
-                        .frame(width: 32, height: 32)
-                }
-                .help("Exit fullscreen")
-            }
-        }
-    }
-
     // MARK: - Stats row
 
     private func statsRow(_ pair: TradingPair) -> some View {
@@ -992,5 +748,117 @@ struct DashboardViewiPad: View {
     private func candles(for tf: Timeframe) -> [Candle] {
         guard let pairID = app.selectedPairID else { return [] }
         return candles(for: pairID, tf: tf)
+    }
+}
+
+// MARK: - Isolated chart plot
+
+/// The price chart plus its oscillator panels and volume bars, all sharing
+/// one `xDomain`/`yDomain` zoom window.
+///
+/// Why this is its own view: the domain lives here as local `@State`, not on
+/// `DashboardViewiPad`. A pan/zoom rewrites the domain on *every* gesture
+/// frame; keeping it local means SwiftUI re-evaluates only this subtree per
+/// frame, instead of the entire dashboard body (pair header, multi-chart
+/// grid, hidden analysis overlay, stats row, toolbar menus). Re-rendering
+/// that whole tree ~60–120×/sec during a drag is what made the iPad chart
+/// lag compared to the Mac app, whose domain state is likewise scoped to an
+/// isolated chart pane (`ChartPaneView`).
+///
+/// Reset-on-switch is driven from the parent by changing this view's `.id`
+/// (pair | timeframe): a new id re-creates the view with nil domains, so
+/// each pair/timeframe opens on its default auto-fit window.
+private struct ChartPlotiPad: View {
+    let candles: [Candle]
+    let chartType: ChartType
+    let accent: Color
+    let indicators: Set<IndicatorKind>
+    let oscillators: Set<OscillatorKind>
+    let indicatorConfig: OscillatorConfig
+    let srLevels: PromptBuilder.SRLevels
+    let fvgZones: [PromptBuilder.FVGZone]
+    let supplyDemandZones: [PromptBuilder.SupplyDemandZone]
+    let taScenario: PromptBuilder.TAScenario?
+    let taAltScenario: PromptBuilder.TAScenario?
+    let drawings: [ChartDrawing]
+    let activeTool: DrawingTool
+    let onCommitDrawing: (ChartDrawing) -> Void
+    let onMoveDrawing: (ChartDrawing) -> Void
+    let selectedDrawingID: UUID?
+    let onSelectDrawing: (UUID?) -> Void
+    let trades: [Trade]
+    let journalEntries: [JournalEntry]
+    let livePrice: Double?
+    let replayActive: Bool
+    let showVolume: Bool
+
+    @State private var xDomain: ClosedRange<Double>? = nil
+    @State private var yDomain: ClosedRange<Double>? = nil
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ChartViewiPad(
+                candles: candles,
+                chartType: chartType,
+                accent: accent,
+                xDomain: $xDomain,
+                yDomain: $yDomain,
+                indicators: indicators,
+                indicatorConfig: indicatorConfig,
+                srLevels: srLevels,
+                fvgZones: fvgZones,
+                supplyDemandZones: supplyDemandZones,
+                taScenario: taScenario,
+                taAltScenario: taAltScenario,
+                drawings: drawings,
+                activeTool: activeTool,
+                onCommitDrawing: onCommitDrawing,
+                onMoveDrawing: onMoveDrawing,
+                selectedDrawingID: selectedDrawingID,
+                onSelectDrawing: onSelectDrawing,
+                trades: trades,
+                journalEntries: journalEntries,
+                livePrice: livePrice,
+                replayActive: replayActive
+            )
+            .frame(maxHeight: .infinity)
+            .clipped()
+            // Tap-and-hold to rescale — mirrors the double-tap reset, but
+            // discoverable. Drops the pinned window so the chart re-fits to
+            // the latest bars and auto-scales the price axis.
+            .contextMenu {
+                Button {
+                    xDomain = nil
+                    yDomain = nil
+                } label: {
+                    Label("Reset Zoom", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
+                }
+            }
+
+            // Oscillator panels — follow the same xDomain so they scroll in
+            // lockstep with the price chart.
+            if !oscillators.isEmpty {
+                Divider().background(Theme.Color.border)
+                ForEach(Array(oscillators)) { kind in
+                    OscillatorPanel(
+                        instance: OscillatorInstance(kind: kind),
+                        candles: candles,
+                        xDomain: xDomain
+                    )
+                    .padding(.horizontal, Theme.Spacing.lg)
+                }
+            }
+
+            // Volume bars
+            if showVolume {
+                let volView = VolumeBarsView(candles: candles, accent: accent, xDomain: xDomain)
+                if volView.hasVolume {
+                    Divider().background(Theme.Color.border)
+                    volView
+                        .frame(height: 50)
+                        .padding(.horizontal, Theme.Spacing.lg)
+                }
+            }
+        }
     }
 }
