@@ -53,6 +53,7 @@ struct DashboardViewiPad: View {
     @State private var showIndicatorSettings: Bool = false
     @State private var settingsFocusSection: String? = nil
     @State private var showAlertSheet: Bool = false
+    @State private var settingsDragOffset: CGSize = .zero
 
     // Phase 2: Alert store
     @StateObject private var alertStore = AlertStore()
@@ -210,11 +211,19 @@ struct DashboardViewiPad: View {
                 Task { await refreshTrailingCandles() }
             }
         }
-        .sheet(isPresented: $showIndicatorSettings) {
-            oscillatorConfig.save()
-            settingsFocusSection = nil
-        } content: {
-            IndicatorSettingsSheet(config: $oscillatorConfig, focusSection: settingsFocusSection)
+        .overlay {
+            if showIndicatorSettings {
+                DraggableSettingsOverlay(
+                    config: $oscillatorConfig,
+                    focusSection: settingsFocusSection,
+                    dragOffset: $settingsDragOffset,
+                    onDismiss: {
+                        oscillatorConfig.save()
+                        showIndicatorSettings = false
+                        settingsFocusSection = nil
+                    }
+                )
+            }
         }
         .sheet(isPresented: $showAlertSheet) {
             if let cur = pair {
@@ -348,41 +357,49 @@ struct DashboardViewiPad: View {
 
                 Divider().frame(height: 20).background(Theme.Color.border)
 
-                // Indicators menu
+                // Indicators menu — toggle on/off, show/hide when active
                 Menu {
-                    ForEach(IndicatorKind.allCases) { kind in
-                        let isOn = enabledIndicators.contains(kind)
-                        let isHidden = isOn && hiddenIndicators.contains(kind)
-                        Button {
-                            if isOn {
-                                setIndicatorHidden(kind, hidden: !isHidden)
-                            } else {
-                                setIndicator(kind, enabled: true)
-                            }
-                        } label: {
-                            Label {
-                                HStack(spacing: 6) {
-                                    Text(kind.label)
-                                    if isOn {
-                                        Image(systemName: isHidden ? "eye.slash" : "eye")
-                                            .font(.system(size: 10))
-                                            .foregroundStyle(isHidden ? Theme.Color.textMuted.opacity(0.4) : kind.color)
-                                    }
+                    Section("Overlays") {
+                        ForEach(IndicatorKind.allCases) { kind in
+                            let isOn = enabledIndicators.contains(kind)
+                            let isHidden = isOn && hiddenIndicators.contains(kind)
+                            Button {
+                                if isOn {
+                                    setIndicator(kind, enabled: false)
+                                } else {
+                                    setIndicator(kind, enabled: true)
                                 }
-                            } icon: {
-                                Image(systemName: isOn
-                                      ? (isHidden ? "eye.slash" : "checkmark.circle.fill")
-                                      : "circle")
+                            } label: {
+                                Label {
+                                    HStack(spacing: 6) {
+                                        Text(kind.label)
+                                        if isOn {
+                                            Text("·")
+                                                .foregroundStyle(Theme.Color.textMuted)
+                                        }
+                                    }
+                                } icon: {
+                                    Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                                }
+                            }
+                            if isOn {
+                                Button {
+                                    setIndicatorHidden(kind, hidden: !isHidden)
+                                } label: {
+                                    Label(isHidden ? "Show" : "Hide",
+                                          systemImage: isHidden ? "eye" : "eye.slash")
+                                }
                             }
                         }
                     }
-                    Divider()
-                    ForEach(OscillatorKind.allCases) { kind in
-                        Button {
-                            setOscillator(kind, enabled: !enabledOscillators.contains(kind))
-                        } label: {
-                            Label(kind.label,
-                                  systemImage: enabledOscillators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                    Section("Panels") {
+                        ForEach(OscillatorKind.allCases) { kind in
+                            Button {
+                                setOscillator(kind, enabled: !enabledOscillators.contains(kind))
+                            } label: {
+                                Label(kind.label,
+                                      systemImage: enabledOscillators.contains(kind) ? "checkmark.circle.fill" : "circle")
+                            }
                         }
                     }
                     Divider()
@@ -859,6 +876,232 @@ private struct ChartPlotiPad: View {
                         .padding(.horizontal, Theme.Spacing.lg)
                 }
             }
+        }
+    }
+}
+
+// MARK: - Draggable settings overlay
+
+/// A non-modal, draggable settings panel that applies changes instantly
+/// as the user adjusts values. Replaces the old `.sheet` approach so the
+/// user can see the chart update in real time while tuning parameters.
+private struct DraggableSettingsOverlay: View {
+    @Binding var config: OscillatorConfig
+    var focusSection: String?
+    @Binding var dragOffset: CGSize
+    let onDismiss: () -> Void
+
+    @State private var isDragging = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Draggable header
+            HStack {
+                Text("Indicator Settings")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Theme.Color.textPrimary)
+                Spacer()
+                Button {
+                    onDismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.Color.textSecondary)
+                        .frame(width: 24, height: 24)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Theme.Color.surfaceHi)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        isDragging = true
+                        dragOffset = CGSize(
+                            width: value.translation.width,
+                            height: value.translation.height
+                        )
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                    }
+            )
+
+            Divider().background(Theme.Color.border)
+
+            // Settings content — changes apply instantly via $config binding
+            ScrollViewReader { proxy in
+                ScrollView {
+                    IndicatorSettingsBody(config: $config)
+                }
+                .frame(maxHeight: 450)
+                .onAppear {
+                    if let section = focusSection {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            withAnimation { proxy.scrollTo(section, anchor: .top) }
+                        }
+                    }
+                }
+            }
+
+            Divider().background(Theme.Color.border)
+
+            // Bottom bar
+            HStack {
+                Button("Reset to defaults") {
+                    config = OscillatorConfig()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.Color.textSecondary)
+                Spacer()
+                Text("Changes apply instantly")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Theme.Color.surfaceHi)
+        }
+        .frame(width: 360)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Theme.Color.surface)
+                .shadow(color: .black.opacity(0.3), radius: 16, y: 6)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Theme.Color.border, lineWidth: 1)
+        )
+        .offset(x: dragOffset.width, y: dragOffset.height)
+        .animation(isDragging ? .none : .spring(response: 0.3), value: dragOffset)
+    }
+}
+
+// MARK: - Settings body (shared between sheet and overlay)
+
+/// The scrollable settings content — extracted so both the old `.sheet`
+/// and the new draggable overlay can share it.
+private struct IndicatorSettingsBody: View {
+    @Binding var config: OscillatorConfig
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            settingsSection(title: "RSI") {
+                settingsStepper(label: "Period", value: $config.rsiPeriod, range: 2...100)
+            }
+            Divider().background(Theme.Color.border)
+            settingsSection(title: "MACD") {
+                settingsStepper(label: "Fast EMA", value: $config.macdFast, range: 2...50)
+                settingsStepper(label: "Slow EMA", value: $config.macdSlow, range: 3...100)
+                settingsStepper(label: "Signal EMA", value: $config.macdSignal, range: 2...50)
+            }
+            Divider().background(Theme.Color.border)
+            settingsSection(title: "Stochastic") {
+                settingsStepper(label: "%K period", value: $config.stochK, range: 2...50)
+                settingsStepper(label: "%D period", value: $config.stochD, range: 1...20)
+            }
+            Divider().background(Theme.Color.border)
+            settingsSection(title: "UT Bot Alerts") {
+                settingsDoubleStepper(label: "Key value", value: $config.utKeyValue, range: 0.1...10.0, step: 0.1)
+                settingsStepper(label: "ATR period", value: $config.utATRPeriod, range: 1...100)
+                Toggle("Show trailing-stop line", isOn: $config.utShowTrailingStop)
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                Toggle("Use Heikin Ashi", isOn: $config.utUseHeikinAshi)
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+            Divider().background(Theme.Color.border)
+            settingsSection(title: "Order Blocks") {
+                settingsStepper(label: "Run length", value: $config.obPeriods, range: 1...20)
+                settingsDoubleStepper(label: "Min % move", value: $config.obThreshold, range: 0.0...10.0, step: 0.1)
+                Toggle("Use wicks", isOn: $config.obUseWicks)
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                Toggle("Show exhausted", isOn: $config.obShowExhausted)
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+            Divider().background(Theme.Color.border)
+            settingsSection(title: "Fair Value Gap") {
+                settingsDoubleStepper(label: "Min gap %", value: $config.fvgThreshold, range: 0.0...5.0, step: 0.1)
+                Toggle("Show mitigated", isOn: $config.fvgShowMitigated)
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+            Divider().background(Theme.Color.border)
+            settingsSection(title: "Trading Sessions") {
+                Toggle("Tokyo", isOn: $config.sessShowTokyo)
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                Toggle("London", isOn: $config.sessShowLondon)
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                Toggle("New York", isOn: $config.sessShowNewYork)
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+            Divider().background(Theme.Color.border)
+            settingsSection(title: "Volume Profile") {
+                settingsStepper(label: "Buckets", value: $config.vpBucketCount, range: 10...100)
+                settingsDoubleStepper(label: "Value Area %", value: $config.vpValueAreaPct, range: 50...95, step: 5.0)
+            }
+        }
+        .padding(14)
+    }
+
+    @ViewBuilder
+    private func settingsSection<Content: View>(title: String, @ViewBuilder body: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            Text(title)
+                .font(.system(size: 11, weight: .bold))
+                .tracking(0.6)
+                .foregroundStyle(Theme.Color.textMuted)
+                .id(title)
+            body()
+        }
+    }
+
+    private func settingsStepper(label: String, value: Binding<Int>, range: ClosedRange<Int>) -> some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.Color.textSecondary)
+            Spacer()
+            Text("\(value.wrappedValue)")
+                .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                .foregroundStyle(Theme.Color.textPrimary)
+                .frame(minWidth: 30, alignment: .trailing)
+            Stepper("", value: value, in: range)
+                .labelsHidden()
+                .controlSize(.small)
+        }
+    }
+
+    private func settingsDoubleStepper(label: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double) -> some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.Color.textSecondary)
+            Spacer()
+            Text(String(format: "%.1f", value.wrappedValue))
+                .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                .foregroundStyle(Theme.Color.textPrimary)
+                .frame(minWidth: 36, alignment: .trailing)
+            Stepper("", value: value, in: range, step: step)
+                .labelsHidden()
         }
     }
 }

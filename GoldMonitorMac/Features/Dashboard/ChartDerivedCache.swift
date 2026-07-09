@@ -136,9 +136,22 @@ final class ChartDerivedCache: ObservableObject {
     ) -> Value {
         guard slot.signature != signature else { return slot.value }
         slot.task?.cancel()
+
+        // First-time computation (no prior signature): compute
+        // synchronously so the indicator appears immediately when
+        // the user enables it. Subsequent updates (data ticks,
+        // config tweaks) use the background queue.
+        if slot.signature == nil {
+            let fresh = compute()
+            slot.value = fresh
+            slot.signature = signature
+            coalescedObjectWillChange()
+            return fresh
+        }
+
         // Capture everything the detached task needs.
         let spawn: () -> Void = { [weak self] in
-            slot.task = Task.detached(priority: .utility) {
+            slot.task = Task.detached(priority: .userInitiated) {
                 let fresh = compute()
                 Self.release()
                 guard !Task.isCancelled else { return }
