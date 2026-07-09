@@ -255,9 +255,7 @@ struct ChartPaneView: View {
                     .foregroundStyle(Theme.Color.textMuted)
             }
 
-            if isFullscreen {
-                indicatorsMenu
-            }
+            indicatorsMenu
 
             Spacer()
 
