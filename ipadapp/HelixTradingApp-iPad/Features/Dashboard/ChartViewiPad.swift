@@ -34,6 +34,7 @@ struct ChartViewiPad: View {
     @State private var dragStartYDomain: ClosedRange<Double>?
     @State private var panLockedY = false
     @State private var magnifyStartDomain: ClosedRange<Double>?
+    @State private var magnifyStartYDomain: ClosedRange<Double>?
     @State private var yScaleStartDomain: ClosedRange<Double>?
     @State private var drawingStart: DrawingPoint?
     @State private var drawingEnd: DrawingPoint?
@@ -380,7 +381,7 @@ struct ChartViewiPad: View {
                 let newXUpper = start.upperBound - deltaX
                 xDomain = newXLower ... newXUpper
 
-                if !panLockedY, abs(value.translation.height) > 6 { panLockedY = true }
+                if !panLockedY, abs(value.translation.height) > 2 { panLockedY = true }
                 if panLockedY, let startY = dragStartYDomain, plotHeight > 0 {
                     let ySpan = startY.upperBound - startY.lowerBound
                     let pricePerPoint = ySpan / Double(plotHeight)
@@ -402,16 +403,30 @@ struct ChartViewiPad: View {
             .onChanged { value in
                 if magnifyStartDomain == nil {
                     magnifyStartDomain = effectiveXDomain
+                    magnifyStartYDomain = effectiveYDomain
                     hovered = nil
                 }
-                guard let start = magnifyStartDomain else { return }
-                let center = (start.lowerBound + start.upperBound) / 2
-                let halfSpan = (start.upperBound - start.lowerBound) / 2
-                let scale = max(0.1, min(20, Double(value)))
-                let zoomedHalf = halfSpan / scale
-                xDomain = (center - zoomedHalf) ... (center + zoomedHalf)
+                // X-axis zoom (horizontal pinch)
+                if let start = magnifyStartDomain {
+                    let center = (start.lowerBound + start.upperBound) / 2
+                    let halfSpan = (start.upperBound - start.lowerBound) / 2
+                    let scale = max(0.1, min(20, Double(value)))
+                    let zoomedHalf = halfSpan / scale
+                    xDomain = (center - zoomedHalf) ... (center + zoomedHalf)
+                }
+                // Y-axis zoom (vertical component of pinch)
+                if let startY = magnifyStartYDomain {
+                    let yCenter = (startY.lowerBound + startY.upperBound) / 2
+                    let yHalfSpan = (startY.upperBound - startY.lowerBound) / 2
+                    let yScale = max(0.1, min(20, Double(value)))
+                    let yZoomedHalf = yHalfSpan / yScale
+                    yDomain = (yCenter - yZoomedHalf) ... (yCenter + yZoomedHalf)
+                }
             }
-            .onEnded { _ in magnifyStartDomain = nil }
+            .onEnded { _ in
+                magnifyStartDomain = nil
+                magnifyStartYDomain = nil
+            }
     }
 
     // MARK: - Effective domains
