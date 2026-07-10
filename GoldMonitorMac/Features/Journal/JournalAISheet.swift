@@ -604,11 +604,7 @@ struct JournalAISheet: View {
 
     private var thinkingDisclosure: some View {
         DisclosureGroup(isExpanded: $showThinking) {
-            Text(thinking)
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(Theme.Color.textMuted)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            ThinkingTraceView(text: thinking)
                 .padding(Theme.Spacing.sm)
         } label: {
             HStack(spacing: 5) {

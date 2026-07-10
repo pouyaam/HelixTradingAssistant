@@ -160,16 +160,6 @@ struct OscillatorConfig: Codable, Equatable {
     var sonarlabSensitivity: Double = 26.0
     var sonarlabMitigationType: String = "Close"
 
-    // FVG→OB parameters.
-    var fvobFVGThreshold: Double = 0.0
-    var fvobShowMitigated: Bool = false
-    var fvobSearchMin: Int = 4
-    var fvobSearchMax: Int = 15
-    var fvobShowExhausted: Bool = true
-    var fvobDetectVolume: Bool = false
-    var fvobVolumeMultiplier: Double = 1.2
-    var fvobNotifyEvents: Bool = false
-
     // Volume Profile parameters (session-based, see `VolumeProfile`).
     // `vpBucketCount` is the number of equal-price bands per session;
     // `vpValueAreaPct` is the % of total volume that defines the value area.
@@ -234,14 +224,6 @@ struct OscillatorConfig: Codable, Equatable {
         fvgShowMitigated   = try c.decodeIfPresent(Bool.self,   forKey: .fvgShowMitigated)   ?? true
         sonarlabSensitivity = try c.decodeIfPresent(Double.self, forKey: .sonarlabSensitivity) ?? 26.0
         sonarlabMitigationType = try c.decodeIfPresent(String.self, forKey: .sonarlabMitigationType) ?? "Close"
-        fvobFVGThreshold   = try c.decodeIfPresent(Double.self, forKey: .fvobFVGThreshold)   ?? 0.0
-        fvobShowMitigated  = try c.decodeIfPresent(Bool.self,   forKey: .fvobShowMitigated)  ?? false
-        fvobSearchMin      = try c.decodeIfPresent(Int.self,    forKey: .fvobSearchMin)      ?? 4
-        fvobSearchMax      = try c.decodeIfPresent(Int.self,    forKey: .fvobSearchMax)      ?? 15
-        fvobShowExhausted  = try c.decodeIfPresent(Bool.self,   forKey: .fvobShowExhausted)  ?? true
-        fvobDetectVolume   = try c.decodeIfPresent(Bool.self,   forKey: .fvobDetectVolume)   ?? false
-        fvobVolumeMultiplier = try c.decodeIfPresent(Double.self, forKey: .fvobVolumeMultiplier) ?? 1.2
-        fvobNotifyEvents   = try c.decodeIfPresent(Bool.self,   forKey: .fvobNotifyEvents)   ?? false
         vpBucketCount      = try c.decodeIfPresent(Int.self,    forKey: .vpBucketCount)      ?? 24
         vpValueAreaPct     = try c.decodeIfPresent(Double.self, forKey: .vpValueAreaPct)     ?? 70.0
         vpUseZigzag        = try c.decodeIfPresent(Bool.self,   forKey: .vpUseZigzag)        ?? true

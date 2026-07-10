@@ -396,7 +396,7 @@ final class AnalysisStore: ObservableObject {
     /// re-render) to redraw at that same rate, which pegs the
     /// main thread on long reports. We coalesce into `pendingText`
     /// / `pendingThinking` buffers and flush at most 10 Hz via
-    /// `flushTimers`. Net effect: ~5× fewer redraws with no
+    /// `textFlushTimers`. Net effect: ~5× fewer redraws with no
     /// visible delay (≤ 100 ms is invisible for streaming text).
     ///
     /// The buffer is keyed by `(SessionKey, target)` — `target` is
@@ -405,6 +405,12 @@ final class AnalysisStore: ObservableObject {
     /// Both flows funnel through the same flush so the follow-up
     /// path also gets 10 Hz batching instead of the raw 30-100 Hz
     /// republish-per-token it used to do. (Performance Fix 1.)
+    ///
+    /// Thinking is flushed separately through `thinkingFlushTimers`
+    /// at a slower cadence (300 ms). Reasoning traces are auxiliary
+    /// UI — the user doesn't read them token-by-token — and rendering
+    /// a long monospaced trace at 10 Hz was the dominant cost during
+    /// extended-thinking runs. (Thinking Performance Fix.)
     private struct BufferKey: Hashable {
         let session: SessionKey
         let target: Target
@@ -417,8 +423,10 @@ final class AnalysisStore: ObservableObject {
 
     private var pendingText: [BufferKey: String] = [:]
     private var pendingThinking: [BufferKey: String] = [:]
-    private var flushTimers: [BufferKey: DispatchSourceTimer] = [:]
-    private static let chunkFlushIntervalMS: Int = 100
+    private var textFlushTimers: [BufferKey: DispatchSourceTimer] = [:]
+    private var thinkingFlushTimers: [BufferKey: DispatchSourceTimer] = [:]
+    private static let textFlushIntervalMS: Int = 100
+    private static let thinkingFlushIntervalMS: Int = 300
 
     /// Look up the session for a specific pair + kind. Returns an
     /// empty/idle session when the user hasn't run anything for that
@@ -820,8 +828,9 @@ final class AnalysisStore: ObservableObject {
     // ── Chunk batching helpers ────────────────────────────────────
 
     /// Stash a streamed text or thinking chunk; the timer will
-    /// flush it into the targeted destination at most ~10 Hz. First
-    /// call for the buffer key also spins up the flush timer.
+    /// flush it into the targeted destination at most ~10 Hz for
+    /// text and ~3.3 Hz for thinking. First call for a buffer key
+    /// also spins up the appropriate flush timer.
     ///
     /// `target` defaults to `.report` for the main streamed answer.
     /// Follow-up turns pass `.conversationTurn(turnID)` so their
@@ -838,62 +847,65 @@ final class AnalysisStore: ObservableObject {
         case .text:     pendingText[bk, default: ""].append(chunk)
         case .thinking: pendingThinking[bk, default: ""].append(chunk)
         }
-        ensureFlushTimer(for: bk)
+        ensureFlushTimer(for: bk, kind: kind)
     }
 
     private enum ChunkKind { case text, thinking }
 
-    private func ensureFlushTimer(for bk: BufferKey) {
-        guard flushTimers[bk] == nil else { return }
+    private func ensureFlushTimer(for bk: BufferKey, kind: ChunkKind) {
+        let timerMap = kind == .text ? textFlushTimers : thinkingFlushTimers
+        guard timerMap[bk] == nil else { return }
         let t = DispatchSource.makeTimerSource(queue: .main)
-        let ms = Self.chunkFlushIntervalMS
+        let ms = kind == .text ? Self.textFlushIntervalMS : Self.thinkingFlushIntervalMS
         t.schedule(deadline: .now() + .milliseconds(ms), repeating: .milliseconds(ms))
         t.setEventHandler { [weak self] in
-            MainActor.assumeIsolated { self?.flushPendingChunks(for: bk) }
+            MainActor.assumeIsolated { self?.flushPendingChunks(for: bk, kind: kind) }
         }
         t.resume()
-        flushTimers[bk] = t
+        if kind == .text {
+            textFlushTimers[bk] = t
+        } else {
+            thinkingFlushTimers[bk] = t
+        }
     }
 
-    /// Drain `pendingText` / `pendingThinking` into the targeted
-    /// destination — either the session's report/thinking fields
-    /// or a specific conversation turn's `assistant` field.
-    /// No-op when both buffers are empty (timer keeps running so
-    /// the next chunk doesn't pay the timer-setup cost again).
-    private func flushPendingChunks(for bk: BufferKey) {
-        let text = pendingText[bk] ?? ""
-        let think = pendingThinking[bk] ?? ""
-        guard !text.isEmpty || !think.isEmpty else { return }
-        pendingText[bk] = ""
-        pendingThinking[bk] = ""
-
+    /// Drain pending text or thinking into the targeted destination.
+    /// Each buffer has its own timer so text can flush at 100 ms while
+    /// thinking flushes at 300 ms. No-op when the requested buffer is
+    /// empty (the timer keeps running so the next chunk doesn't pay
+    /// the timer-setup cost again).
+    private func flushPendingChunks(for bk: BufferKey, kind: ChunkKind) {
         let sessionKey = bk.session
-        switch bk.target {
-        case .report:
-            if !text.isEmpty {
-                sessions[sessionKey]?.report.append(text)
-            }
-            if !think.isEmpty {
-                sessions[sessionKey]?.thinking.append(think)
-            }
-        case .conversationTurn(let turnID):
-            // Follow-ups stream into a specific Turn. Thinking
-            // deltas are dropped for follow-ups (the initial run
-            // already burned through reasoning) but we handle the
-            // case defensively in case future engines surface
-            // thinking on follow-ups too.
+        switch (bk.target, kind) {
+        case (.report, .text):
+            let text = pendingText[bk] ?? ""
+            guard !text.isEmpty else { return }
+            pendingText[bk] = ""
+            sessions[sessionKey]?.report.append(text)
+        case (.report, .thinking):
+            let think = pendingThinking[bk] ?? ""
+            guard !think.isEmpty else { return }
+            pendingThinking[bk] = ""
+            sessions[sessionKey]?.thinking.append(think)
+        case (.conversationTurn(let turnID), .text):
             guard let sess = sessions[sessionKey],
                   let idx = sess.conversation.firstIndex(where: { $0.id == turnID })
             else { return }
-            if !text.isEmpty {
-                sess.conversation[idx].assistant.append(text)
-            }
+            let text = pendingText[bk] ?? ""
+            guard !text.isEmpty else { return }
+            pendingText[bk] = ""
+            sess.conversation[idx].assistant.append(text)
             // No `sessions[sessionKey] = sess` — Session is a class
             // so the mutation is in-place. The @Published var
             // conversation fires on the session itself; the report
             // column observes it via @ObservedObject. Re-assigning
             // the dict subscript here would trigger the store-level
             // @Published cascade (Performance Fix 7).
+        case (.conversationTurn, .thinking):
+            // Follow-ups drop thinking deltas (the initial run already
+            // burned through reasoning), so there's nothing to flush.
+            pendingThinking[bk] = ""
+            return
         }
     }
 
@@ -901,9 +913,12 @@ final class AnalysisStore: ObservableObject {
     /// so the final tail isn't dropped on stream completion / error /
     /// cancellation.
     private func endBatching(for bk: BufferKey) {
-        flushPendingChunks(for: bk)
-        flushTimers[bk]?.cancel()
-        flushTimers[bk] = nil
+        flushPendingChunks(for: bk, kind: .text)
+        flushPendingChunks(for: bk, kind: .thinking)
+        textFlushTimers[bk]?.cancel()
+        textFlushTimers[bk] = nil
+        thinkingFlushTimers[bk]?.cancel()
+        thinkingFlushTimers[bk] = nil
     }
 
     /// Convenience overload for the main-report streaming path —

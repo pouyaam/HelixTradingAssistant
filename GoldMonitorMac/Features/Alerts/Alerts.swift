@@ -402,18 +402,6 @@ final class AlertStore: ObservableObject {
         )
     }
 
-    /// Same lifecycle notifications for FVG→OB zones.
-    func evaluateFVGFirstOB(_ zones: [FVGFirstOB.Zone], pairID: String, pairLabel: String) {
-        evaluateBlockZones(
-            zones.map {
-                BlockZoneSnapshot(key: BlockZoneSnapshot.stableKey(isBullish: $0.isBullish, high: $0.high, low: $0.low),
-                                  isBullish: $0.isBullish, high: $0.high, low: $0.low,
-                                  stage: BlockStage(rawValue: $0.status.rawValue) ?? .fresh)
-            },
-            namespace: "fvob", label: "FVG→OB", pairID: pairID, pairLabel: pairLabel
-        )
-    }
-
     private func evaluateBlockZones(
         _ zones: [BlockZoneSnapshot],
         namespace: String,

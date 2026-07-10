@@ -113,8 +113,6 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     /// block. Ported from ClayeWeight's PineScript v5 "Sonarlab -
     /// Order Blocks" (MPL 2.0).
     case sonarlabOrderBlock
-    /// FVG-First → OB Back — FVG triggers backward search for originating OB.
-    case fvgFirstOB
     /// Session-based Volume Profile — per-day volume histogram with POC, VAH, VAL.
     case volumeProfile
 
@@ -135,7 +133,6 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .nyOpenSetup:    return "NY Open Setup"
         case .fairValueGap:   return "Fair Value Gap"
         case .sonarlabOrderBlock: return "Sonarlab OB"
-        case .fvgFirstOB:        return "FVG→OB"
         case .volumeProfile:     return "Volume Profile"
         }
     }
@@ -155,7 +152,6 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .nyOpenSetup: return Color(red: 0.95, green: 0.75, blue: 0.30)
         case .fairValueGap: return Color(red: 0.30, green: 0.80, blue: 0.75)
         case .sonarlabOrderBlock: return Color(red: 0.80, green: 0.45, blue: 0.90)
-        case .fvgFirstOB:        return Color(red: 0.70, green: 0.60, blue: 1.00)
         case .volumeProfile:     return Color(red: 0.20, green: 0.80, blue: 0.75)
         }
     }
@@ -226,17 +222,6 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                     ParamOption(label: "Close", value: "Close"),
                     ParamOption(label: "Wick", value: "Wick"),
                 ]),
-            ]
-        case .fvgFirstOB:
-            return [
-                .double(key: "threshold", label: "Min Gap %", default: 0.0, step: 0.1, range: 0...5),
-                .double(key: "searchMin", label: "Search range (min bars back)", default: 4, step: 1, range: 1...20),
-                .double(key: "searchMax", label: "Search range (max bars back)", default: 15, step: 1, range: 2...30),
-                .bool(key: "showMitigated", label: "Show mitigated gaps", default: false),
-                .bool(key: "showExhausted", label: "Show exhausted blocks", default: true),
-                .bool(key: "detectVolume", label: "Filter by volume (Steroids)", default: false),
-                .double(key: "volumeMult", label: "Volume Multiplier", default: 1.2, step: 0.1, range: 0.5...3.0),
-                .bool(key: "notifyEvents", label: "Notify on appear / retest / exhaust", default: false),
             ]
         case .volumeProfile:
             return [

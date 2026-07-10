@@ -245,8 +245,17 @@ struct AnalysisPage: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
+        // Cache the current tab and session once per body evaluation
+        // to avoid repeated dictionary lookups. These are accessed
+        // dozens of times across header, bodyContent, action dock,
+        // and onChange modifiers. (UI Performance Fix.)
+        let cachedTab = currentTab
+        let cachedSession = session
+        let cachedKind = cachedTab.kind
+        let cachedTabID = cachedTab.id
+
+        return VStack(spacing: 0) {
+            header(kind: cachedKind, isRunning: cachedSession.phase == .running)
             Divider().background(Theme.Color.border)
             if let event = cachedUpcomingEvent {
                 eventWarningBanner(event)
@@ -254,9 +263,9 @@ struct AnalysisPage: View {
             if showHistory {
                 AnalysisHistoryView(
                     pair: pair,
-                    kind: selectedKind,
+                    kind: cachedKind,
                     onOpen: { entry in
-                        store.loadFromHistory(entry, tabID: currentTab.id)
+                        store.loadFromHistory(entry, tabID: cachedTabID)
                         selectedKind = entry.kind
                         showHistory = false
                         // Re-apply each captured overlay via the silent
@@ -282,27 +291,27 @@ struct AnalysisPage: View {
                     onDismiss: { showHistory = false }
                 )
             } else {
-                bodyContent
+                bodyContent(kind: cachedKind, session: cachedSession, tabID: cachedTabID)
                 if confluenceExpandPromptVisible {
                     confluenceExpandPrompt
                 }
-                if session.phase != .idle {
+                if cachedSession.phase != .idle {
                     AnalysisActionDock(
-                        phase: session.phase,
+                        phase: cachedSession.phase,
                         engineReady: engineReady,
                         srLevels: parsedSRLevels.isEmpty ? nil : parsedSRLevels,
                         fvgZones: parsedFVGZones.isEmpty ? nil : parsedFVGZones,
                         onAddSRLevels: { apply { onApplySRLevels?(parsedSRLevels) } },
                         onAddFVGZones: { apply { onApplyFVGZones?(parsedFVGZones) } },
                         onAddToJournal: { addToJournal(scenario: parsedTAScenario) },
-                        onStop:     { store.stop(kind: selectedKind, pairID: pair.id, tabID: currentTab.id) },
-                        onClear:    { store.clear(kind: selectedKind, pairID: pair.id, tabID: currentTab.id) },
+                        onStop:     { store.stop(kind: cachedKind, pairID: pair.id, tabID: cachedTabID) },
+                        onClear:    { store.clear(kind: cachedKind, pairID: pair.id, tabID: cachedTabID) },
                         // Combined "Run again" returns to the
                         // checklist card so the user can re-pick
                         // aspects; other kinds re-fire directly.
                         onRunAgain: {
-                            if selectedKind == .combined {
-                                store.clear(kind: .combined, pairID: pair.id, tabID: currentTab.id)
+                            if cachedKind == .combined {
+                                store.clear(kind: .combined, pairID: pair.id, tabID: cachedTabID)
                             } else {
                                 runAnalysis()
                             }
@@ -339,15 +348,41 @@ struct AnalysisPage: View {
                 refreshUpcomingEvent()
             }
         }
-        .onAppear { refreshParsedPayloads() }
-        .onChange(of: session.report) { _ in refreshParsedPayloads() }
-        .onChange(of: session.phase)  { _ in
+        .onAppear {
+            refreshParsedPayloads(
+                tabID: cachedTabID,
+                kind: cachedKind,
+                report: cachedSession.report,
+                phase: cachedSession.phase
+            )
+        }
+        .onChange(of: cachedSession.report) { _ in
+            refreshParsedPayloads(
+                tabID: cachedTabID,
+                kind: cachedKind,
+                report: cachedSession.report,
+                phase: cachedSession.phase
+            )
+        }
+        .onChange(of: cachedSession.phase)  { _ in
             // Phase transitions (esp. → .done) are exactly when we
             // want a guaranteed final parse, regardless of throttle.
             lastParseAt = .distantPast
-            refreshParsedPayloads()
+            refreshParsedPayloads(
+                tabID: cachedTabID,
+                kind: cachedKind,
+                report: cachedSession.report,
+                phase: cachedSession.phase
+            )
         }
-        .onChange(of: selectedKind)  { _ in refreshParsedPayloads() }
+        .onChange(of: cachedKind)  { _ in
+            refreshParsedPayloads(
+                tabID: cachedTabID,
+                kind: cachedKind,
+                report: cachedSession.report,
+                phase: cachedSession.phase
+            )
+        }
         .onChange(of: currentAnalysisTabID) { _ in refreshParsedPayloads() }
         .onChange(of: news.events.count) { _ in refreshUpcomingEvent() }
     }
@@ -419,8 +454,12 @@ struct AnalysisPage: View {
 
     // ── Body content (two columns) ─────────────────────────────────
     @ViewBuilder
-    private var bodyContent: some View {
-        if selectedKind == .multiTimeframe {
+    private func bodyContent(
+        kind: AnalysisKind,
+        session: AnalysisStore.Session,
+        tabID: UUID
+    ) -> some View {
+        if kind == .multiTimeframe {
             AnalysisReportColumn(
                 session: session,
                 idleHint: idleHint,
@@ -429,11 +468,11 @@ struct AnalysisPage: View {
                 onAnalyze: { runAnalysis() },
                 onAskFollowUp: { question in
                     store.askFollowUp(
-                        kind: selectedKind,
+                        kind: kind,
                         pairID: pair.id,
                         engineKind: selectedEngine,
                         question: question,
-                        tabID: currentTab.id
+                        tabID: tabID
                     )
                 }
             )
@@ -447,18 +486,19 @@ struct AnalysisPage: View {
                     onAnalyze: { runAnalysis() },
                     onAskFollowUp: { question in
                         store.askFollowUp(
-                            kind: selectedKind,
+                            kind: kind,
                             pairID: pair.id,
                             engineKind: selectedEngine,
-                            question: question
+                            question: question,
+                            tabID: tabID
                         )
                     },
                     onSubmitInitial: combinedInitialSubmit,
-                    inputChips: (selectedKind == .custom || selectedKind == .combined) ? customChips : [],
-                    inputPlaceholder: (selectedKind == .custom || selectedKind == .combined)
+                    inputChips: (kind == .custom || kind == .combined) ? customChips : [],
+                    inputPlaceholder: (kind == .custom || kind == .combined)
                         ? "Ask anything about \(pair.name) at \(timeframe.label)…"
                         : "Ask a follow-up about this analysis…",
-                    idleAccessory: selectedKind == .combined
+                    idleAccessory: kind == .combined
                         ? AnyView(
                             AnalysisAspectCard(
                                 selected: selectedAspects,
@@ -479,7 +519,7 @@ struct AnalysisPage: View {
                 Divider().background(Theme.Color.border)
 
                 AnalysisPlansColumn(
-                    kind: selectedKind,
+                    kind: kind,
                     pair: pair,
                     candles: candles,
                     livePrice: livePrice,
@@ -618,7 +658,7 @@ struct AnalysisPage: View {
     }
 
     // ── Header ─────────────────────────────────────────────────────
-    private var header: some View {
+    private func header(kind: AnalysisKind, isRunning: Bool) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             tabBar
             HStack(spacing: Theme.Spacing.md) {
@@ -642,12 +682,12 @@ struct AnalysisPage: View {
             HStack(spacing: Theme.Spacing.md) {
                 // Engine icons on the left — click one to pick its model
                 // + reasoning effort.
-                enginePicker
+                enginePicker(isRunning: isRunning)
                 // Legacy chip picker only when viewing an old
                 // non-combined history entry (so its report still
                 // makes sense). New analysis uses the checklist card.
-                if selectedKind != .combined {
-                    Text(selectedKind.label)
+                if kind != .combined {
+                    Text(kind.label)
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 12).padding(.vertical, 6)
@@ -716,7 +756,7 @@ struct AnalysisPage: View {
     /// dropdown popover to pick its model + reasoning effort. The
     /// selected engine gets a brand-tinted fill + ring; a "coming soon"
     /// engine shows a small badge and is disabled.
-    private var enginePicker: some View {
+    private func enginePicker(isRunning: Bool) -> some View {
         HStack(spacing: 6) {
             ForEach(AIEngineKind.allCases) { kind in
                 let engine = AIEngineFactory.make(kind)
@@ -736,7 +776,7 @@ struct AnalysisPage: View {
                         .opacity(isComingSoon ? 0.5 : 1)
                 }
                 .buttonStyle(.plain)
-                .disabled(session.phase == .running)
+                .disabled(isRunning)
                 .help(engineHelp(kind: kind, isComingSoon: isComingSoon))
                 .popover(
                     isPresented: Binding(
@@ -1483,16 +1523,24 @@ struct AnalysisPage: View {
     /// (`.done` / `.error`) so the final guaranteed parse always
     /// fires regardless of throttle state.
     private func refreshParsedPayloads() {
-        let tabID = currentTab.id
-        let kind  = currentTab.kind
-        let report = session.report
+        let tab = currentTab
+        let sess = session
+        refreshParsedPayloads(tabID: tab.id, kind: tab.kind, report: sess.report, phase: sess.phase)
+    }
+
+    private func refreshParsedPayloads(
+        tabID: UUID,
+        kind: AnalysisKind,
+        report: String,
+        phase: AnalysisStore.Phase
+    ) {
         let signature = ParseSignature(
             kind: kind,
             reportCount: report.count,
-            phase: session.phase
+            phase: phase
         )
 
-        if session.phase == .running {
+        if phase == .running {
             guard report.contains("_JSON") else { return }
             let now = Date()
             guard now.timeIntervalSince(lastParseAt) >= 0.5 else { return }

@@ -419,40 +419,6 @@ final class ChartDerivedCache: ObservableObject {
         }
     }
 
-    // ── FVG→OB ──────────────────────────────────────────────────────
-
-    private struct FVGFirstOBSig: Equatable {
-        let count: Int
-        let firstTS: TimeInterval
-        let fvgThreshold: Double
-        let searchMin: Int
-        let searchMax: Int
-        let detectVolume: Bool
-        let volumeMultiplier: Double
-    }
-    private let fvgFirstOBSlot = Slot<FVGFirstOBSig, [FVGFirstOB.Zone]>([])
-
-    func fvgFirstOB(
-        candles: [Candle], fvgThreshold: Double,
-        searchMin: Int, searchMax: Int,
-        detectVolume: Bool, volumeMultiplier: Double
-    ) -> [FVGFirstOB.Zone] {
-        let sig = FVGFirstOBSig(
-            count: candles.count,
-            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            fvgThreshold: fvgThreshold,
-            searchMin: searchMin, searchMax: searchMax,
-            detectVolume: detectVolume, volumeMultiplier: volumeMultiplier
-        )
-        return resolve(fvgFirstOBSlot, signature: sig) {
-            FVGFirstOB.compute(
-                candles, fvgThreshold: fvgThreshold,
-                searchMin: searchMin, searchMax: searchMax,
-                detectVolume: detectVolume, volumeMultiplier: volumeMultiplier
-            )
-        }
-    }
-
     // ── Sonarlab Order Blocks ─────────────────────────────────────
 
     private struct SonarlabOBSig: Equatable {

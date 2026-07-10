@@ -293,6 +293,7 @@ struct OpenCodeEngine: AIEngine {
         var candidates = [
             "/opt/homebrew/bin/opencode",
             "/usr/local/bin/opencode",
+            NSHomeDirectory() + "/.opencode/bin/opencode",
             NSHomeDirectory() + "/.local/bin/opencode",
             NSHomeDirectory() + "/.npm-global/bin/opencode",
             NSHomeDirectory() + "/.bun/bin/opencode",
@@ -647,12 +648,22 @@ private final class OpenCodeStreamParser {
 
     private func diff(id: String, against new: String) -> String? {
         let prev = yieldedByID[id] ?? ""
-        if new == prev { return nil }
-        if new.hasPrefix(prev) {
-            let added = String(new.dropFirst(prev.count))
+        // Fast path: different lengths can't be equal, and we only
+        // need the expensive prefix scan when the snapshot grew.
+        // This keeps long reasoning traces from becoming O(n²) as
+        // the parser diffs every cumulative event against the full
+        // accumulated text.
+        if new.count != prev.count {
+            if new.count > prev.count && new.hasPrefix(prev) {
+                let added = String(new.dropFirst(prev.count))
+                yieldedByID[id] = new
+                return added.isEmpty ? nil : added
+            }
             yieldedByID[id] = new
-            return added.isEmpty ? nil : added
+            return new
         }
+        // Same length: either identical or a wholesale replacement.
+        if new == prev { return nil }
         yieldedByID[id] = new
         return new
     }

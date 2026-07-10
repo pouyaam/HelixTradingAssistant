@@ -290,53 +290,6 @@ struct IndicatorSettingsSheet: View {
 
             Divider().background(Theme.Color.border)
 
-            section(title: "FVG→OB") {
-                doubleStepper(
-                    label: "Min. FVG gap size %",
-                    value: $config.fvobFVGThreshold,
-                    range: 0.0...5.0,
-                    step: 0.1
-                )
-                periodStepper(label: "Search range (min bars back)", value: $config.fvobSearchMin, range: 1...20)
-                periodStepper(label: "Search range (max bars back)", value: $config.fvobSearchMax, range: 2...30)
-                Toggle(isOn: $config.fvobShowExhausted) {
-                    checkboxLabel("Show exhausted blocks")
-                }
-                #if os(iOS)
-.toggleStyle(.switch)
-#else
-.toggleStyle(.checkbox)
-#endif
-                Toggle(isOn: $config.fvobDetectVolume) {
-                    checkboxLabel("Filter by volume (Steroids)")
-                }
-                #if os(iOS)
-.toggleStyle(.switch)
-#else
-.toggleStyle(.checkbox)
-#endif
-                doubleStepper(
-                    label: "Volume multiplier",
-                    value: $config.fvobVolumeMultiplier,
-                    range: 0.5...3.0,
-                    step: 0.1
-                )
-                Toggle(isOn: $config.fvobNotifyEvents) {
-                    checkboxLabel("Notify on appear / retest / exhaust")
-                }
-                #if os(iOS)
-.toggleStyle(.switch)
-#else
-.toggleStyle(.checkbox)
-#endif
-                Text("Detects FVGs first, then looks backward for the originating counter-trend candle. Zones track fresh → tested → exhausted lifecycle.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Theme.Color.textMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Divider().background(Theme.Color.border)
-
             // Times shown match the baked presets in `TradingSessions.catalog`
             // (regular cash hours, each in its venue's own time zone).
             section(title: "Trading Sessions") {

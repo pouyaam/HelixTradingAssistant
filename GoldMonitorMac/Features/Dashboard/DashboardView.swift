@@ -463,14 +463,6 @@ struct DashboardView: View {
         case .sonarlabOrderBlock:
             if let v = p["sensitivity"]     { oscillatorConfig.sonarlabSensitivity = v.doubleValue }
             if let v = p["mitigationType"]  { oscillatorConfig.sonarlabMitigationType = v.stringValue }
-        case .fvgFirstOB:
-            if let v = p["threshold"]      { oscillatorConfig.fvobFVGThreshold = v.doubleValue }
-            if let v = p["searchMin"]      { oscillatorConfig.fvobSearchMin = Int(v.doubleValue) }
-            if let v = p["searchMax"]      { oscillatorConfig.fvobSearchMax = Int(v.doubleValue) }
-            if let v = p["showExhausted"]  { oscillatorConfig.fvobShowExhausted = v.boolValue }
-            if let v = p["detectVolume"]   { oscillatorConfig.fvobDetectVolume = v.boolValue }
-            if let v = p["volumeMult"]     { oscillatorConfig.fvobVolumeMultiplier = v.doubleValue }
-            if let v = p["notifyEvents"]   { oscillatorConfig.fvobNotifyEvents = v.boolValue }
         case .volumeProfile:
             if let v = p["bucketCount"]  { oscillatorConfig.vpBucketCount = Int(v.doubleValue) }
             if let v = p["valueAreaPct"] { oscillatorConfig.vpValueAreaPct = v.doubleValue }
@@ -3085,7 +3077,7 @@ struct DashboardView: View {
     /// so users who don't have it turned on pay no extra compute.
     /// Mirrors the RSI-alert feed just above.
     private func notifyOrderBlockEvents(_ candles: [Candle], pairID: String) {
-        guard oscillatorConfig.obNotifyEvents || oscillatorConfig.sobNotifyEvents || oscillatorConfig.fvobNotifyEvents else { return }
+        guard oscillatorConfig.obNotifyEvents || oscillatorConfig.sobNotifyEvents else { return }
         let pairLabel = app.pairs.first(where: { $0.id == pairID })?.name ?? pairID
 
         // Each indicator's full-history `compute` runs on its own
@@ -3118,20 +3110,6 @@ struct DashboardView: View {
                     volumeMultiplier: config.sobVolumeMultiplier
                 )
                 await self.alertStore.evaluateSteroidOrderBlocks(zones, pairID: pairID, pairLabel: pairLabel)
-            }
-        }
-        if oscillatorConfig.fvobNotifyEvents {
-            let config = oscillatorConfig
-            Task.detached(priority: .utility) {
-                let zones = FVGFirstOB.compute(
-                    candles,
-                    fvgThreshold: config.fvobFVGThreshold,
-                    searchMin: config.fvobSearchMin,
-                    searchMax: config.fvobSearchMax,
-                    detectVolume: config.fvobDetectVolume,
-                    volumeMultiplier: config.fvobVolumeMultiplier
-                )
-                await self.alertStore.evaluateFVGFirstOB(zones, pairID: pairID, pairLabel: pairLabel)
             }
         }
     }

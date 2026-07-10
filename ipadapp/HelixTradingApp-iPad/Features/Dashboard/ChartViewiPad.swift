@@ -45,6 +45,11 @@ struct ChartViewiPad: View {
     @State private var editingHandle: ChartDrawing.Handle?
     @State private var editingCursor: DrawingPoint?
     @State private var dragHadMovement: Bool = false
+    /// Which axis a one-finger drag manipulates, decided on the first
+    /// frame from where the touch started: the right price-axis gutter
+    /// scales Y, the bottom time-axis gutter scales X, and anywhere
+    /// inside the plot pans. Sticks for the rest of the gesture.
+    @State private var axisDragMode: AxisDragMode = .pan
     @State private var crosshairActive: Bool = false
     @State private var crosshairLocation: CGPoint = .zero
 
@@ -119,20 +124,6 @@ struct ChartViewiPad: View {
             threshold: indicatorConfig.fvgThreshold
         )
         return indicatorConfig.fvgShowMitigated ? all : all.filter { !$0.isMitigated }
-    }
-
-    private var fvgFirstOBZones: [FVGFirstOB.Zone] {
-        guard indicators.contains(.fvgFirstOB) else { return [] }
-        let all = derived.fvgFirstOB(
-            candles: candles,
-            fvgThreshold: indicatorConfig.fvobFVGThreshold,
-            searchMin: indicatorConfig.fvobSearchMin,
-            searchMax: indicatorConfig.fvobSearchMax,
-            detectVolume: indicatorConfig.fvobDetectVolume,
-            volumeMultiplier: indicatorConfig.fvobVolumeMultiplier
-        )
-        let filtered = indicatorConfig.fvobShowExhausted ? all : all.filter { $0.status != .exhausted }
-        return Array(filtered.suffix(10))
     }
 
     private var sessionRuns: [TradingSessions.SessionRun] {
@@ -239,7 +230,6 @@ struct ChartViewiPad: View {
                 supplyDemandMarks
                 orderBlockMarks
                 steroidOrderBlockMarks
-                fvgFirstOBMarks
                 scenarioMarks
                 tradeMarks
                 journalMarks
@@ -352,48 +342,167 @@ struct ChartViewiPad: View {
 
     // MARK: - iPad drag (pan + draw)
 
+    private enum AxisDragMode { case pan, scaleX, scaleY }
+
+    /// One drag handler that dispatches to DRAW (a tool is armed), or in
+    /// cursor mode to PAN / SCALE-X / SCALE-Y depending on where the drag
+    /// began: the right price-axis gutter stretches the Y range, the
+    /// bottom time-axis gutter stretches the X range (TradingView-style),
+    /// and anywhere inside the plot pans. When a pinch is in flight
+    /// (`magnifyStartDomain != nil`) this branch yields entirely so the
+    /// two gestures don't fight over `xDomain`/`yDomain`. `minimumDistance`
+    /// drops to 0 while drawing so a tap can commit a horizontal line.
     private func ipadDragGesture(
         plotWidth: CGFloat,
         plotHeight: CGFloat,
         plotOrigin: CGPoint,
         proxy: ChartProxy
     ) -> some Gesture {
-        DragGesture(minimumDistance: 5)
+        DragGesture(minimumDistance: activeTool == .none ? 5 : 0)
             .onChanged { value in
+                // Drawing mode: capture endpoints for the live preview.
+                if activeTool != .none {
+                    if drawingStart == nil {
+                        drawingStart = drawingPoint(at: value.startLocation, plotOrigin: plotOrigin, proxy: proxy)
+                        hovered = nil
+                    }
+                    drawingEnd = drawingPoint(at: value.location, plotOrigin: plotOrigin, proxy: proxy)
+                    return
+                }
+
+                // Pan / axis-scale mode — never while a pinch owns the domains.
+                guard magnifyStartDomain == nil else { return }
+
                 if dragStartDomain == nil {
                     dragStartDomain = effectiveXDomain
                     dragStartYDomain = effectiveYDomain
                     panLockedY = false
                     hovered = nil
                     dragHadMovement = false
+                    // Lock in the mode from where the finger went down.
+                    let sx = value.startLocation.x
+                    let sy = value.startLocation.y
+                    let inRightGutter  = plotWidth  > 0 && sx > plotOrigin.x + plotWidth
+                    let inBottomGutter = plotHeight > 0 && sy > plotOrigin.y + plotHeight
+                    if inBottomGutter {
+                        axisDragMode = .scaleX
+                    } else if inRightGutter {
+                        axisDragMode = .scaleY
+                    } else {
+                        axisDragMode = .pan
+                    }
                 }
-                let movedFar = abs(value.translation.width) > 3 || abs(value.translation.height) > 3
-                if movedFar { dragHadMovement = true }
-                guard dragHadMovement else { return }
-                guard let start = dragStartDomain, plotWidth > 0 else { return }
 
-                let span = start.upperBound - start.lowerBound
-                let unitsPerPoint = span / Double(plotWidth)
-                let deltaX = Double(value.translation.width) * unitsPerPoint
+                switch axisDragMode {
+                case .scaleY:
+                    // Drag the price axis: up ⇒ zoom in (range shrinks),
+                    // down ⇒ zoom out. Center held fixed.
+                    guard let startY = dragStartYDomain else { return }
+                    let center = (startY.lowerBound + startY.upperBound) / 2
+                    let half   = (startY.upperBound - startY.lowerBound) / 2
+                    let factor = exp(Double(value.translation.height) / 180)
+                    let newHalf = max(half * factor, 0.0000001)
+                    yDomain = (center - newHalf) ... (center + newHalf)
 
-                // Batch xDomain + yDomain into one update to avoid double recompute
-                let newXLower = start.lowerBound - deltaX
-                let newXUpper = start.upperBound - deltaX
-                xDomain = newXLower ... newXUpper
+                case .scaleX:
+                    // Drag the time axis: left ⇒ zoom in (fewer bars),
+                    // right ⇒ zoom out. Center held fixed.
+                    guard let startX = dragStartDomain else { return }
+                    let center = (startX.lowerBound + startX.upperBound) / 2
+                    let half   = (startX.upperBound - startX.lowerBound) / 2
+                    let factor = exp(Double(value.translation.width) / 180)
+                    let newHalf = max(half * factor, 1.5)
+                    xDomain = (center - newHalf) ... (center + newHalf)
 
-                if !panLockedY, abs(value.translation.height) > 2 { panLockedY = true }
-                if panLockedY, let startY = dragStartYDomain, plotHeight > 0 {
-                    let ySpan = startY.upperBound - startY.lowerBound
-                    let pricePerPoint = ySpan / Double(plotHeight)
-                    let shift = Double(value.translation.height) * pricePerPoint
-                    yDomain = (startY.lowerBound + shift) ... (startY.upperBound + shift)
+                case .pan:
+                    let movedFar = abs(value.translation.width) > 3 || abs(value.translation.height) > 3
+                    if movedFar { dragHadMovement = true }
+                    guard dragHadMovement else { return }
+                    guard let start = dragStartDomain, plotWidth > 0 else { return }
+
+                    let span = start.upperBound - start.lowerBound
+                    let unitsPerPoint = span / Double(plotWidth)
+                    let deltaX = Double(value.translation.width) * unitsPerPoint
+
+                    // Batch xDomain + yDomain into one update to avoid double recompute
+                    let newXLower = start.lowerBound - deltaX
+                    let newXUpper = start.upperBound - deltaX
+                    xDomain = newXLower ... newXUpper
+
+                    if !panLockedY, abs(value.translation.height) > 2 { panLockedY = true }
+                    if panLockedY, let startY = dragStartYDomain, plotHeight > 0 {
+                        let ySpan = startY.upperBound - startY.lowerBound
+                        let pricePerPoint = ySpan / Double(plotHeight)
+                        let shift = Double(value.translation.height) * pricePerPoint
+                        yDomain = (startY.lowerBound + shift) ... (startY.upperBound + shift)
+                    }
                 }
             }
-            .onEnded { _ in
+            .onEnded { value in
+                if activeTool != .none {
+                    commitDrawing(value, plotOrigin: plotOrigin, proxy: proxy)
+                    return
+                }
                 dragStartDomain = nil
                 dragStartYDomain = nil
                 panLockedY = false
+                axisDragMode = .pan
             }
+    }
+
+    /// Resolve a touch location to a `(bar-date, price)` drawing point.
+    /// The X axis is bar-indexed, so we round the proxy's X value to the
+    /// nearest bar and store that bar's `bucketStart` (drawings persist by
+    /// date; `barIndex(forDate:)` maps it back for rendering).
+    private func drawingPoint(
+        at location: CGPoint,
+        plotOrigin: CGPoint,
+        proxy: ChartProxy
+    ) -> DrawingPoint? {
+        guard !candles.isEmpty else { return nil }
+        let xInPlot = location.x - plotOrigin.x
+        let yInPlot = location.y - plotOrigin.y
+        guard let barX: Double = proxy.value(atX: xInPlot),
+              let priceY: Double = proxy.value(atY: yInPlot)
+        else { return nil }
+        let idx = max(0, min(candles.count - 1, Int(barX.rounded())))
+        return DrawingPoint(date: candles[idx].bucketStart, price: priceY)
+    }
+
+    /// Finalise the in-flight drawing and hand it to the dashboard.
+    /// Two-point shapes require a real drag (~4pt) so a stray tap can't
+    /// commit a zero-size rectangle; a horizontal line commits on tap.
+    private func commitDrawing(
+        _ value: DragGesture.Value,
+        plotOrigin: CGPoint,
+        proxy: ChartProxy
+    ) {
+        let startPoint = drawingStart ?? drawingPoint(at: value.startLocation, plotOrigin: plotOrigin, proxy: proxy)
+        let endPoint   = drawingEnd   ?? drawingPoint(at: value.location,      plotOrigin: plotOrigin, proxy: proxy)
+        drawingStart = nil
+        drawingEnd = nil
+
+        guard let start = startPoint else { return }
+        let end = endPoint ?? start
+
+        let dragDistSq = pow(value.translation.width, 2) + pow(value.translation.height, 2)
+        let hasDrag = dragDistSq >= 16
+
+        switch activeTool {
+        case .none:
+            return
+        case .horizontalLine:
+            onCommitDrawing?(ChartDrawing(kind: .horizontalLine, start: start, end: nil))
+        case .trendLine:
+            guard hasDrag else { return }
+            onCommitDrawing?(ChartDrawing(kind: .trendLine, start: start, end: end))
+        case .rectangle:
+            guard hasDrag else { return }
+            onCommitDrawing?(ChartDrawing(kind: .rectangle, start: start, end: end))
+        case .volumeProfile:
+            guard hasDrag else { return }
+            onCommitDrawing?(ChartDrawing(kind: .volumeProfile, start: start, end: end))
+        }
     }
 
     // MARK: - Pinch-to-zoom (throttled)
@@ -1136,69 +1245,6 @@ struct ChartViewiPad: View {
         }
     }
 
-    // MARK: - FVG→OB marks
-
-    @ChartContentBuilder
-    private var fvgFirstOBMarks: some ChartContent {
-        let lastIndex = candles.count - 1
-        ForEach(fvgFirstOBZones) { zone in
-            fvgFirstOBMark(for: zone, lastIndex: lastIndex)
-        }
-    }
-
-    @ChartContentBuilder
-    private func fvgFirstOBMark(for zone: FVGFirstOB.Zone, lastIndex: Int) -> some ChartContent {
-        let baseColor: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
-        let accentColor = IndicatorKind.fvgFirstOB.color
-        let xStart = Double(zone.index)
-        let xEnd   = Double(lastIndex)
-
-        let (fillOp, borderOp, borderDash, midDash, labelText, tagColor): (Double, Double, [CGFloat], [CGFloat], String, Color) = {
-            switch zone.status {
-            case .fresh:
-                return (0.14, 0.70, [], [3, 3],
-                        zone.isBullish ? "FVOB↑" : "FVOB↓", accentColor)
-            case .tested:
-                return (0.07, 0.35, [2, 2], [2, 4],
-                        zone.isBullish ? "FVOB↑ · T" : "FVOB↓ · T", accentColor.opacity(0.7))
-            case .exhausted:
-                return (0.03, 0.18, [2, 6], [1, 8],
-                        zone.isBullish ? "FVOB↑ · X" : "FVOB↓ · X", Theme.Color.textMuted.opacity(0.8))
-            }
-        }()
-
-        RectangleMark(
-            xStart: .value("FVOB start", xStart), xEnd: .value("FVOB end", xEnd),
-            yStart: .value("FVOB low", zone.low),  yEnd: .value("FVOB high", zone.high)
-        )
-        .foregroundStyle(baseColor.opacity(fillOp))
-
-        RuleMark(xStart: .value("FVOB start hi", xStart), xEnd: .value("FVOB end hi", xEnd),
-                 y: .value("FVOB hi", zone.high))
-            .foregroundStyle(baseColor.opacity(borderOp))
-            .lineStyle(StrokeStyle(lineWidth: 1, dash: borderDash))
-        RuleMark(xStart: .value("FVOB start lo", xStart), xEnd: .value("FVOB end lo", xEnd),
-                 y: .value("FVOB lo", zone.low))
-            .foregroundStyle(baseColor.opacity(borderOp))
-            .lineStyle(StrokeStyle(lineWidth: 1, dash: borderDash))
-
-        RuleMark(xStart: .value("FVOB start avg", xStart), xEnd: .value("FVOB end avg", xEnd),
-                 y: .value("FVOB avg", zone.avg))
-            .foregroundStyle(accentColor.opacity(borderOp * 0.7))
-            .lineStyle(StrokeStyle(lineWidth: 1, dash: midDash))
-
-        PointMark(x: .value("FVOB label", xEnd), y: .value("FVOB hi", zone.high))
-            .symbolSize(0)
-            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
-                Text(labelText)
-                    .font(.system(size: 8, weight: .heavy))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(tagColor))
-            }
-    }
-
     // MARK: - Scenario marks
 
     @ChartContentBuilder
@@ -1899,10 +1945,6 @@ struct ChartViewiPad: View {
             if zone.high > hi { hi = zone.high }
         }
         for zone in steroidOrderBlockZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in fvgFirstOBZones {
             if zone.low < lo { lo = zone.low }
             if zone.high > hi { hi = zone.high }
         }
