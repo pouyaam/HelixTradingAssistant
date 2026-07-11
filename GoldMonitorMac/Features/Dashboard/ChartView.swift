@@ -2946,7 +2946,7 @@ struct ChartView: View {
     @ChartContentBuilder
     private func indicatorMarks(visible: Set<Int>) -> some ChartContent {
         let instances = indicatorInstances.isEmpty
-            ? indicators.map { IndicatorInstance(kind: $0) }
+            ? indicators.map { Self.makeIndicatorInstance(kind: $0, config: indicatorConfig) }
             : indicatorInstances
         let computed = derived.indicators(instances: instances, candles: candles)
         ForEach(computed, id: \.instance.id) { entry in
@@ -2979,6 +2979,30 @@ struct ChartView: View {
     /// Slightly thinner middle Bollinger line; everything else 1.6pt.
     private func indicatorLineWidth(for band: String) -> CGFloat {
         band == "bb_mid" ? 1 : 1.6
+    }
+
+    private static func makeIndicatorInstance(kind: IndicatorKind, config: OscillatorConfig) -> IndicatorInstance {
+        let raw = kind.rawValue
+        let padded = raw.padding(toLength: 12, withPad: "0", startingAt: 0)
+        let stableID = UUID(uuidString: "00000000-0000-0000-0000-\(padded)") ?? UUID()
+        var params: [String: ParamValue] = [:]
+        switch kind {
+        case .sma20:  params["period"] = .double(20)
+        case .sma50:  params["period"] = .double(50)
+        case .sma200: params["period"] = .double(200)
+        case .ema9:   params["period"] = .double(9)
+        case .ema21:  params["period"] = .double(21)
+        case .bollinger:
+            params["period"] = .double(20)
+            params["stdDev"] = .double(2)
+        case .utBot:
+            params["keyValue"]      = .double(config.utKeyValue)
+            params["atrPeriod"]     = .double(Double(config.utATRPeriod))
+            params["useHeikinAshi"] = .bool(config.utUseHeikinAshi)
+        default:
+            break
+        }
+        return IndicatorInstance(id: stableID, kind: kind, params: params)
     }
 
     @ChartContentBuilder
@@ -3326,8 +3350,15 @@ struct ChartView: View {
         } else {
             visibleCandles = displayCandles[...]
         }
-        var lo = visibleCandles.map(\.low).min()  ?? 0
-        var hi = visibleCandles.map(\.high).max() ?? 1
+        
+        var lo = Double.greatestFiniteMagnitude
+        var hi = -Double.greatestFiniteMagnitude
+        for c in visibleCandles {
+            if c.low < lo { lo = c.low }
+            if c.high > hi { hi = c.high }
+        }
+        if visibleCandles.isEmpty { lo = 0; hi = 1 }
+
         // Pull in any indicator values that exceed the candle range so
         // SMA/EMA/Bollinger lines never get clipped off-screen. Restrict
         // to the visible index window to match the rendered marks.
@@ -3354,53 +3385,98 @@ struct ChartView: View {
                 if v > hi { hi = v }
             }
         }
-        // All overlay extremes (S/R, FVG, OB, sessions, scenarios,
-        // drawings, trades, journal) are cached — the scan only runs
-        // when overlay data changes, not on every pan/zoom frame.
-        let allZones: [ChartDerivedCache.OverlayBounds] =
-            fvgZones.map { .init(low: $0.low, high: $0.high) }
-            + supplyDemandZones.map { .init(low: $0.low, high: $0.high) }
-            + indicatorFvgZones.map { .init(low: $0.low, high: $0.high) }
-            + orderBlockZones.map { .init(low: $0.low, high: $0.high) }
-            + steroidOrderBlockZones.map { .init(low: $0.low, high: $0.high) }
-            + sonarlabOBZones.map { .init(low: $0.low, high: $0.high) }
-            + sessionRuns.map { .init(low: $0.low, high: $0.high) }
-            + nySetupResults.map { .init(low: $0.orLow, high: $0.orHigh) }
-            + volumeProfileSessions.flatMap { session in
-                session.buckets.map { .init(low: $0.priceLevel, high: $0.priceLevel) }
-            }
-            + (zigzagTrendVP.map { vp in
-                vp.buckets.map { .init(low: $0.priceLevel, high: $0.priceLevel) }
-            } ?? [])
-            + zigzagPivots.map { .init(low: $0.price, high: $0.price) }
-        let drawingPoints: [ChartDerivedCache.PricePoint] = drawings
-            .filter(\.visible)
-            .flatMap { d -> [ChartDerivedCache.PricePoint] in
-                var pts: [ChartDerivedCache.PricePoint] = [.init(price: d.start.price)]
-                if let e = d.end { pts.append(.init(price: e.price)) }
-                return pts
-            }
-        let tradePoints: [ChartDerivedCache.PricePoint] = trades.flatMap { t in
-            [t.entry, t.takeProfit, t.stopLoss, t.fillPrice ?? t.entry]
-                .map { .init(price: $0) }
+        
+        // Zero-allocation inline scans for all overlay extremes.
+        // This avoids dozen+ allocations of temporary arrays on every pan/zoom frame.
+        for level in srLevels.support {
+            if level < lo { lo = level }
+            if level > hi { hi = level }
         }
-        let journalPoints: [ChartDerivedCache.PricePoint] = journalEntries
-            .flatMap { je in
-                [je.entry, je.takeProfit, je.stopLoss].compactMap { $0 }
-            }
-            .map { .init(price: $0) }
-        if let ext = derived.overlayYExtremes(
-            srLevels: srLevels,
-            overlayZones: allZones,
-            scenario: taScenario.map { (entry: $0.entry, takeProfit: $0.takeProfit, stopLoss: $0.stopLoss) },
-            altScenario: taAltScenario.map { (entry: $0.entry, takeProfit: $0.takeProfit, stopLoss: $0.stopLoss) },
-            drawings: drawingPoints,
-            trades: tradePoints,
-            journalEntries: journalPoints
-        ) {
-            if ext.lo < lo { lo = ext.lo }
-            if ext.hi > hi { hi = ext.hi }
+        for level in srLevels.resistance {
+            if level < lo { lo = level }
+            if level > hi { hi = level }
         }
+        for zone in fvgZones {
+            if zone.low < lo { lo = zone.low }
+            if zone.high > hi { hi = zone.high }
+        }
+        for zone in supplyDemandZones {
+            if zone.low < lo { lo = zone.low }
+            if zone.high > hi { hi = zone.high }
+        }
+        for zone in indicatorFvgZones {
+            if zone.low < lo { lo = zone.low }
+            if zone.high > hi { hi = zone.high }
+        }
+        for zone in orderBlockZones {
+            if zone.low < lo { lo = zone.low }
+            if zone.high > hi { hi = zone.high }
+        }
+        for zone in steroidOrderBlockZones {
+            if zone.low < lo { lo = zone.low }
+            if zone.high > hi { hi = zone.high }
+        }
+        for zone in sonarlabOBZones {
+            if zone.low < lo { lo = zone.low }
+            if zone.high > hi { hi = zone.high }
+        }
+        for run in sessionRuns {
+            if run.low < lo { lo = run.low }
+            if run.high > hi { hi = run.high }
+        }
+        for r in nySetupResults {
+            if r.orLow < lo { lo = r.orLow }
+            if r.orHigh > hi { hi = r.orHigh }
+        }
+        for session in volumeProfileSessions {
+            for bucket in session.buckets {
+                if bucket.priceLevel < lo { lo = bucket.priceLevel }
+                if bucket.priceLevel > hi { hi = bucket.priceLevel }
+            }
+        }
+        if let vp = zigzagTrendVP {
+            for bucket in vp.buckets {
+                if bucket.priceLevel < lo { lo = bucket.priceLevel }
+                if bucket.priceLevel > hi { hi = bucket.priceLevel }
+            }
+        }
+        for pivot in zigzagPivots {
+            if pivot.price < lo { lo = pivot.price }
+            if pivot.price > hi { hi = pivot.price }
+        }
+        if let scenario = taScenario {
+            for v in [scenario.takeProfit, scenario.stopLoss] + [scenario.entry].compactMap({ $0 }) {
+                if v < lo { lo = v }
+                if v > hi { hi = v }
+            }
+        }
+        if let alt = taAltScenario {
+            for v in [alt.takeProfit, alt.stopLoss] + [alt.entry].compactMap({ $0 }) {
+                if v < lo { lo = v }
+                if v > hi { hi = v }
+            }
+        }
+        for d in drawings where d.visible {
+            if d.start.price < lo { lo = d.start.price }
+            if d.start.price > hi { hi = d.start.price }
+            if let e = d.end {
+                if e.price < lo { lo = e.price }
+                if e.price > hi { hi = e.price }
+            }
+        }
+        for t in trades {
+            for v in [t.entry, t.takeProfit, t.stopLoss, t.fillPrice ?? t.entry] {
+                if v < lo { lo = v }
+                if v > hi { hi = v }
+            }
+        }
+        for je in journalEntries {
+            for v in [je.entry, je.takeProfit, je.stopLoss].compactMap({ $0 }) {
+                if v < lo { lo = v }
+                if v > hi { hi = v }
+            }
+        }
+
         guard visibleCandles.isEmpty == false else { return 0...1 }
         let span = hi - lo
         if span <= 0 || visibleCandles.count == 1 {

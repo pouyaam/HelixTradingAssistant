@@ -28,8 +28,8 @@ struct JournalAISheet: View {
     // "Personal account" defaults to Claude Sonnet without fighting each
     // other over the same global slot.
     @State private var engineKind: AIEngineKind = {
-        let raw = UserDefaults.standard.string(forKey: "ai.journal.engine") ?? "claude"
-        return AIEngineKind(rawValue: raw) ?? .claude
+        let raw = UserDefaults.standard.string(forKey: "ai.journal.engine") ?? "opencode"
+        return AIEngineKind(rawValue: raw) ?? .opencode
     }()
     @State private var claudeModelID  = UserDefaults.standard.string(forKey: "ai.claude.model")  ?? ClaudeModelCatalog.defaultModelID
     @State private var claudeEffortID = UserDefaults.standard.string(forKey: "ai.claude.effort") ?? ClaudeModelCatalog.defaultEffortID

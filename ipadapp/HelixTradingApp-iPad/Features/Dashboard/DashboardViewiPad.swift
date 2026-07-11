@@ -3,7 +3,10 @@ import Combine
 
 struct DashboardViewiPad: View {
     @EnvironmentObject private var app: AppState
-    @EnvironmentObject private var yahoo: YahooScheduler
+    // yahoo is deliberately NOT an @EnvironmentObject here —
+    // subscribing directly re-evaluates the entire body on every
+    // @Published write, dismissing open menus. We read it via
+    // @Environment in .onReceive closures instead.
     @EnvironmentObject private var notificationInbox: NotificationInbox
     @EnvironmentObject private var analysisStore: AnalysisStore
     @EnvironmentObject private var tradeStore: TradeStore
@@ -20,8 +23,12 @@ struct DashboardViewiPad: View {
     @AppStorage("dashboard.hiddenIndicators")  private var hiddenIndicatorsRaw: String = ""
     @AppStorage("dashboard.hiddenOscillators") private var hiddenOscillatorsRaw: String = ""
 
-    @State private var candles: [Candle] = []
+    @State private var candleCount: Int = 0
+    @State private var reloadToken: Int = 0
     @State private var isLoading: Bool = false
+    @State private var livePrices: [String: Double] = [:]
+    @State private var isFetching: Bool = false
+    @State private var dataResetToken: Int = 0
     // NOTE: the chart's zoom window (xDomain/yDomain) deliberately does NOT
     // live here. It's local @State inside `ChartPlotiPad` so a pan/zoom —
     // which rewrites the domain on every gesture frame — re-renders only the
@@ -70,41 +77,45 @@ struct DashboardViewiPad: View {
         var id: String { scenario.id }
     }
 
-    // Cached parsed sets — avoids re-parsing @AppStorage strings on
-    // every body evaluation. Updated via .onChange below.
-    @State private var _enabledIndicators: Set<IndicatorKind> = Self.parseIndicators(UserDefaults.standard.string(forKey: "dashboard.indicators") ?? "")
-    @State private var _enabledOscillators: Set<OscillatorKind> = Self.parseOscillators(UserDefaults.standard.string(forKey: "dashboard.oscillators") ?? "")
-    @State private var _hiddenIndicators: Set<IndicatorKind> = Self.parseIndicators(UserDefaults.standard.string(forKey: "dashboard.hiddenIndicators") ?? "")
-    @State private var _hiddenOscillators: Set<OscillatorKind> = Self.parseOscillators(UserDefaults.standard.string(forKey: "dashboard.hiddenOscillators") ?? "")
-
-    private var enabledIndicators: Set<IndicatorKind> { _enabledIndicators }
-    private var enabledOscillators: Set<OscillatorKind> { _enabledOscillators }
-    private var hiddenIndicators: Set<IndicatorKind> { _hiddenIndicators }
-    private var hiddenOscillators: Set<OscillatorKind> { _hiddenOscillators }
+    // Parsed sets — computed directly from @AppStorage strings so they
+    // are always in sync. The strings are short (≤10 comma-separated
+    // rawValues) so parsing is trivially cheap.
+    private var enabledIndicators: Set<IndicatorKind> {
+        Self.parseIndicators(indicatorsRaw)
+    }
+    private var enabledOscillators: Set<OscillatorKind> {
+        Self.parseOscillators(oscillatorsRaw)
+    }
+    private var hiddenIndicators: Set<IndicatorKind> {
+        Self.parseIndicators(hiddenIndicatorsRaw)
+    }
+    private var hiddenOscillators: Set<OscillatorKind> {
+        Self.parseOscillators(hiddenOscillatorsRaw)
+    }
     private var visibleIndicators: Set<IndicatorKind> {
-        _enabledIndicators.subtracting(_hiddenIndicators)
+        enabledIndicators.subtracting(hiddenIndicators)
     }
     private var visibleOscillators: Set<OscillatorKind> {
-        _enabledOscillators.subtracting(_hiddenOscillators)
+        enabledOscillators.subtracting(hiddenOscillators)
     }
 
     private func setIndicator(_ kind: IndicatorKind, enabled: Bool) {
-        var s = _enabledIndicators
+        var s = enabledIndicators
         if enabled { s.insert(kind) } else { s.remove(kind) }
         indicatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
     }
     private func setOscillator(_ kind: OscillatorKind, enabled: Bool) {
-        var s = _enabledOscillators
+        var s = enabledOscillators
         if enabled { s.insert(kind) } else { s.remove(kind) }
         oscillatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
     }
     private func setIndicatorHidden(_ kind: IndicatorKind, hidden: Bool) {
-        var s = _hiddenIndicators
+        var s = hiddenIndicators
         if hidden { s.insert(kind) } else { s.remove(kind) }
         hiddenIndicatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
     }
     private func setOscillatorHidden(_ kind: OscillatorKind, hidden: Bool) {
-        var s = _hiddenOscillators
+        var s = hiddenOscillators
         if hidden { s.insert(kind) } else { s.remove(kind) }
         hiddenOscillatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
     }
@@ -119,6 +130,11 @@ struct DashboardViewiPad: View {
     var body: some View {
         let pair = app.pairs.first(where: { $0.id == app.selectedPairID })
 
+        YahooDataBridge(
+            livePrices: $livePrices,
+            isFetching: $isFetching,
+            dataResetToken: $dataResetToken
+        ) {
         ZStack {
             VStack(spacing: 8) {
                 if let pair = pair {
@@ -152,10 +168,10 @@ struct DashboardViewiPad: View {
                 AnalysisPageiPad(
                     pair: pair,
                     timeframe: timeframe,
-                    candles: candles,
-                    livePrice: yahoo.latestPrices[pair.id],
+                    candles: ChartPlotiPad.loadCandles(pairID: pair.id, tf: timeframe, app: app),
+                    livePrice: livePrices[pair.id],
                     loadCandles: { tf in
-                        await MainActor.run { candles(for: tf) }
+                        ChartPlotiPad.loadCandles(pairID: pair.id, tf: tf, app: app)
                     },
                     onApplySRLevels:      { srLevels = $0 },
                     onApplyFVGZones:      { fvgZones = $0 },
@@ -185,32 +201,12 @@ struct DashboardViewiPad: View {
                 selectedDrawingID = nil
                 alertStore.timeframeLabel = timeframe.rawValue
             }
-            await reloadCandles()
-            warmHistory()
         }
         .onChange(of: timeframe) { _ in
-            // Domain reset happens via ChartPlotiPad's `.id` changing.
             alertStore.timeframeLabel = timeframe.rawValue
-            warmHistory()
         }
         .onChange(of: userChartType) { _ in }
-        .onChange(of: indicatorsRaw) { newValue in
-            _enabledIndicators = Self.parseIndicators(newValue)
-        }
-        .onChange(of: oscillatorsRaw) { newValue in
-            _enabledOscillators = Self.parseOscillators(newValue)
-        }
         .onChange(of: showVolume) { _ in }
-        .onReceive(
-            yahoo.$lastUpdateAt
-                .compactMap { $0 }
-                .throttle(for: .seconds(1), scheduler: DispatchQueue.main, latest: true)
-        ) { _ in
-            if let cur = app.pairs.first(where: { $0.id == app.selectedPairID }),
-               cur.usesLiveStream {
-                Task { await refreshTrailingCandles() }
-            }
-        }
         .overlay {
             if showIndicatorSettings {
                 DraggableSettingsOverlay(
@@ -230,7 +226,7 @@ struct DashboardViewiPad: View {
                 AlertSheet(
                     pairID: cur.id,
                     pairName: cur.name,
-                    livePrice: yahoo.latestPrices[cur.id],
+                    livePrice: livePrices[cur.id],
                     onCreate: { alert in alertStore.add(alert) }
                 )
                 .environmentObject(alertStore)
@@ -243,7 +239,7 @@ struct DashboardViewiPad: View {
             ActivateTradeSheet(
                 scenario: mode.scenario,
                 pairID: pair?.id ?? "",
-                livePrice: pair.flatMap { yahoo.latestPrices[$0.id] },
+                livePrice: pair.flatMap { livePrices[$0.id] },
                 sourceHistoryEntryID: mode.sourceHistoryEntryID
             ) { trade in
                 tradeStore.add(trade, for: pair?.id ?? "")
@@ -251,6 +247,7 @@ struct DashboardViewiPad: View {
             }
             .environmentObject(tradeStore)
         }
+        } // YahooDataBridge content
     }
 
     // MARK: - Pair header (Phase 2: + fetch timer)
@@ -287,13 +284,9 @@ struct DashboardViewiPad: View {
             Spacer()
 
             // Phase 2: Fetch timer
-            FetchTimerView(
-                lastFetchAt: yahoo.lastUpdateAt,
-                intervalSeconds: 60,
-                isFetching: yahoo.isFetching
-            )
+            FetchTimerBridge(intervalSeconds: 60)
 
-            let price = yahoo.latestPrices[pair.id] ?? pair.price
+            let price = livePrices[pair.id] ?? pair.price
             if price > 0 {
                 VStack(alignment: .trailing, spacing: 2) {
                     Text(formatPrice(price))
@@ -306,7 +299,7 @@ struct DashboardViewiPad: View {
                 }
             }
             Button {
-                Task { await reloadCandles() }
+                reloadToken += 1
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 16, weight: .semibold))
@@ -322,159 +315,36 @@ struct DashboardViewiPad: View {
     private func chartCard(_ pair: TradingPair) -> some View {
         VStack(spacing: 0) {
             // Chart header
-            HStack(spacing: Theme.Spacing.sm) {
-                TimeframeSelector(selected: $timeframe)
-                ChartTypeToggle(selected: $userChartType, isDisabled: false)
-
-                Spacer()
-
-                // Phase 2: Drawing tools toolbar
-                drawingToolbar
-
-                Divider().frame(height: 20).background(Theme.Color.border)
-
-                // Phase 3: Replay controls
-                if replay.isActive {
-                    HStack(spacing: 4) {
-                        Button { replay.exit() } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 14))
-                                .foregroundStyle(Theme.Color.danger)
-                        }
-                        Text("REPLAY")
-                            .font(.system(size: 9, weight: .heavy))
-                            .foregroundStyle(Theme.Color.warn)
-                    }
-                } else {
-                    Button { replay.arm() } label: {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Theme.Color.textSecondary)
-                            .frame(width: 32, height: 32)
-                    }
-                    .help("Replay mode")
-                }
-
-                Divider().frame(height: 20).background(Theme.Color.border)
-
-                // Indicators menu — toggle on/off, show/hide when active
-                Menu {
-                    Section("Overlays") {
-                        ForEach(IndicatorKind.allCases) { kind in
-                            let isOn = enabledIndicators.contains(kind)
-                            let isHidden = isOn && hiddenIndicators.contains(kind)
-                            Button {
-                                if isOn {
-                                    setIndicator(kind, enabled: false)
-                                } else {
-                                    setIndicator(kind, enabled: true)
-                                }
-                            } label: {
-                                Label {
-                                    HStack(spacing: 6) {
-                                        Text(kind.label)
-                                        if isOn {
-                                            Text("·")
-                                                .foregroundStyle(Theme.Color.textMuted)
-                                        }
-                                    }
-                                } icon: {
-                                    Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
-                                }
-                            }
-                            if isOn {
-                                Button {
-                                    setIndicatorHidden(kind, hidden: !isHidden)
-                                } label: {
-                                    Label(isHidden ? "Show" : "Hide",
-                                          systemImage: isHidden ? "eye" : "eye.slash")
-                                }
-                            }
-                        }
-                    }
-                    Section("Panels") {
-                        ForEach(OscillatorKind.allCases) { kind in
-                            Button {
-                                setOscillator(kind, enabled: !enabledOscillators.contains(kind))
-                            } label: {
-                                Label(kind.label,
-                                      systemImage: enabledOscillators.contains(kind) ? "checkmark.circle.fill" : "circle")
-                            }
-                        }
-                    }
-                    Divider()
-                    Button { showIndicatorSettings = true } label: {
-                        Label("Indicator Settings...", systemImage: "slider.horizontal.3")
-                    }
-                } label: {
-                    Image(systemName: "chart.line.uptrend.xyaxis")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Theme.Color.textSecondary)
-                        .frame(width: 32, height: 32)
-                }
-
-                // Phase 2: Layers popover
-                Menu {
-                    layersMenuContent
-                } label: {
-                    Image(systemName: "square.3.layers.3d")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Theme.Color.textSecondary)
-                        .frame(width: 32, height: 32)
-                }
-
-                // Phase 2: Alerts button
-                Button { showAlertSheet = true } label: {
-                    Image(systemName: "bell")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Theme.Color.textSecondary)
-                        .frame(width: 32, height: 32)
-                }
-
-                // AI Analyze button
-                Button {
-                    showAnalysis = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 12, weight: .bold))
-                        Text("Analyze")
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Capsule().fill(Theme.accentGradient))
-                }
-
-                // Network debug button
-                Button {
-                    showDebugLogSheet = true
-                } label: {
-                    Image(systemName: "ladybug.fill")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(NetworkLog.shared.isEnabled
-                                         ? Theme.Color.warn
-                                         : Theme.Color.textSecondary)
-                        .frame(width: 32, height: 32)
-                }
-                .help(NetworkLog.shared.isEnabled
-                      ? "Network debug · capturing"
-                      : "Network debug")
-
-                // Fullscreen toggle
-                Button {
-                    app.isChartFullscreen.toggle()
-                } label: {
-                    Image(systemName: app.isChartFullscreen
-                          ? "arrow.down.right.and.arrow.up.left"
-                          : "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Theme.Color.textSecondary)
-                        .frame(width: 32, height: 32)
-                }
-                .help(app.isChartFullscreen ? "Exit fullscreen" : "Fullscreen")
-            }
+            IPadChartHeaderToolbar(
+                timeframe: $timeframe,
+                userChartType: $userChartType,
+                replay: replay,
+                indicatorsRaw: $indicatorsRaw,
+                oscillatorsRaw: $oscillatorsRaw,
+                hiddenIndicatorsRaw: $hiddenIndicatorsRaw,
+                hiddenOscillatorsRaw: $hiddenOscillatorsRaw,
+                showIndicatorSettings: $showIndicatorSettings,
+                srVisible: $srVisible,
+                fvgVisible: $fvgVisible,
+                supplyDemandVisible: $supplyDemandVisible,
+                scenarioVisible: $scenarioVisible,
+                altScenarioVisible: $altScenarioVisible,
+                hasSRLevels: !srLevels.isEmpty,
+                hasFVGZones: !fvgZones.isEmpty,
+                hasSupplyDemandZones: !supplyDemandZones.isEmpty,
+                hasScenario: taScenario != nil,
+                hasAltScenario: taAltScenario != nil,
+                selectedPairID: app.selectedPairID,
+                drawings: app.selectedPairID.map { drawingStore.drawings(for: $0) } ?? [],
+                selectedDrawingID: $selectedDrawingID,
+                drawingStore: drawingStore,
+                activeDrawingTool: $activeDrawingTool,
+                showAnalysis: $showAnalysis,
+                showDebugLogSheet: $showDebugLogSheet,
+                showAlertSheet: $showAlertSheet,
+                isChartFullscreen: $app.isChartFullscreen
+            )
+            .equatable()
             .padding(.horizontal, Theme.Spacing.lg)
             .padding(.vertical, 8)
 
@@ -486,7 +356,8 @@ struct DashboardViewiPad: View {
             // the analysis overlay. The `.id` gives each pair/timeframe a
             // fresh (auto-fit) zoom window, replacing the old explicit resets.
             ChartPlotiPad(
-                candles: candles,
+                pairID: pair.id,
+                timeframe: timeframe,
                 chartType: userChartType,
                 accent: pair.color,
                 indicators: visibleIndicators,
@@ -513,9 +384,11 @@ struct DashboardViewiPad: View {
                 trades: app.selectedPairID.flatMap { tradeStore.openVisibleTrades(for: $0) } ?? [],
                 journalEntries: app.selectedPairID == app.journalChartEntry?.pairID
                     ? (app.journalChartEntry.map { [$0] } ?? []) : [],
-                livePrice: yahoo.latestPrices[pair.id],
+                livePrice: livePrices[pair.id],
                 replayActive: replay.isActive,
-                showVolume: showVolume
+                showVolume: showVolume,
+                reloadToken: reloadToken,
+                candleCount: $candleCount
             )
             .id("\(pair.id)|\(timeframe.rawValue)")
         }
@@ -532,129 +405,9 @@ struct DashboardViewiPad: View {
         .frame(maxHeight: .infinity)
     }
 
-    // MARK: - Phase 2: Drawing toolbar
 
-    private var drawingToolbar: some View {
-        HStack(spacing: 4) {
-            ForEach(DrawingTool.allCases.filter { $0 != .none }) { tool in
-                Button {
-                    activeDrawingTool = activeDrawingTool == tool ? .none : tool
-                } label: {
-                    Image(systemName: tool.systemImage)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(activeDrawingTool == tool ? Theme.Color.accentStart : Theme.Color.textSecondary)
-                        .frame(width: 32, height: 32)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(activeDrawingTool == tool ? Theme.Color.surfaceMax : Color.clear)
-                        )
-                }
-                .help(tool.label)
-            }
-            if selectedDrawingID != nil {
-                Button {
-                    if let id = selectedDrawingID, let pairID = app.selectedPairID {
-                        drawingStore.remove(id: id, for: pairID)
-                        selectedDrawingID = nil
-                    }
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Theme.Color.danger)
-                        .frame(width: 32, height: 32)
-                }
-                .help("Delete selected drawing")
-            }
-        }
-    }
 
-    // MARK: - Phase 2: Layers menu
 
-    @ViewBuilder
-    private var layersMenuContent: some View {
-        // Indicators
-        Section("Indicators") {
-            ForEach(IndicatorKind.allCases) { kind in
-                let isEnabled = enabledIndicators.contains(kind)
-                let isHidden = hiddenIndicators.contains(kind)
-                if isEnabled {
-                    Button {
-                        setIndicatorHidden(kind, hidden: !isHidden)
-                    } label: {
-                        Label(kind.label,
-                              systemImage: isHidden ? "eye.slash" : "eye")
-                    }
-                }
-            }
-        }
-        // Oscillators
-        Section("Oscillators") {
-            ForEach(OscillatorKind.allCases) { kind in
-                let isEnabled = enabledOscillators.contains(kind)
-                let isHidden = hiddenOscillators.contains(kind)
-                if isEnabled {
-                    Button {
-                        setOscillatorHidden(kind, hidden: !isHidden)
-                    } label: {
-                        Label(kind.label,
-                              systemImage: isHidden ? "eye.slash" : "eye")
-                    }
-                }
-            }
-        }
-        // AI Overlays
-        Section("AI Overlays") {
-            if !srLevels.isEmpty {
-                Button { srVisible.toggle() } label: {
-                    Label("S/R Levels", systemImage: srVisible ? "eye" : "eye.slash")
-                }
-            }
-            if !fvgZones.isEmpty {
-                Button { fvgVisible.toggle() } label: {
-                    Label("FVG Zones", systemImage: fvgVisible ? "eye" : "eye.slash")
-                }
-            }
-            if !supplyDemandZones.isEmpty {
-                Button { supplyDemandVisible.toggle() } label: {
-                    Label("Supply & Demand", systemImage: supplyDemandVisible ? "eye" : "eye.slash")
-                }
-            }
-            if taScenario != nil {
-                Button { scenarioVisible.toggle() } label: {
-                    Label("Trade Plan", systemImage: scenarioVisible ? "eye" : "eye.slash")
-                }
-            }
-            if taAltScenario != nil {
-                Button { altScenarioVisible.toggle() } label: {
-                    Label("Alt Plan", systemImage: altScenarioVisible ? "eye" : "eye.slash")
-                }
-            }
-        }
-        // Drawings
-        let drawings = app.selectedPairID.map { drawingStore.drawings(for: $0) } ?? []
-        if !drawings.isEmpty {
-            Section("Drawings") {
-                ForEach(drawings) { d in
-                    Button {
-                        if let pairID = app.selectedPairID {
-                            drawingStore.setVisible(!d.visible, id: d.id, for: pairID)
-                        }
-                    } label: {
-                        Label(d.kind.rawValue, systemImage: d.visible ? "eye" : "eye.slash")
-                    }
-                }
-                Divider()
-                Button(role: .destructive) {
-                    if let pairID = app.selectedPairID {
-                        drawingStore.clear(for: pairID)
-                        selectedDrawingID = nil
-                    }
-                } label: {
-                    Label("Clear All Drawings", systemImage: "trash")
-                }
-            }
-        }
-    }
 
     // MARK: - Stats row
 
@@ -706,66 +459,6 @@ struct DashboardViewiPad: View {
         if v >= 1 { return String(format: "%.4f", v) }
         return String(format: "%.5f", v)
     }
-
-    @MainActor
-    private func reloadCandles() async {
-        guard let pairID = app.selectedPairID else { return }
-        candles = candles(for: pairID, tf: timeframe)
-    }
-
-    private func warmHistory() {
-        guard let pairID = app.selectedPairID else { return }
-        let currentSrc = OHLCCandleLoader.sourceTimeframeTag(for: timeframe)
-        Task {
-            await yahoo.ensureDeepHistory(pairID: pairID, sourceTF: currentSrc)
-            await reloadCandles()
-            await yahoo.backfillAll(pairID: pairID)
-            await reloadCandles()
-        }
-    }
-
-    /// Cheap live-tick path: reads only a short trailing window, folds it,
-    /// and splices onto the tail of in-memory `candles`. Avoids the full
-    /// DB read + fold that `reloadCandles()` does.
-    @MainActor
-    private func refreshTrailingCandles() async {
-        guard let db = app.database, let pairID = app.selectedPairID else { return }
-        let pair = app.pairs.first(where: { $0.id == pairID })
-        let respectsWeekend = pair?.category != .crypto
-        let until = Date()
-        let margin = Double(max(timeframe.seconds * 3, 6 * 3600))
-        let since = until.addingTimeInterval(-margin)
-        let recent = OHLCCandleLoader.load(
-            repo: db.ohlcRepo, pairID: pairID, tf: timeframe,
-            since: since, until: until, dropClosedDays: respectsWeekend
-        )
-        guard let cutoff = recent.first?.bucketStart else { return }
-        var merged = candles
-        while let last = merged.last, last.bucketStart >= cutoff { merged.removeLast() }
-        merged.append(contentsOf: recent)
-        candles = merged
-    }
-
-    @MainActor
-    private func candles(for pairID: String, tf: Timeframe, ignoreReplay: Bool = false) -> [Candle] {
-        guard let db = app.database else { return [] }
-        let pair = app.pairs.first(where: { $0.id == pairID })
-        let respectsWeekend = pair?.category != .crypto
-        return OHLCCandleLoader.load(
-            repo: db.ohlcRepo,
-            pairID: pairID,
-            tf: tf,
-            since: Date.distantPast,
-            until: Date(),
-            dropClosedDays: respectsWeekend
-        )
-    }
-
-    @MainActor
-    private func candles(for tf: Timeframe) -> [Candle] {
-        guard let pairID = app.selectedPairID else { return [] }
-        return candles(for: pairID, tf: tf)
-    }
 }
 
 // MARK: - Isolated chart plot
@@ -786,7 +479,8 @@ struct DashboardViewiPad: View {
 /// (pair | timeframe): a new id re-creates the view with nil domains, so
 /// each pair/timeframe opens on its default auto-fit window.
 private struct ChartPlotiPad: View {
-    let candles: [Candle]
+    let pairID: String
+    let timeframe: Timeframe
     let chartType: ChartType
     let accent: Color
     let indicators: Set<IndicatorKind>
@@ -808,7 +502,12 @@ private struct ChartPlotiPad: View {
     let livePrice: Double?
     let replayActive: Bool
     let showVolume: Bool
+    let reloadToken: Int
+    @Binding var candleCount: Int
 
+    @EnvironmentObject private var app: AppState
+    @EnvironmentObject private var yahoo: YahooScheduler
+    @State private var candles: [Candle] = []
     @State private var xDomain: ClosedRange<Double>? = nil
     @State private var yDomain: ClosedRange<Double>? = nil
 
@@ -858,7 +557,7 @@ private struct ChartPlotiPad: View {
                 Divider().background(Theme.Color.border)
                 ForEach(Array(oscillators)) { kind in
                     OscillatorPanel(
-                        instance: OscillatorInstance(kind: kind),
+                        instance: Self.makeOscillatorInstance(kind: kind, config: indicatorConfig),
                         candles: candles,
                         xDomain: xDomain
                     )
@@ -876,6 +575,92 @@ private struct ChartPlotiPad: View {
                         .padding(.horizontal, Theme.Spacing.lg)
                 }
             }
+        }
+        .task(id: "\(pairID)|\(timeframe.rawValue)|\(reloadToken)") {
+            await reloadCandles()
+            warmHistory()
+        }
+        .onReceive(
+            yahoo.$lastUpdateAt
+                .compactMap { $0 }
+                .throttle(for: .seconds(1), scheduler: DispatchQueue.main, latest: true)
+        ) { _ in
+            let pair = app.pairs.first(where: { $0.id == pairID })
+            if pair?.usesLiveStream == true {
+                Task { await refreshTrailingCandles() }
+            }
+        }
+        .onChange(of: yahoo.dataResetToken) { _ in
+            Task { await reloadCandles() }
+        }
+    }
+
+    // MARK: - Candle loading
+
+    @MainActor
+    private func reloadCandles() async {
+        candles = Self.loadCandles(pairID: pairID, tf: timeframe, app: app)
+        candleCount = candles.count
+    }
+
+    private func warmHistory() {
+        let currentSrc = OHLCCandleLoader.sourceTimeframeTag(for: timeframe)
+        Task {
+            await yahoo.ensureDeepHistory(pairID: pairID, sourceTF: currentSrc)
+            await reloadCandles()
+            await yahoo.backfillAll(pairID: pairID)
+            await reloadCandles()
+        }
+    }
+
+    @MainActor
+    private func refreshTrailingCandles() async {
+        guard let db = app.database else { return }
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        let respectsWeekend = pair?.category != .crypto
+        let until = Date()
+        let margin = Double(max(timeframe.seconds * 3, 6 * 3600))
+        let since = until.addingTimeInterval(-margin)
+        let recent = OHLCCandleLoader.load(
+            repo: db.ohlcRepo, pairID: pairID, tf: timeframe,
+            since: since, until: until, dropClosedDays: respectsWeekend
+        )
+        guard let cutoff = recent.first?.bucketStart else { return }
+        var merged = candles
+        while let last = merged.last, last.bucketStart >= cutoff { merged.removeLast() }
+        merged.append(contentsOf: recent)
+        candles = merged
+        candleCount = candles.count
+    }
+
+    static func loadCandles(pairID: String, tf: Timeframe, app: AppState) -> [Candle] {
+        guard let db = app.database else { return [] }
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        let respectsWeekend = pair?.category != .crypto
+        return OHLCCandleLoader.load(
+            repo: db.ohlcRepo, pairID: pairID, tf: tf,
+            since: Date.distantPast, until: Date(), dropClosedDays: respectsWeekend
+        )
+    }
+
+    /// Build an OscillatorInstance whose params reflect the current
+    /// OscillatorConfig so the panel actually renders with the user's
+    /// chosen periods instead of hardcoded defaults.
+    private static func makeOscillatorInstance(kind: OscillatorKind, config: OscillatorConfig) -> OscillatorInstance {
+        switch kind {
+        case .rsi:
+            return OscillatorInstance(kind: .rsi, params: ["period": .double(Double(config.rsiPeriod))])
+        case .macd:
+            return OscillatorInstance(kind: .macd, params: [
+                "fast":   .double(Double(config.macdFast)),
+                "slow":   .double(Double(config.macdSlow)),
+                "signal": .double(Double(config.macdSignal)),
+            ])
+        case .stochastic:
+            return OscillatorInstance(kind: .stochastic, params: [
+                "k": .double(Double(config.stochK)),
+                "d": .double(Double(config.stochD)),
+            ])
         }
     }
 }
@@ -1103,5 +888,713 @@ private struct IndicatorSettingsBody: View {
             Stepper("", value: value, in: range, step: step)
                 .labelsHidden()
         }
+    }
+}
+
+struct IPadIndicatorsMenu: View, Equatable {
+    @Binding var indicatorsRaw: String
+    @Binding var oscillatorsRaw: String
+    @Binding var hiddenIndicatorsRaw: String
+    @Binding var hiddenOscillatorsRaw: String
+    @Binding var showIndicatorSettings: Bool
+    
+    private var enabledIndicators: Set<IndicatorKind> {
+        Set(indicatorsRaw.split(separator: ",").compactMap { IndicatorKind(rawValue: String($0)) })
+    }
+    private var enabledOscillators: Set<OscillatorKind> {
+        Set(oscillatorsRaw.split(separator: ",").compactMap { OscillatorKind(rawValue: String($0)) })
+    }
+    private var hiddenIndicators: Set<IndicatorKind> {
+        Set(hiddenIndicatorsRaw.split(separator: ",").compactMap { IndicatorKind(rawValue: String($0)) })
+    }
+    
+    private func setIndicator(_ kind: IndicatorKind, enabled: Bool) {
+        var s = enabledIndicators
+        if enabled { s.insert(kind) } else { s.remove(kind) }
+        indicatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+    }
+    private func setOscillator(_ kind: OscillatorKind, enabled: Bool) {
+        var s = enabledOscillators
+        if enabled { s.insert(kind) } else { s.remove(kind) }
+        oscillatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+    }
+    private func setIndicatorHidden(_ kind: IndicatorKind, hidden: Bool) {
+        var s = hiddenIndicators
+        if hidden { s.insert(kind) } else { s.remove(kind) }
+        hiddenIndicatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+    }
+    
+    @State private var showPopover: Bool = false
+
+    var body: some View {
+        Button {
+            showPopover = true
+        } label: {
+            Image(systemName: "chart.line.uptrend.xyaxis")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .frame(width: 32, height: 32)
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showPopover) {
+            IPadIndicatorsPopover(
+                indicatorsRaw: $indicatorsRaw,
+                oscillatorsRaw: $oscillatorsRaw,
+                hiddenIndicatorsRaw: $hiddenIndicatorsRaw,
+                hiddenOscillatorsRaw: $hiddenOscillatorsRaw,
+                showIndicatorSettings: $showIndicatorSettings
+            )
+        }
+    }
+    
+    static func == (lhs: IPadIndicatorsMenu, rhs: IPadIndicatorsMenu) -> Bool {
+        lhs.indicatorsRaw == rhs.indicatorsRaw &&
+        lhs.oscillatorsRaw == rhs.oscillatorsRaw &&
+        lhs.hiddenIndicatorsRaw == rhs.hiddenIndicatorsRaw &&
+        lhs.hiddenOscillatorsRaw == rhs.hiddenOscillatorsRaw &&
+        lhs.showIndicatorSettings == rhs.showIndicatorSettings
+    }
+}
+
+struct IPadLayersMenu: View, Equatable {
+    @Binding var indicatorsRaw: String
+    @Binding var hiddenIndicatorsRaw: String
+    @Binding var oscillatorsRaw: String
+    @Binding var hiddenOscillatorsRaw: String
+    
+    // Visibilities
+    @Binding var srVisible: Bool
+    @Binding var fvgVisible: Bool
+    @Binding var supplyDemandVisible: Bool
+    @Binding var scenarioVisible: Bool
+    @Binding var altScenarioVisible: Bool
+    
+    let hasSRLevels: Bool
+    let hasFVGZones: Bool
+    let hasSupplyDemandZones: Bool
+    let hasScenario: Bool
+    let hasAltScenario: Bool
+    
+    // Drawings
+    let drawings: [ChartDrawing]
+    @Binding var selectedDrawingID: UUID?
+    let drawingStore: DrawingStore
+    let selectedPairID: String?
+    
+    private var enabledIndicators: Set<IndicatorKind> {
+        Set(indicatorsRaw.split(separator: ",").compactMap { IndicatorKind(rawValue: String($0)) })
+    }
+    private var hiddenIndicators: Set<IndicatorKind> {
+        Set(hiddenIndicatorsRaw.split(separator: ",").compactMap { IndicatorKind(rawValue: String($0)) })
+    }
+    private var enabledOscillators: Set<OscillatorKind> {
+        Set(oscillatorsRaw.split(separator: ",").compactMap { OscillatorKind(rawValue: String($0)) })
+    }
+    private var hiddenOscillators: Set<OscillatorKind> {
+        Set(hiddenOscillatorsRaw.split(separator: ",").compactMap { OscillatorKind(rawValue: String($0)) })
+    }
+    
+    private func setIndicatorHidden(_ kind: IndicatorKind, hidden: Bool) {
+        var s = hiddenIndicators
+        if hidden { s.insert(kind) } else { s.remove(kind) }
+        hiddenIndicatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+    }
+    private func setOscillatorHidden(_ kind: OscillatorKind, hidden: Bool) {
+        var s = hiddenOscillators
+        if hidden { s.insert(kind) } else { s.remove(kind) }
+        hiddenOscillatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+    }
+    
+    @State private var showPopover: Bool = false
+
+    var body: some View {
+        Button {
+            showPopover = true
+        } label: {
+            Image(systemName: "square.3.layers.3d")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .frame(width: 32, height: 32)
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showPopover) {
+            IPadLayersPopover(
+                indicatorsRaw: $indicatorsRaw,
+                hiddenIndicatorsRaw: $hiddenIndicatorsRaw,
+                oscillatorsRaw: $oscillatorsRaw,
+                hiddenOscillatorsRaw: $hiddenOscillatorsRaw,
+                srVisible: $srVisible,
+                fvgVisible: $fvgVisible,
+                supplyDemandVisible: $supplyDemandVisible,
+                scenarioVisible: $scenarioVisible,
+                altScenarioVisible: $altScenarioVisible,
+                hasSRLevels: hasSRLevels,
+                hasFVGZones: hasFVGZones,
+                hasSupplyDemandZones: hasSupplyDemandZones,
+                hasScenario: hasScenario,
+                hasAltScenario: hasAltScenario,
+                drawings: drawings,
+                selectedDrawingID: $selectedDrawingID,
+                drawingStore: drawingStore,
+                selectedPairID: selectedPairID
+            )
+        }
+    }
+    
+    static func == (lhs: IPadLayersMenu, rhs: IPadLayersMenu) -> Bool {
+        lhs.indicatorsRaw == rhs.indicatorsRaw &&
+        lhs.hiddenIndicatorsRaw == rhs.hiddenIndicatorsRaw &&
+        lhs.oscillatorsRaw == rhs.oscillatorsRaw &&
+        lhs.hiddenOscillatorsRaw == rhs.hiddenOscillatorsRaw &&
+        lhs.srVisible == rhs.srVisible &&
+        lhs.fvgVisible == rhs.fvgVisible &&
+        lhs.supplyDemandVisible == rhs.supplyDemandVisible &&
+        lhs.scenarioVisible == rhs.scenarioVisible &&
+        lhs.altScenarioVisible == rhs.altScenarioVisible &&
+        lhs.hasSRLevels == rhs.hasSRLevels &&
+        lhs.hasFVGZones == rhs.hasFVGZones &&
+        lhs.hasSupplyDemandZones == rhs.hasSupplyDemandZones &&
+        lhs.hasScenario == rhs.hasScenario &&
+        lhs.hasAltScenario == rhs.hasAltScenario &&
+        lhs.drawings == rhs.drawings &&
+        lhs.selectedDrawingID == rhs.selectedDrawingID &&
+        lhs.selectedPairID == rhs.selectedPairID
+    }
+}
+
+struct IPadChartHeaderToolbar: View, Equatable {
+    @Binding var timeframe: Timeframe
+    @Binding var userChartType: ChartType
+    @ObservedObject var replay: ReplayController
+    
+    // Bindings for enums / storage strings
+    @Binding var indicatorsRaw: String
+    @Binding var oscillatorsRaw: String
+    @Binding var hiddenIndicatorsRaw: String
+    @Binding var hiddenOscillatorsRaw: String
+    @Binding var showIndicatorSettings: Bool
+    
+    @Binding var srVisible: Bool
+    @Binding var fvgVisible: Bool
+    @Binding var supplyDemandVisible: Bool
+    @Binding var scenarioVisible: Bool
+    @Binding var altScenarioVisible: Bool
+    
+    let hasSRLevels: Bool
+    let hasFVGZones: Bool
+    let hasSupplyDemandZones: Bool
+    let hasScenario: Bool
+    let hasAltScenario: Bool
+    
+    let selectedPairID: String?
+    let drawings: [ChartDrawing]
+    @Binding var selectedDrawingID: UUID?
+    @ObservedObject var drawingStore: DrawingStore
+    
+    @Binding var activeDrawingTool: DrawingTool
+    
+    @Binding var showAnalysis: Bool
+    @Binding var showDebugLogSheet: Bool
+    @Binding var showAlertSheet: Bool
+    @Binding var isChartFullscreen: Bool
+    
+    var body: some View {
+        HStack(spacing: Theme.Spacing.sm) {
+            TimeframeSelector(selected: $timeframe)
+            ChartTypeToggle(selected: $userChartType, isDisabled: false)
+
+            Spacer()
+
+            // Drawing tools toolbar
+            HStack(spacing: 4) {
+                ForEach(DrawingTool.allCases.filter { $0 != .none }) { tool in
+                    Button {
+                        activeDrawingTool = activeDrawingTool == tool ? .none : tool
+                    } label: {
+                        Image(systemName: tool.systemImage)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(activeDrawingTool == tool ? Theme.Color.accentStart : Theme.Color.textSecondary)
+                            .frame(width: 32, height: 32)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(activeDrawingTool == tool ? Theme.Color.surfaceMax : Color.clear)
+                            )
+                    }
+                    .help(tool.label)
+                }
+                if selectedDrawingID != nil {
+                    Button {
+                        if let id = selectedDrawingID, let pairID = selectedPairID {
+                            drawingStore.remove(id: id, for: pairID)
+                            selectedDrawingID = nil
+                        }
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Theme.Color.danger)
+                            .frame(width: 32, height: 32)
+                    }
+                    .help("Delete selected drawing")
+                }
+            }
+
+            Divider().frame(height: 20).background(Theme.Color.border)
+
+            // Replay controls
+            if replay.isActive {
+                HStack(spacing: 4) {
+                    Button { replay.exit() } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 14))
+                            .foregroundStyle(Theme.Color.danger)
+                    }
+                    Text("REPLAY")
+                        .font(.system(size: 9, weight: .heavy))
+                        .foregroundStyle(Theme.Color.warn)
+                }
+            } else {
+                Button { replay.arm() } label: {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.Color.textSecondary)
+                        .frame(width: 32, height: 32)
+                }
+                .help("Replay mode")
+            }
+
+            Divider().frame(height: 20).background(Theme.Color.border)
+
+            // Indicators menu
+            IPadIndicatorsMenu(
+                indicatorsRaw: $indicatorsRaw,
+                oscillatorsRaw: $oscillatorsRaw,
+                hiddenIndicatorsRaw: $hiddenIndicatorsRaw,
+                hiddenOscillatorsRaw: $hiddenOscillatorsRaw,
+                showIndicatorSettings: $showIndicatorSettings
+            )
+            .equatable()
+
+            // Layers popover
+            IPadLayersMenu(
+                indicatorsRaw: $indicatorsRaw,
+                hiddenIndicatorsRaw: $hiddenIndicatorsRaw,
+                oscillatorsRaw: $oscillatorsRaw,
+                hiddenOscillatorsRaw: $hiddenOscillatorsRaw,
+                srVisible: $srVisible,
+                fvgVisible: $fvgVisible,
+                supplyDemandVisible: $supplyDemandVisible,
+                scenarioVisible: $scenarioVisible,
+                altScenarioVisible: $altScenarioVisible,
+                hasSRLevels: hasSRLevels,
+                hasFVGZones: hasFVGZones,
+                hasSupplyDemandZones: hasSupplyDemandZones,
+                hasScenario: hasScenario,
+                hasAltScenario: hasAltScenario,
+                drawings: drawings,
+                selectedDrawingID: $selectedDrawingID,
+                drawingStore: drawingStore,
+                selectedPairID: selectedPairID
+            )
+            .equatable()
+
+            // Alerts button
+            Button { showAlertSheet = true } label: {
+                Image(systemName: "bell")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .frame(width: 32, height: 32)
+            }
+
+            // AI Analyze button
+            Button {
+                showAnalysis = true
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 12, weight: .bold))
+                    Text("Analyze")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Capsule().fill(Theme.accentGradient))
+            }
+
+            // Network debug button
+            Button {
+                showDebugLogSheet = true
+            } label: {
+                Image(systemName: "ladybug.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(NetworkLog.shared.isEnabled ? Theme.Color.warn : Theme.Color.textSecondary)
+                    .frame(width: 32, height: 32)
+            }
+            .help(NetworkLog.shared.isEnabled ? "Network debug · capturing" : "Network debug")
+
+            // Fullscreen toggle
+            Button {
+                isChartFullscreen.toggle()
+            } label: {
+                Image(systemName: isChartFullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .frame(width: 32, height: 32)
+            }
+            .help(isChartFullscreen ? "Exit fullscreen" : "Fullscreen")
+        }
+    }
+    
+    static func == (lhs: IPadChartHeaderToolbar, rhs: IPadChartHeaderToolbar) -> Bool {
+        lhs.timeframe == rhs.timeframe &&
+        lhs.userChartType == rhs.userChartType &&
+        lhs.replay.isActive == rhs.replay.isActive &&
+        lhs.indicatorsRaw == rhs.indicatorsRaw &&
+        lhs.oscillatorsRaw == rhs.oscillatorsRaw &&
+        lhs.hiddenIndicatorsRaw == rhs.hiddenIndicatorsRaw &&
+        lhs.hiddenOscillatorsRaw == rhs.hiddenOscillatorsRaw &&
+        lhs.showIndicatorSettings == rhs.showIndicatorSettings &&
+        lhs.srVisible == rhs.srVisible &&
+        lhs.fvgVisible == rhs.fvgVisible &&
+        lhs.supplyDemandVisible == rhs.supplyDemandVisible &&
+        lhs.scenarioVisible == rhs.scenarioVisible &&
+        lhs.altScenarioVisible == rhs.altScenarioVisible &&
+        lhs.hasSRLevels == rhs.hasSRLevels &&
+        lhs.hasFVGZones == rhs.hasFVGZones &&
+        lhs.hasSupplyDemandZones == rhs.hasSupplyDemandZones &&
+        lhs.hasScenario == rhs.hasScenario &&
+        lhs.hasAltScenario == rhs.hasAltScenario &&
+        lhs.selectedPairID == rhs.selectedPairID &&
+        lhs.drawings == rhs.drawings &&
+        lhs.selectedDrawingID == rhs.selectedDrawingID &&
+        lhs.activeDrawingTool == rhs.activeDrawingTool &&
+        lhs.showAnalysis == rhs.showAnalysis &&
+        lhs.showDebugLogSheet == rhs.showDebugLogSheet &&
+        lhs.showAlertSheet == rhs.showAlertSheet &&
+        lhs.isChartFullscreen == rhs.isChartFullscreen
+    }
+}
+
+struct IPadIndicatorsPopover: View {
+    @Binding var indicatorsRaw: String
+    @Binding var oscillatorsRaw: String
+    @Binding var hiddenIndicatorsRaw: String
+    @Binding var hiddenOscillatorsRaw: String
+    @Binding var showIndicatorSettings: Bool
+    
+    private var enabledIndicators: Set<IndicatorKind> {
+        Set(indicatorsRaw.split(separator: ",").compactMap { IndicatorKind(rawValue: String($0)) })
+    }
+    private var enabledOscillators: Set<OscillatorKind> {
+        Set(oscillatorsRaw.split(separator: ",").compactMap { OscillatorKind(rawValue: String($0)) })
+    }
+    private var hiddenIndicators: Set<IndicatorKind> {
+        Set(hiddenIndicatorsRaw.split(separator: ",").compactMap { IndicatorKind(rawValue: String($0)) })
+    }
+    
+    private func setIndicator(_ kind: IndicatorKind, enabled: Bool) {
+        var s = enabledIndicators
+        if enabled { s.insert(kind) } else { s.remove(kind) }
+        indicatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+    }
+    private func setOscillator(_ kind: OscillatorKind, enabled: Bool) {
+        var s = enabledOscillators
+        if enabled { s.insert(kind) } else { s.remove(kind) }
+        oscillatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+    }
+    private func setIndicatorHidden(_ kind: IndicatorKind, hidden: Bool) {
+        var s = hiddenIndicators
+        if hidden { s.insert(kind) } else { s.remove(kind) }
+        hiddenIndicatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+    }
+    
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Indicators")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(Theme.Color.textPrimary)
+                    .padding(.bottom, 4)
+                
+                Text("Overlays")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .textCase(.uppercase)
+                
+                ForEach(IndicatorKind.allCases) { kind in
+                    let isOn = enabledIndicators.contains(kind)
+                    let isHidden = isOn && hiddenIndicators.contains(kind)
+                    
+                    HStack {
+                        Button {
+                            setIndicator(kind, enabled: !isOn)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(isOn ? Theme.Color.accentStart : Theme.Color.textMuted)
+                                Text(kind.label)
+                                    .foregroundStyle(Theme.Color.textPrimary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        
+                        Spacer()
+                        
+                        if isOn {
+                            Button {
+                                setIndicatorHidden(kind, hidden: !isHidden)
+                            } label: {
+                                Image(systemName: isHidden ? "eye.slash" : "eye")
+                                    .foregroundStyle(Theme.Color.textSecondary)
+                                    .frame(width: 32, height: 32)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .frame(height: 32)
+                }
+                
+                Divider().background(Theme.Color.border)
+                
+                Text("Panels")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .textCase(.uppercase)
+                    .padding(.top, 4)
+                
+                ForEach(OscillatorKind.allCases) { kind in
+                    let isOn = enabledOscillators.contains(kind)
+                    Button {
+                        setOscillator(kind, enabled: !isOn)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(isOn ? Theme.Color.accentStart : Theme.Color.textMuted)
+                            Text(kind.label)
+                                .foregroundStyle(Theme.Color.textPrimary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .frame(height: 32)
+                }
+                
+                Divider().background(Theme.Color.border)
+                
+                Button {
+                    showIndicatorSettings = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "slider.horizontal.3")
+                        Text("Indicator Settings...")
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.Color.accentStart)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
+            }
+            .padding(16)
+        }
+        .frame(width: 280, height: 420)
+        .background(Theme.Color.surface)
+    }
+}
+
+struct IPadLayersPopover: View {
+    @Binding var indicatorsRaw: String
+    @Binding var hiddenIndicatorsRaw: String
+    @Binding var oscillatorsRaw: String
+    @Binding var hiddenOscillatorsRaw: String
+    
+    // Visibilities
+    @Binding var srVisible: Bool
+    @Binding var fvgVisible: Bool
+    @Binding var supplyDemandVisible: Bool
+    @Binding var scenarioVisible: Bool
+    @Binding var altScenarioVisible: Bool
+    
+    let hasSRLevels: Bool
+    let hasFVGZones: Bool
+    let hasSupplyDemandZones: Bool
+    let hasScenario: Bool
+    let hasAltScenario: Bool
+    
+    // Drawings
+    let drawings: [ChartDrawing]
+    @Binding var selectedDrawingID: UUID?
+    let drawingStore: DrawingStore
+    let selectedPairID: String?
+    
+    private var enabledIndicators: Set<IndicatorKind> {
+        Set(indicatorsRaw.split(separator: ",").compactMap { IndicatorKind(rawValue: String($0)) })
+    }
+    private var hiddenIndicators: Set<IndicatorKind> {
+        Set(hiddenIndicatorsRaw.split(separator: ",").compactMap { IndicatorKind(rawValue: String($0)) })
+    }
+    private var enabledOscillators: Set<OscillatorKind> {
+        Set(oscillatorsRaw.split(separator: ",").compactMap { OscillatorKind(rawValue: String($0)) })
+    }
+    private var hiddenOscillators: Set<OscillatorKind> {
+        Set(hiddenOscillatorsRaw.split(separator: ",").compactMap { OscillatorKind(rawValue: String($0)) })
+    }
+    
+    private func setIndicatorHidden(_ kind: IndicatorKind, hidden: Bool) {
+        var s = hiddenIndicators
+        if hidden { s.insert(kind) } else { s.remove(kind) }
+        hiddenIndicatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+    }
+    private func setOscillatorHidden(_ kind: OscillatorKind, hidden: Bool) {
+        var s = hiddenOscillators
+        if hidden { s.insert(kind) } else { s.remove(kind) }
+        hiddenOscillatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
+    }
+    
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Layers")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(Theme.Color.textPrimary)
+                    .padding(.bottom, 4)
+                
+                // Indicators
+                let activeIndicators = IndicatorKind.allCases.filter { enabledIndicators.contains($0) }
+                if !activeIndicators.isEmpty {
+                    Text("Indicators")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Theme.Color.textMuted)
+                        .textCase(.uppercase)
+                    
+                    ForEach(activeIndicators) { kind in
+                        let isHidden = hiddenIndicators.contains(kind)
+                        Button {
+                            setIndicatorHidden(kind, hidden: !isHidden)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: isHidden ? "eye.slash" : "eye")
+                                    .foregroundStyle(Theme.Color.textSecondary)
+                                Text(kind.label)
+                                    .foregroundStyle(Theme.Color.textPrimary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .frame(height: 32)
+                    }
+                    Divider().background(Theme.Color.border)
+                }
+                
+                // Oscillators
+                let activeOscillators = OscillatorKind.allCases.filter { enabledOscillators.contains($0) }
+                if !activeOscillators.isEmpty {
+                    Text("Oscillators")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Theme.Color.textMuted)
+                        .textCase(.uppercase)
+                    
+                    ForEach(activeOscillators) { kind in
+                        let isHidden = hiddenOscillators.contains(kind)
+                        Button {
+                            setOscillatorHidden(kind, hidden: !isHidden)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: isHidden ? "eye.slash" : "eye")
+                                    .foregroundStyle(Theme.Color.textSecondary)
+                                Text(kind.label)
+                                    .foregroundStyle(Theme.Color.textPrimary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .frame(height: 32)
+                    }
+                    Divider().background(Theme.Color.border)
+                }
+                
+                // AI Overlays
+                if hasSRLevels || hasFVGZones || hasSupplyDemandZones || hasScenario || hasAltScenario {
+                    Text("AI Overlays")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Theme.Color.textMuted)
+                        .textCase(.uppercase)
+                    
+                    if hasSRLevels {
+                        toggleRow(label: "S/R Levels", isOn: $srVisible)
+                    }
+                    if hasFVGZones {
+                        toggleRow(label: "FVG Zones", isOn: $fvgVisible)
+                    }
+                    if hasSupplyDemandZones {
+                        toggleRow(label: "Supply & Demand", isOn: $supplyDemandVisible)
+                    }
+                    if hasScenario {
+                        toggleRow(label: "Trade Plan", isOn: $scenarioVisible)
+                    }
+                    if hasAltScenario {
+                        toggleRow(label: "Alt Plan", isOn: $altScenarioVisible)
+                    }
+                    Divider().background(Theme.Color.border)
+                }
+                
+                // Drawings
+                if !drawings.isEmpty {
+                    Text("Drawings")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Theme.Color.textMuted)
+                        .textCase(.uppercase)
+                    
+                    ForEach(drawings) { d in
+                        Button {
+                            if let pairID = selectedPairID {
+                                drawingStore.setVisible(!d.visible, id: d.id, for: pairID)
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: d.visible ? "eye" : "eye.slash")
+                                    .foregroundStyle(Theme.Color.textSecondary)
+                                Text(d.kind.rawValue)
+                                    .foregroundStyle(Theme.Color.textPrimary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .frame(height: 32)
+                    }
+                    
+                    Divider().background(Theme.Color.border)
+                    
+                    Button(role: .destructive) {
+                        if let pairID = selectedPairID {
+                            drawingStore.clear(for: pairID)
+                            selectedDrawingID = nil
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "trash")
+                            Text("Clear All Drawings")
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.Color.danger)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 4)
+                }
+            }
+            .padding(16)
+        }
+        .frame(width: 260, height: 380)
+        .background(Theme.Color.surface)
+    }
+    
+    private func toggleRow(label: String, isOn: Binding<Bool>) -> some View {
+        Button {
+            isOn.wrappedValue.toggle()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: isOn.wrappedValue ? "eye" : "eye.slash")
+                    .foregroundStyle(Theme.Color.textSecondary)
+                Text(label)
+                    .foregroundStyle(Theme.Color.textPrimary)
+            }
+        }
+        .buttonStyle(.plain)
+        .frame(height: 32)
     }
 }

@@ -117,6 +117,19 @@ struct ChartViewiPad: View {
         return Array(filtered.suffix(6))
     }
 
+    private var sonarlabOBZones: [SonarlabOrderBlocks.Zone] {
+        guard indicators.contains(.sonarlabOrderBlock) else { return [] }
+        let mitType: SonarlabOrderBlocks.MitigationType =
+            indicatorConfig.sonarlabMitigationType == "Wick" ? .wick : .close
+        let all = derived.sonarlabOrderBlocks(
+            candles: candles,
+            sensitivity: indicatorConfig.sonarlabSensitivity,
+            mitigationType: mitType
+        )
+        return Array(all.suffix(Self.maxSonarlabOBs))
+    }
+    private static let maxSonarlabOBs = 20
+
     private var indicatorFvgZones: [FairValueGap.Zone] {
         guard indicators.contains(.fairValueGap) else { return [] }
         let all = derived.fairValueGaps(
@@ -230,6 +243,7 @@ struct ChartViewiPad: View {
                 supplyDemandMarks
                 orderBlockMarks
                 steroidOrderBlockMarks
+                sonarlabOBMarks
                 scenarioMarks
                 tradeMarks
                 journalMarks
@@ -1245,6 +1259,67 @@ struct ChartViewiPad: View {
         }
     }
 
+    // MARK: - Sonarlab order block marks
+
+    @ChartContentBuilder
+    private var sonarlabOBMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(sonarlabOBZones) { zone in
+            sonarlabOBMark(for: zone, lastIndex: lastIndex)
+        }
+    }
+
+    @ChartContentBuilder
+    private func sonarlabOBMark(for zone: SonarlabOrderBlocks.Zone, lastIndex: Int) -> some ChartContent {
+        let baseColor: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
+        let accentColor = IndicatorKind.sonarlabOrderBlock.color
+        let xStart = Double(zone.index)
+        let xEnd   = Double(lastIndex)
+
+        // Fill
+        RectangleMark(
+            xStart: .value("SOB start", xStart),
+            xEnd:   .value("SOB end",   xEnd),
+            yStart: .value("SOB low",   zone.low),
+            yEnd:   .value("SOB high",  zone.high)
+        )
+        .foregroundStyle(baseColor.opacity(0.12))
+
+        // Top edge
+        RuleMark(
+            xStart: .value("SOB start hi", xStart),
+            xEnd:   .value("SOB end hi",   xEnd),
+            y:      .value("SOB hi",       zone.high)
+        )
+        .foregroundStyle(baseColor.opacity(0.70))
+        .lineStyle(StrokeStyle(lineWidth: 1.0))
+
+        // Bottom edge
+        RuleMark(
+            xStart: .value("SOB start lo", xStart),
+            xEnd:   .value("SOB end lo",   xEnd),
+            y:      .value("SOB lo",       zone.low)
+        )
+        .foregroundStyle(baseColor.opacity(0.70))
+        .lineStyle(StrokeStyle(lineWidth: 1.0))
+
+        // Direction tag at the right edge
+        let tagText = zone.isBullish ? "SOB↑" : "SOB↓"
+        PointMark(
+            x: .value("SOB label", xEnd),
+            y: .value("SOB hi",    zone.high)
+        )
+        .symbolSize(0)
+        .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+            Text(tagText)
+                .font(.system(size: 8, weight: .heavy))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(accentColor))
+        }
+    }
+
     // MARK: - Scenario marks
 
     @ChartContentBuilder
@@ -1637,7 +1712,8 @@ struct ChartViewiPad: View {
 
     @ChartContentBuilder
     private func indicatorMarks(visible: Set<Int>) -> some ChartContent {
-        let computed = derived.indicators(instances: indicators.map { IndicatorInstance(kind: $0) }, candles: candles)
+        let instances = indicators.map { Self.makeIndicatorInstance(kind: $0, config: indicatorConfig) }
+        let computed = derived.indicators(instances: instances, candles: candles)
         ForEach(computed, id: \.instance.id) { entry in
             ForEach(entry.points.filter { visible.contains($0.index) }) { p in
                 LineMark(
@@ -1653,6 +1729,36 @@ struct ChartViewiPad: View {
                 .interpolationMethod(.monotone)
             }
         }
+    }
+
+    /// Stable IndicatorInstance per kind — deterministic UUID avoids
+    /// SwiftUI diff churn on every body evaluation, and params from the
+    /// current OscillatorConfig ensure the chart uses the user's chosen
+    /// periods instead of hardcoded defaults.
+    private static func makeIndicatorInstance(kind: IndicatorKind, config: OscillatorConfig) -> IndicatorInstance {
+        // Derive a stable UUID from the rawValue so identity is
+        // consistent across renders and app launches.
+        let raw = kind.rawValue
+        let padded = raw.padding(toLength: 12, withPad: "0", startingAt: 0)
+        let stableID = UUID(uuidString: "00000000-0000-0000-0000-\(padded)") ?? UUID()
+        var params: [String: ParamValue] = [:]
+        switch kind {
+        case .sma20:  params["period"] = .double(20)
+        case .sma50:  params["period"] = .double(50)
+        case .sma200: params["period"] = .double(200)
+        case .ema9:   params["period"] = .double(9)
+        case .ema21:  params["period"] = .double(21)
+        case .bollinger:
+            params["period"] = .double(20)
+            params["stdDev"] = .double(2)
+        case .utBot:
+            params["keyValue"]      = .double(config.utKeyValue)
+            params["atrPeriod"]     = .double(Double(config.utATRPeriod))
+            params["useHeikinAshi"] = .bool(config.utUseHeikinAshi)
+        default:
+            break
+        }
+        return IndicatorInstance(id: stableID, kind: kind, params: params)
     }
 
     private func indicatorColor(for kind: IndicatorKind, band: String) -> Color {
@@ -1891,7 +1997,8 @@ struct ChartViewiPad: View {
         if visibleCandles.isEmpty { lo = 0; hi = 1 }
 
         if !indicators.isEmpty, let b = bounds {
-            for entry in derived.indicators(instances: indicators.map { IndicatorInstance(kind: $0) }, candles: candles) {
+            let instances = indicators.map { Self.makeIndicatorInstance(kind: $0, config: indicatorConfig) }
+            for entry in derived.indicators(instances: instances, candles: candles) {
                 for p in entry.points where p.index >= b.lo && p.index <= b.hi {
                     if p.value < lo { lo = p.value }
                     if p.value > hi { hi = p.value }
@@ -1945,6 +2052,10 @@ struct ChartViewiPad: View {
             if zone.high > hi { hi = zone.high }
         }
         for zone in steroidOrderBlockZones {
+            if zone.low < lo { lo = zone.low }
+            if zone.high > hi { hi = zone.high }
+        }
+        for zone in sonarlabOBZones {
             if zone.low < lo { lo = zone.low }
             if zone.high > hi { hi = zone.high }
         }

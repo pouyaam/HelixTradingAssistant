@@ -171,7 +171,7 @@ struct DashboardView: View {
     /// scenario's stable id (composed from bias + prices) so two
     /// activations of the same plan don't fragment into separate
     /// sheets.
-    private struct PendingActivation: Identifiable, Equatable {
+    struct PendingActivation: Identifiable, Equatable {
         let scenario: PromptBuilder.TAScenario
         let sourceHistoryEntryID: UUID?
         var id: String { scenario.id }
@@ -1424,172 +1424,31 @@ struct DashboardView: View {
     /// The button shows a count when something is active so you can tell
     /// at a glance whether the chart has overlays.
     private var indicatorMenu: some View {
-        Menu {
-            Section("Overlays") {
-                Toggle(isOn: $showVolume) {
-                    Label("Volume", systemImage: showVolume
-                          ? "checkmark.circle.fill" : "circle")
-                }
-                ForEach(indicatorInstances) { inst in
-                    let isHidden = inst.hidden
-                    Button {
-                        toggleIndicatorHidden(id: inst.id)
-                    } label: {
-                        Label {
-                            HStack(spacing: 6) {
-                                Text(inst.label)
-                                    .foregroundStyle(isHidden ? Theme.Color.textMuted : inst.kind.color)
-                                Spacer()
-                                if editingIndicatorID == inst.id {
-                                    Image(systemName: "slider.horizontal.3")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(Theme.Color.info)
-                                }
-                            }
-                        } icon: {
-                            Image(systemName: isHidden ? "eye.slash" : "checkmark.circle.fill")
-                                .foregroundStyle(isHidden ? Theme.Color.textMuted : inst.kind.color)
-                        }
-                    }
-                    .contextMenu {
-                        Button {
-                            editingIndicatorID = inst.id
-                        } label: {
-                            Label("Settings", systemImage: "slider.horizontal.3")
-                        }
-                        Button(role: .destructive) {
-                            removeIndicator(id: inst.id)
-                        } label: {
-                            Label("Remove", systemImage: "trash")
-                        }
-                    }
-                }
-                Menu("Add indicator") {
-                    ForEach(IndicatorKind.allCases) { kind in
-                        Button {
-                            addIndicator(kind)
-                        } label: {
-                            Text(kind.label)
-                        }
-                    }
-                }
-            }
-            Section("Panels") {
-                ForEach(oscillatorInstances) { inst in
-                    Button {
-                        toggleOscillatorHidden(id: inst.id)
-                    } label: {
-                        Label {
-                            HStack(spacing: 6) {
-                                Text(inst.label)
-                                if editingOscillatorID == inst.id {
-                                    Image(systemName: "slider.horizontal.3")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(Theme.Color.info)
-                                }
-                            }
-                        } icon: {
-                            Image(systemName: inst.hidden ? "eye.slash" : "checkmark.circle.fill")
-                        }
-                    }
-                    .contextMenu {
-                        Button {
-                            editingOscillatorID = inst.id
-                        } label: {
-                            Label("Settings", systemImage: "slider.horizontal.3")
-                        }
-                        Button(role: .destructive) {
-                            removeOscillator(id: inst.id)
-                        } label: {
-                            Label("Remove", systemImage: "trash")
-                        }
-                    }
-                }
-                Menu("Add panel") {
-                    ForEach(OscillatorKind.allCases) { kind in
-                        Button {
-                            addOscillator(kind)
-                        } label: {
-                            Text(kind.label)
-                        }
-                    }
-                }
-            }
-            Divider()
-            Button {
-                showIndicatorSettings = true
-            } label: {
-                Label("Settings…", systemImage: "slider.horizontal.3")
-            }
-            if !srLevels.isEmpty {
-                Divider()
-                Button("Clear S/R lines") {
-                    srLevels = .init(support: [], resistance: [])
-                }
-            }
-            if !fvgZones.isEmpty {
-                Divider()
-                Button("Clear FVG zones") { fvgZones = [] }
-            }
-            if taScenario != nil {
-                Divider()
-                Button("Clear scenario") { taScenario = nil }
-            }
-            if taAltScenario != nil {
-                Divider()
-                Button("Clear alt scenario") { taAltScenario = nil }
-            }
-            // Surfaces once the live NY Open Setup has a plan (breakout
-            // fired, awaiting/within the trade). One click into the same
-            // ActivateTradeSheet the AI scenarios use.
-            if let scenario = nyLiveScenario {
-                Divider()
-                Button("Activate NY Open setup…") {
-                    pendingActivation = PendingActivation(
-                        scenario: scenario,
-                        sourceHistoryEntryID: nil
-                    )
-                }
-            }
-            if !enabledIndicatorKinds.isEmpty || !enabledOscillators.isEmpty {
-                Divider()
-                Button("Clear all") {
-                    indicatorInstances = []
-                    oscillatorInstances = []
-                    saveIndicators()
-                    saveOscillators()
-                }
-            }
-        } label: {
-            // Icon-only — the count is communicated by a small dot
-            // badge in the upper-right corner so the toolbar stays
-            // compact. The `f(x)` glyph is universally read as
-            // "indicators / functions" in trading UIs.
-            ZStack(alignment: .topTrailing) {
-                Image(systemName: "function")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(Theme.Color.textSecondary)
-                    .frame(width: 26, height: 26)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface)
-                    )
-                let activeCount = enabledIndicatorKinds.count + enabledOscillators.count
-                if activeCount > 0 {
-                    Circle()
-                        .fill(Theme.accentGradient)
-                        .frame(width: 9, height: 9)
-                        .overlay(
-                            Circle()
-                                .strokeBorder(Theme.Color.surfaceHi, lineWidth: 1)
-                        )
-                        .offset(x: 3, y: -3)
-                }
-            }
-            .help(activeCount(label: enabledIndicatorKinds.count + enabledOscillators.count))
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        DashboardIndicatorMenu(
+            showVolume: $showVolume,
+            indicatorInstances: $indicatorInstances,
+            oscillatorInstances: $oscillatorInstances,
+            editingIndicatorID: $editingIndicatorID,
+            editingOscillatorID: $editingOscillatorID,
+            showIndicatorSettings: $showIndicatorSettings,
+            srLevels: $srLevels,
+            fvgZones: $fvgZones,
+            taScenario: $taScenario,
+            taAltScenario: $taAltScenario,
+            pendingActivation: $pendingActivation,
+            nyLiveScenario: nyLiveScenario,
+            enabledIndicatorKinds: enabledIndicatorKinds,
+            enabledOscillators: enabledOscillators,
+            onToggleIndicatorHidden: { toggleIndicatorHidden(id: $0) },
+            onRemoveIndicator: { removeIndicator(id: $0) },
+            onAddIndicator: { addIndicator($0) },
+            onToggleOscillatorHidden: { toggleOscillatorHidden(id: $0) },
+            onRemoveOscillator: { removeOscillator(id: $0) },
+            onAddOscillator: { addOscillator($0) },
+            onSaveIndicators: { saveIndicators() },
+            onSaveOscillators: { saveOscillators() }
+        )
+        .equatable()
     }
 
     /// Tooltip text for the `f(x)` button — surfaces the active count
@@ -3404,5 +3263,215 @@ struct DashboardView: View {
             // leaving the chart out of sync.
             Task { await reloadCandles() }
         }
+    }
+}
+
+struct DashboardIndicatorMenu: View, Equatable {
+    @Binding var showVolume: Bool
+    @Binding var indicatorInstances: [IndicatorInstance]
+    @Binding var oscillatorInstances: [OscillatorInstance]
+    @Binding var editingIndicatorID: UUID?
+    @Binding var editingOscillatorID: UUID?
+    @Binding var showIndicatorSettings: Bool
+    @Binding var srLevels: PromptBuilder.SRLevels
+    @Binding var fvgZones: [PromptBuilder.FVGZone]
+    @Binding var taScenario: PromptBuilder.TAScenario?
+    @Binding var taAltScenario: PromptBuilder.TAScenario?
+    @Binding var pendingActivation: DashboardView.PendingActivation?
+    
+    let nyLiveScenario: PromptBuilder.TAScenario?
+    let enabledIndicatorKinds: Set<IndicatorKind>
+    let enabledOscillators: Set<OscillatorKind>
+    
+    let onToggleIndicatorHidden: (UUID) -> Void
+    let onRemoveIndicator: (UUID) -> Void
+    let onAddIndicator: (IndicatorKind) -> Void
+    let onToggleOscillatorHidden: (UUID) -> Void
+    let onRemoveOscillator: (UUID) -> Void
+    let onAddOscillator: (OscillatorKind) -> Void
+    let onSaveIndicators: () -> Void
+    let onSaveOscillators: () -> Void
+    
+    var body: some View {
+        Menu {
+            Section("Overlays") {
+                Toggle(isOn: $showVolume) {
+                    Label("Volume", systemImage: showVolume
+                          ? "checkmark.circle.fill" : "circle")
+                }
+                ForEach(indicatorInstances) { inst in
+                    let isHidden = inst.hidden
+                    Button {
+                        onToggleIndicatorHidden(inst.id)
+                    } label: {
+                        Label {
+                            HStack(spacing: 6) {
+                                Text(inst.label)
+                                    .foregroundStyle(isHidden ? Theme.Color.textMuted : inst.kind.color)
+                                Spacer()
+                                if editingIndicatorID == inst.id {
+                                    Image(systemName: "slider.horizontal.3")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Theme.Color.info)
+                                }
+                            }
+                        } icon: {
+                            Image(systemName: isHidden ? "eye.slash" : "checkmark.circle.fill")
+                                .foregroundStyle(isHidden ? Theme.Color.textMuted : inst.kind.color)
+                        }
+                    }
+                    .contextMenu {
+                        Button {
+                            editingIndicatorID = inst.id
+                        } label: {
+                            Label("Settings", systemImage: "slider.horizontal.3")
+                        }
+                        Button(role: .destructive) {
+                            onRemoveIndicator(inst.id)
+                        } label: {
+                            Label("Remove", systemImage: "trash")
+                        }
+                    }
+                }
+                Menu("Add indicator") {
+                    ForEach(IndicatorKind.allCases) { kind in
+                        Button {
+                            onAddIndicator(kind)
+                        } label: {
+                            Text(kind.label)
+                        }
+                    }
+                }
+            }
+            Section("Panels") {
+                ForEach(oscillatorInstances) { inst in
+                    Button {
+                        onToggleOscillatorHidden(inst.id)
+                    } label: {
+                        Label {
+                            HStack(spacing: 6) {
+                                Text(inst.label)
+                                if editingOscillatorID == inst.id {
+                                    Image(systemName: "slider.horizontal.3")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Theme.Color.info)
+                                }
+                            }
+                        } icon: {
+                            Image(systemName: inst.hidden ? "eye.slash" : "checkmark.circle.fill")
+                        }
+                    }
+                    .contextMenu {
+                        Button {
+                            editingOscillatorID = inst.id
+                        } label: {
+                            Label("Settings", systemImage: "slider.horizontal.3")
+                        }
+                        Button(role: .destructive) {
+                            onRemoveOscillator(inst.id)
+                        } label: {
+                            Label("Remove", systemImage: "trash")
+                        }
+                    }
+                }
+                Menu("Add panel") {
+                    ForEach(OscillatorKind.allCases) { kind in
+                        Button {
+                            onAddOscillator(kind)
+                        } label: {
+                            Text(kind.label)
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button {
+                showIndicatorSettings = true
+            } label: {
+                Label("Settings…", systemImage: "slider.horizontal.3")
+            }
+            if !srLevels.isEmpty {
+                Divider()
+                Button("Clear S/R lines") {
+                    srLevels = .init(support: [], resistance: [])
+                }
+            }
+            if !fvgZones.isEmpty {
+                Divider()
+                Button("Clear FVG zones") { fvgZones = [] }
+            }
+            if taScenario != nil {
+                Divider()
+                Button("Clear scenario") { taScenario = nil }
+            }
+            if taAltScenario != nil {
+                Divider()
+                Button("Clear alt scenario") { taAltScenario = nil }
+            }
+            if let scenario = nyLiveScenario {
+                Divider()
+                Button("Activate NY Open setup…") {
+                    pendingActivation = DashboardView.PendingActivation(
+                        scenario: scenario,
+                        sourceHistoryEntryID: nil
+                    )
+                }
+            }
+            if !enabledIndicatorKinds.isEmpty || !enabledOscillators.isEmpty {
+                Divider()
+                Button("Clear all") {
+                    indicatorInstances = []
+                    oscillatorInstances = []
+                    onSaveIndicators()
+                    onSaveOscillators()
+                }
+            }
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "function")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .frame(width: 26, height: 26)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface)
+                    )
+                let activeCount = enabledIndicatorKinds.count + enabledOscillators.count
+                if activeCount > 0 {
+                    Circle()
+                        .fill(Theme.accentGradient)
+                        .frame(width: 9, height: 9)
+                        .overlay(
+                            Circle()
+                                .strokeBorder(Theme.Color.surfaceHi, lineWidth: 1)
+                        )
+                        .offset(x: 3, y: -3)
+                }
+            }
+            .help(activeCount(label: enabledIndicatorKinds.count + enabledOscillators.count))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+    
+    private func activeCount(label n: Int) -> String {
+        n == 0 ? "Indicators" : "Indicators · \(n) active"
+    }
+    
+    static func == (lhs: DashboardIndicatorMenu, rhs: DashboardIndicatorMenu) -> Bool {
+        lhs.showVolume == rhs.showVolume &&
+        lhs.indicatorInstances == rhs.indicatorInstances &&
+        lhs.oscillatorInstances == rhs.oscillatorInstances &&
+        lhs.editingIndicatorID == rhs.editingIndicatorID &&
+        lhs.editingOscillatorID == rhs.editingOscillatorID &&
+        lhs.showIndicatorSettings == rhs.showIndicatorSettings &&
+        lhs.srLevels == rhs.srLevels &&
+        lhs.fvgZones == rhs.fvgZones &&
+        lhs.taScenario == rhs.taScenario &&
+        lhs.taAltScenario == rhs.taAltScenario &&
+        lhs.pendingActivation == rhs.pendingActivation &&
+        lhs.nyLiveScenario == rhs.nyLiveScenario &&
+        lhs.enabledIndicatorKinds == rhs.enabledIndicatorKinds &&
+        lhs.enabledOscillators == rhs.enabledOscillators
     }
 }

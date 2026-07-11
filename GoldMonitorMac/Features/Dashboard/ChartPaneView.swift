@@ -170,6 +170,7 @@ struct ChartPaneView: View {
                         yDomain: $yDomain,
                         indicators: Set(pane.indicatorInstances.map(\.kind)),
                         indicatorConfig: indicatorConfig,
+                        indicatorInstances: pane.indicatorInstances,
                         drawings: drawingStore.drawings(for: pane.pairID),
                         activeTool: effectiveDrawingTool,
                         onCommitDrawing: { drawing in
@@ -334,55 +335,8 @@ struct ChartPaneView: View {
     }
 
     private var indicatorsMenu: some View {
-        Menu {
-            ForEach(IndicatorKind.allCases) { kind in
-                let isOn = pane.indicatorInstances.contains(where: { $0.kind == kind })
-                Button {
-                    var updated = pane
-                    if isOn {
-                        updated.indicatorInstances.removeAll { $0.kind == kind }
-                    } else {
-                        updated.indicatorInstances.append(IndicatorInstance(kind: kind))
-                    }
-                    onUpdate(updated)
-                } label: {
-                    Label(kind.label, systemImage: isOn ? "checkmark.circle.fill" : "circle")
-                }
-            }
-            Divider()
-            ForEach(OscillatorKind.allCases) { kind in
-                let isOn = pane.oscillatorInstances.contains(where: { $0.kind == kind })
-                Button {
-                    var updated = pane
-                    if isOn {
-                        updated.oscillatorInstances.removeAll { $0.kind == kind }
-                    } else {
-                        updated.oscillatorInstances.append(OscillatorInstance(kind: kind))
-                    }
-                    onUpdate(updated)
-                } label: {
-                    Label(kind.label, systemImage: isOn ? "checkmark.circle.fill" : "circle")
-                }
-            }
-            Divider()
-            Button {
-                var updated = pane
-                updated.showVolume.toggle()
-                onUpdate(updated)
-            } label: {
-                Label("Volume", systemImage: pane.showVolume ? "checkmark.circle.fill" : "circle")
-            }
-        } label: {
-            Text("Indicators")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.Color.textSecondary)
-                .padding(.horizontal, 10)
-                .frame(height: 26)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface))
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        ChartPaneIndicatorsMenu(pane: pane, onUpdate: onUpdate)
+            .equatable()
     }
 
     /// Right-click menu with every chart option that used to live in
@@ -585,5 +539,66 @@ struct ChartPaneView: View {
         withAnimation(.easeInOut(duration: 0.25)) {
             xDomain = lower ... upper
         }
+    }
+}
+
+struct ChartPaneIndicatorsMenu: View, Equatable {
+    let pane: ChartPane
+    let onUpdate: (ChartPane) -> Void
+    
+    var body: some View {
+        Menu {
+            ForEach(IndicatorKind.allCases) { kind in
+                let isOn = pane.indicatorInstances.contains(where: { $0.kind == kind })
+                Button {
+                    var updated = pane
+                    if isOn {
+                        updated.indicatorInstances.removeAll { $0.kind == kind }
+                    } else {
+                        updated.indicatorInstances.append(IndicatorInstance(kind: kind))
+                    }
+                    onUpdate(updated)
+                } label: {
+                    Label(kind.label, systemImage: isOn ? "checkmark.circle.fill" : "circle")
+                }
+            }
+            Divider()
+            ForEach(OscillatorKind.allCases) { kind in
+                let isOn = pane.oscillatorInstances.contains(where: { $0.kind == kind })
+                Button {
+                    var updated = pane
+                    if isOn {
+                        updated.oscillatorInstances.removeAll { $0.kind == kind }
+                    } else {
+                        updated.oscillatorInstances.append(OscillatorInstance(kind: kind))
+                    }
+                    onUpdate(updated)
+                } label: {
+                    Label(kind.label, systemImage: isOn ? "checkmark.circle.fill" : "circle")
+                }
+            }
+            Divider()
+            Button {
+                var updated = pane
+                updated.showVolume.toggle()
+                onUpdate(updated)
+            } label: {
+                Label("Volume", systemImage: pane.showVolume ? "checkmark.circle.fill" : "circle")
+            }
+        } label: {
+            Text("Indicators")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.Color.surface))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+    
+    static func == (lhs: ChartPaneIndicatorsMenu, rhs: ChartPaneIndicatorsMenu) -> Bool {
+        lhs.pane == rhs.pane
     }
 }

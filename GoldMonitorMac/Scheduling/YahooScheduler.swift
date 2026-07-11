@@ -595,9 +595,13 @@ final class YahooScheduler: ObservableObject {
     private func publishTick(price: Double, pairID: String, source: String) {
         let now = Date()
         if let prev = lastUpdateAt, now.timeIntervalSince(prev) < 1.0 {
-            hasBootstrapped = true
             return
         }
+        // Batch all @Published writes so objectWillChange fires once
+        // instead of once per property (3-4x per tick). Without this,
+        // each write re-evaluates the entire DashboardView body and
+        // dismisses any open Menu / context menu.
+        objectWillChange.send()
         latestPrices[pairID] = price
         activeLiveSource = "\(source)/\(pairID)"
         lastUpdateAt = now
@@ -614,9 +618,9 @@ final class YahooScheduler: ObservableObject {
     private func publishLastUpdate() {
         let now = Date()
         if let prev = lastUpdateAt, now.timeIntervalSince(prev) < 1.0 {
-            hasBootstrapped = true
             return
         }
+        objectWillChange.send()
         lastUpdateAt = now
         hasBootstrapped = true
     }
@@ -639,6 +643,7 @@ final class YahooScheduler: ObservableObject {
         // Faraz and Twelve Data + Yahoo at once — clear + refetch them all
         // so two providers' OHLC can't interleave in any series.
         let affected = farazPairIDs
+        objectWillChange.send()
         for pairID in affected {
             // Forget what we've already fetched for this pair so the new
             // source's deep history + pan-left start fresh.
@@ -728,6 +733,7 @@ final class YahooScheduler: ObservableObject {
         }
         // Single @Published write — one chart cascade instead of N.
         if !seedPrices.isEmpty {
+            objectWillChange.send()
             for (pairID, price) in seedPrices {
                 latestPrices[pairID] = price
             }
@@ -816,7 +822,8 @@ final class YahooScheduler: ObservableObject {
         // `publishTick` inside each `syncFarazPair` already wrote
         // `lastUpdateAt` / `latestPrices` / `activeLiveSource` at
         // most 1 Hz — no additional @Published write needed here.
-        hasBootstrapped = true
+        // Skip `hasBootstrapped` write to avoid an extra
+        // objectWillChange cascade.
     }
 
     /// History-only sync when the WS is fresh — fetches 1h + 1d bars

@@ -131,7 +131,11 @@ struct OpenCodeEngine: AIEngine {
             process.executableURL = URL(fileURLWithPath: binary)
             process.currentDirectoryURL = workspace
 
-            let modelArg = model.hasPrefix("opencode/") ? model : "opencode/\(model)"
+            let modelArg = Self.localModelArgument(for: model)
+            // Free models hang when `--thinking` is requested; paid
+            // models emit a `reasoning` event stream. Only ask for it
+            // when we know the selected model is not free.
+            let supportsThinking = Self.modelSupportsThinking(model)
 
             // Build arguments.
             // - `run`             : non-interactive one-shot mode
@@ -151,19 +155,23 @@ struct OpenCodeEngine: AIEngine {
             // - `--auto`          : auto-approve tool calls so the
             //                       agent never blocks waiting for
             //                       interactive approval
-            // - `--thinking`      : surface reasoning blocks
+            // - `--thinking`      : surface reasoning blocks (paid
+            //                       models only — free models stall)
             // - `-m <model>`      : model selection
             // The prompt is passed as the positional `message` arg.
-            process.arguments = [
+            var arguments: [String] = [
                 "run",
                 "--format", "json",
                 "--print-logs",
                 "--dir", workspace.path,
                 "--auto",
-                "--thinking",
                 "-m", modelArg,
-                fullPrompt,
             ]
+            if supportsThinking {
+                arguments.append("--thinking")
+            }
+            arguments.append(fullPrompt)
+            process.arguments = arguments
 
             var env = ProcessInfo.processInfo.environment
             if let apiKey = KeychainHelper.get(.opencodeAPIKey), !apiKey.isEmpty {
@@ -304,6 +312,62 @@ struct OpenCodeEngine: AIEngine {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
     #endif
+
+    // MARK: - Model / provider resolution
+
+    /// Resolve a raw model id (possibly already `provider/model`) into
+    /// the provider plugin name and bare model id that both the local
+    /// CLI and the remote server expect. Paid models are *not* on the
+    /// `opencode/` provider — they live on `opencode-go/`, `anthropic/`,
+    /// `openai/`, `google/`, or `xai/` depending on the catalog's
+    /// provider grouping.
+    static func resolveProviderAndModel(for model: String) -> (provider: String, modelID: String)? {
+        if model.contains("/") {
+            let parts = model.split(separator: "/", maxSplits: 1)
+            return (String(parts[0]), String(parts[1]))
+        }
+        guard let m = OpenCodeModelCatalog.allModels.first(where: { $0.id == model }) else {
+            return nil
+        }
+        if m.isFree {
+            return ("opencode", model)
+        }
+        let provider: String
+        switch m.provider {
+        case "OpenCode", "MiMo", "Qwen", "DeepSeek", "Kimi", "MiniMax", "GLM":
+            provider = "opencode-go"
+        case "OpenAI":
+            provider = "openai"
+        case "Anthropic":
+            provider = "anthropic"
+        case "Google":
+            provider = "google"
+        case "Grok":
+            provider = "xai"
+        default:
+            provider = "opencode-go"
+        }
+        return (provider, model)
+    }
+
+    /// Local CLI `-m` argument. Ensures paid / third-party models are
+    /// prefixed with the correct provider plugin.
+    static func localModelArgument(for model: String) -> String {
+        let resolved = resolveProviderAndModel(for: model)
+        let provider = resolved?.provider ?? "opencode"
+        let modelID = resolved?.modelID ?? model
+        return "\(provider)/\(modelID)"
+    }
+
+    /// Whether the selected model is known to support `--thinking`.
+    /// Free models consistently stall when the flag is passed, so we
+    /// only enable it for paid models.
+    static func modelSupportsThinking(_ model: String) -> Bool {
+        guard let m = OpenCodeModelCatalog.allModels.first(where: { $0.id == model }) else {
+            return false
+        }
+        return !m.isFree
+    }
 }
 
 // MARK: - Remote OpenCode Session
@@ -328,9 +392,11 @@ private final class RemoteOpenCodeSession: Sendable {
             self.authorizationHeader = nil
         }
 
-        // Configure URLSession with reasonable timeouts
+        // Configure URLSession with reasonable timeouts. Streaming
+        // analyses can take minutes, so the request timeout must not
+        // fire during a long generation gap.
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForRequest = 600
         config.timeoutIntervalForResource = 600
         self.urlSession = URLSession(configuration: config)
 
@@ -397,21 +463,18 @@ private final class RemoteOpenCodeSession: Sendable {
         }
 
         // Parse model into provider/modelID.  The server expects
-        // { providerID, modelID } — NOT a flat string.
-        // Free models live on the "opencode" provider; paid models
-        // on "opencode-go".  If the model string already contains
-        // a slash, respect it verbatim.
+        // { providerID, modelID } — NOT a flat string.  Use the
+        // same provider mapping the local CLI needs so the user's
+        // model pick routes to the correct backend plugin.
         let providerID: String
         let modelID: String
-        if model.contains("/") {
-            let parts = model.split(separator: "/", maxSplits: 1)
-            providerID = String(parts[0])
-            modelID = String(parts[1])
+        if let resolved = OpenCodeEngine.resolveProviderAndModel(for: model) {
+            providerID = resolved.provider
+            modelID = resolved.modelID
         } else {
-            // Look up whether the model is free or paid from the
-            // catalog so we route to the correct server provider.
-            let isFree = OpenCodeModelCatalog.allModels.first { $0.id == model }?.isFree ?? true
-            providerID = isFree ? "opencode" : "opencode-go"
+            // Unknown model — default to the free provider so the
+            // server can return a meaningful "model not found" error.
+            providerID = "opencode"
             modelID = model
         }
 
@@ -440,96 +503,106 @@ private final class RemoteOpenCodeSession: Sendable {
         let (bytes, _) = try await urlSession.bytes(for: eventRequest)
 
         var textAccumulator: [String: String] = [:]
-        var lineBuffer = ""
+        // part.created / message.part.updated tell us the type of
+        // each part. message.part.delta only carries the field name
+        // (often "text" even for reasoning parts), so we look up the
+        // real kind here to avoid streaming reasoning text into the
+        // main report.
+        var partKindByID: [String: String] = [:]
 
-        for try await byte in bytes {
+        // `bytes.lines` decodes UTF-8 correctly; the previous
+        // byte-by-byte loop treated each byte as a Unicode scalar,
+        // which corrupted any multi-byte characters in the streamed
+        // response and could break JSON parsing.
+        for try await line in bytes.lines {
             if Task.isCancelled { break }
 
-            let char = Character(UnicodeScalar(byte))
-            if char == "\n" {
-                let trimmed = lineBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
-                lineBuffer = ""
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
 
-                guard !trimmed.isEmpty else { continue }
+            // Parse SSE data fields
+            if trimmed.hasPrefix("data:") {
+                let dataStr = String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespaces)
 
-                // Parse SSE data fields
-                if trimmed.hasPrefix("data:") {
-                    let dataStr = String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                guard let jsonData = dataStr.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any]
+                else { continue }
 
-                    guard let jsonData = dataStr.data(using: .utf8),
-                          let obj = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any]
-                    else { continue }
+                // Check if this event is for our session.
+                // The server may put sessionID at the top level
+                // or nested inside properties.
+                let eventSessionID = (obj["sessionID"] as? String)
+                    ?? ((obj["properties"] as? [String: Any])?["sessionID"] as? String)
+                if let esid = eventSessionID, esid != sessionID { continue }
 
-                    // Check if this event is for our session.
-                    // The server may put sessionID at the top level
-                    // or nested inside properties.
-                    let eventSessionID = (obj["sessionID"] as? String)
-                        ?? ((obj["properties"] as? [String: Any])?["sessionID"] as? String)
-                    if let esid = eventSessionID, esid != sessionID { continue }
+                // Handle different event types.
+                // Server sends { type, properties } format.
+                let eventType = (obj["type"] as? String)
+                            ?? (obj["kind"] as? String)
+                            ?? ""
+                switch eventType {
+                case "message.part.delta":
+                    // Streaming delta — properties has { field, delta, partID }.
+                    // The field is often "text" even for reasoning parts, so
+                    // prefer the part type we learned from part.created /
+                    // message.part.updated.
+                    if let info = obj["properties"] as? [String: Any],
+                       let field = info["field"] as? String,
+                       let delta = info["delta"] as? String,
+                       !delta.isEmpty {
+                        let partID = info["partID"] as? String
+                        let kind = partID.flatMap { partKindByID[$0] } ?? field
+                        if kind == "reasoning" {
+                            continuation.yield(.thinking(delta))
+                        } else {
+                            continuation.yield(.text(delta))
+                        }
+                    }
 
-                    // Handle different event types.
-                    // Server sends { type, properties } format.
-                    let eventType = (obj["type"] as? String)
-                                ?? (obj["kind"] as? String)
-                                ?? ""
-                    switch eventType {
-                    case "message.part.delta":
-                        // Streaming delta — properties has { field, delta, partID }.
-                        // field is "text" or "reasoning", delta is the incremental text.
-                        if let info = obj["properties"] as? [String: Any],
-                           let field = info["field"] as? String,
-                           let delta = info["delta"] as? String,
-                           !delta.isEmpty {
-                            if field == "reasoning" {
-                                continuation.yield(.thinking(delta))
-                            } else {
+                case "part.created", "part.updated",
+                     "message.part.updated":
+                    // Cumulative update — properties has { part: { type, text, id } }.
+                    // Use diff to extract only new text. Also remember the
+                    // part type so message.part.delta can route by real kind.
+                    if let info = obj["properties"] as? [String: Any],
+                       let part = info["part"] as? [String: Any] {
+                        let partType = part["type"] as? String ?? ""
+                        let partID = part["id"] as? String ?? ""
+                        if !partID.isEmpty && !partType.isEmpty {
+                            partKindByID[partID] = partType
+                        }
+                        let text = part["text"] as? String ?? ""
+
+                        guard !text.isEmpty else { continue }
+
+                        switch partType {
+                        case "text":
+                            if let delta = diff(id: "remote-\(partID)", against: text, store: &textAccumulator) {
                                 continuation.yield(.text(delta))
                             }
-                        }
-
-                    case "part.created", "part.updated",
-                         "message.part.updated":
-                        // Cumulative update — properties has { part: { type, text, id } }.
-                        // Use diff to extract only new text.
-                        if let info = obj["properties"] as? [String: Any],
-                           let part = info["part"] as? [String: Any] {
-                            let partType = part["type"] as? String ?? ""
-                            let partID = part["id"] as? String ?? ""
-                            let text = part["text"] as? String ?? ""
-
-                            guard !text.isEmpty else { continue }
-
-                            switch partType {
-                            case "text":
-                                if let delta = diff(id: "remote-\(partID)", against: text, store: &textAccumulator) {
-                                    continuation.yield(.text(delta))
-                                }
-                            case "reasoning":
-                                if let delta = diff(id: "remote-reasoning-\(partID)", against: text, store: &textAccumulator) {
-                                    continuation.yield(.thinking(delta))
-                                }
-                            default:
-                                break
+                        case "reasoning":
+                            if let delta = diff(id: "remote-reasoning-\(partID)", against: text, store: &textAccumulator) {
+                                continuation.yield(.thinking(delta))
                             }
+                        default:
+                            break
                         }
+                    }
 
-                    case "session.status", "session.updated", "session.idle":
-                        if let info = obj["properties"] as? [String: Any],
-                           let status = info["status"] as? String {
-                            if status == "completed" || status == "failed" || status == "idle" {
-                                return
-                            }
-                        }
-                        if eventType == "session.idle" {
+                case "session.status", "session.updated", "session.idle":
+                    if let info = obj["properties"] as? [String: Any],
+                       let status = info["status"] as? String {
+                        if status == "completed" || status == "failed" || status == "idle" {
                             return
                         }
-
-                    default:
-                        break
                     }
+                    if eventType == "session.idle" {
+                        return
+                    }
+
+                default:
+                    break
                 }
-            } else {
-                lineBuffer.append(char)
             }
         }
     }
