@@ -113,6 +113,14 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     /// block. Ported from ClayeWeight's PineScript v5 "Sonarlab -
     /// Order Blocks" (MPL 2.0).
     case sonarlabOrderBlock
+    /// Change of Character (CHoCH) — Smart-Money structure-break detector.
+    /// Reads market structure from swing pivots (via `ZigZag`); when a
+    /// close breaks the last protected swing *against* the prevailing
+    /// trend, it marks the reversal and draws the order-block / fair-value-
+    /// gap confluence zone left behind by the breaking impulse. Renders as
+    /// zones + a "CHoCH↑/↓" label + a dashed broken-structure line (see
+    /// `ChangeOfCharacter` + ChartView's `chochMarks`).
+    case changeOfCharacter
     /// Session-based Volume Profile — per-day volume histogram with POC, VAH, VAL.
     case volumeProfile
 
@@ -133,6 +141,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .nyOpenSetup:    return "NY Open Setup"
         case .fairValueGap:   return "Fair Value Gap"
         case .sonarlabOrderBlock: return "Sonarlab OB"
+        case .changeOfCharacter: return "CHoCH Zones"
         case .volumeProfile:     return "Volume Profile"
         }
     }
@@ -152,6 +161,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .nyOpenSetup: return Color(red: 0.95, green: 0.75, blue: 0.30)
         case .fairValueGap: return Color(red: 0.30, green: 0.80, blue: 0.75)
         case .sonarlabOrderBlock: return Color(red: 0.80, green: 0.45, blue: 0.90)
+        case .changeOfCharacter: return Color(red: 0.95, green: 0.35, blue: 0.72)
         case .volumeProfile:     return Color(red: 0.20, green: 0.80, blue: 0.75)
         }
     }
@@ -222,6 +232,17 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                     ParamOption(label: "Close", value: "Close"),
                     ParamOption(label: "Wick", value: "Wick"),
                 ]),
+            ]
+        case .changeOfCharacter:
+            return [
+                .double(key: "swingLength", label: "Swing length (pivots)", default: 5, step: 1, range: 2...50),
+                .double(key: "minSwingPct", label: "Min swing %", default: 0.2, step: 0.1, range: 0...5),
+                .bool(key: "showOB", label: "Show order block", default: true),
+                .bool(key: "showFVG", label: "Show FVG", default: true),
+                .bool(key: "showIFVG", label: "Show inverse FVG (iFVG)", default: false),
+                .bool(key: "requireFVG", label: "Require FVG confluence", default: false),
+                .bool(key: "showMitigated", label: "Show mitigated zones", default: false),
+                .bool(key: "notifyEvents", label: "Notify on CHoCH / retest / invalidation", default: false),
             ]
         case .volumeProfile:
             return [

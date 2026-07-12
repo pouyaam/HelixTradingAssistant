@@ -463,6 +463,15 @@ struct DashboardView: View {
         case .sonarlabOrderBlock:
             if let v = p["sensitivity"]     { oscillatorConfig.sonarlabSensitivity = v.doubleValue }
             if let v = p["mitigationType"]  { oscillatorConfig.sonarlabMitigationType = v.stringValue }
+        case .changeOfCharacter:
+            if let v = p["swingLength"]   { oscillatorConfig.chochSwingLength = Int(v.doubleValue) }
+            if let v = p["minSwingPct"]   { oscillatorConfig.chochMinSwingPct = v.doubleValue }
+            if let v = p["showOB"]        { oscillatorConfig.chochShowOB = v.boolValue }
+            if let v = p["showFVG"]       { oscillatorConfig.chochShowFVG = v.boolValue }
+            if let v = p["showIFVG"]      { oscillatorConfig.chochShowIFVG = v.boolValue }
+            if let v = p["requireFVG"]    { oscillatorConfig.chochRequireFVG = v.boolValue }
+            if let v = p["showMitigated"] { oscillatorConfig.chochShowMitigated = v.boolValue }
+            if let v = p["notifyEvents"]  { oscillatorConfig.chochNotifyEvents = v.boolValue }
         case .volumeProfile:
             if let v = p["bucketCount"]  { oscillatorConfig.vpBucketCount = Int(v.doubleValue) }
             if let v = p["valueAreaPct"] { oscillatorConfig.vpValueAreaPct = v.doubleValue }
@@ -2936,7 +2945,8 @@ struct DashboardView: View {
     /// so users who don't have it turned on pay no extra compute.
     /// Mirrors the RSI-alert feed just above.
     private func notifyOrderBlockEvents(_ candles: [Candle], pairID: String) {
-        guard oscillatorConfig.obNotifyEvents || oscillatorConfig.sobNotifyEvents else { return }
+        guard oscillatorConfig.obNotifyEvents || oscillatorConfig.sobNotifyEvents
+                || oscillatorConfig.chochNotifyEvents else { return }
         let pairLabel = app.pairs.first(where: { $0.id == pairID })?.name ?? pairID
 
         // Each indicator's full-history `compute` runs on its own
@@ -2969,6 +2979,22 @@ struct DashboardView: View {
                     volumeMultiplier: config.sobVolumeMultiplier
                 )
                 await self.alertStore.evaluateSteroidOrderBlocks(zones, pairID: pairID, pairLabel: pairLabel)
+            }
+        }
+        if oscillatorConfig.chochNotifyEvents {
+            let config = oscillatorConfig
+            Task.detached(priority: .utility) {
+                // Compute with showMitigated:true so the invalidation
+                // (mitigated) transition can fire even when the chart hides
+                // mitigated zones.
+                let zones = ChangeOfCharacter.compute(
+                    candles,
+                    swingLength: config.chochSwingLength,
+                    minSwingPct: config.chochMinSwingPct,
+                    requireFVG: config.chochRequireFVG,
+                    showMitigated: true
+                )
+                await self.alertStore.evaluateCHoCH(zones, pairID: pairID, pairLabel: pairLabel)
             }
         }
     }

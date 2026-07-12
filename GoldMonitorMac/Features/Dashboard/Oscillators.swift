@@ -160,6 +160,20 @@ struct OscillatorConfig: Codable, Equatable {
     var sonarlabSensitivity: Double = 26.0
     var sonarlabMitigationType: String = "Close"
 
+    // Change of Character parameters (see `ChangeOfCharacter`).
+    // `chochSwingLength` is the ZigZag pivot depth used to read structure;
+    // `chochMinSwingPct` filters swing noise. `chochRequireFVG` restricts
+    // output to OB∩FVG confluence zones; `chochShowMitigated` keeps zones
+    // price has already closed through.
+    var chochSwingLength: Int = 5
+    var chochMinSwingPct: Double = 0.2
+    var chochShowOB: Bool = true
+    var chochShowFVG: Bool = true
+    var chochShowIFVG: Bool = false
+    var chochRequireFVG: Bool = false
+    var chochShowMitigated: Bool = false
+    var chochNotifyEvents: Bool = false
+
     // Volume Profile parameters (session-based, see `VolumeProfile`).
     // `vpBucketCount` is the number of equal-price bands per session;
     // `vpValueAreaPct` is the % of total volume that defines the value area.
@@ -224,6 +238,14 @@ struct OscillatorConfig: Codable, Equatable {
         fvgShowMitigated   = try c.decodeIfPresent(Bool.self,   forKey: .fvgShowMitigated)   ?? true
         sonarlabSensitivity = try c.decodeIfPresent(Double.self, forKey: .sonarlabSensitivity) ?? 26.0
         sonarlabMitigationType = try c.decodeIfPresent(String.self, forKey: .sonarlabMitigationType) ?? "Close"
+        chochSwingLength   = try c.decodeIfPresent(Int.self,    forKey: .chochSwingLength)   ?? 5
+        chochMinSwingPct   = try c.decodeIfPresent(Double.self, forKey: .chochMinSwingPct)   ?? 0.2
+        chochShowOB        = try c.decodeIfPresent(Bool.self,   forKey: .chochShowOB)        ?? true
+        chochShowFVG       = try c.decodeIfPresent(Bool.self,   forKey: .chochShowFVG)       ?? true
+        chochShowIFVG      = try c.decodeIfPresent(Bool.self,   forKey: .chochShowIFVG)      ?? false
+        chochRequireFVG    = try c.decodeIfPresent(Bool.self,   forKey: .chochRequireFVG)    ?? false
+        chochShowMitigated = try c.decodeIfPresent(Bool.self,   forKey: .chochShowMitigated) ?? false
+        chochNotifyEvents  = try c.decodeIfPresent(Bool.self,   forKey: .chochNotifyEvents)  ?? false
         vpBucketCount      = try c.decodeIfPresent(Int.self,    forKey: .vpBucketCount)      ?? 24
         vpValueAreaPct     = try c.decodeIfPresent(Double.self, forKey: .vpValueAreaPct)     ?? 70.0
         vpUseZigzag        = try c.decodeIfPresent(Bool.self,   forKey: .vpUseZigzag)        ?? true

@@ -171,6 +171,7 @@ struct NotificationInboxView: View {
         case .rsiAlert:   return Theme.Color.warn
         case .orderBlock: return Theme.Color.accentStart
         case .scanner:    return Theme.Color.danger
+        case .changeOfCharacter: return Theme.Color.accentEnd
         }
     }
 

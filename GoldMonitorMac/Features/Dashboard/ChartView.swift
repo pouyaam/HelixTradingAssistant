@@ -356,6 +356,18 @@ struct ChartView: View {
     }
     private static let maxSonarlabOBs = 20
 
+    /// Change of Character confluence zones — structure break + OB/FVG.
+    private var chochZones: [ChangeOfCharacter.Zone] {
+        guard indicators.contains(.changeOfCharacter) else { return [] }
+        return derived.changeOfCharacter(
+            candles: candles,
+            swingLength: indicatorConfig.chochSwingLength,
+            minSwingPct: indicatorConfig.chochMinSwingPct,
+            requireFVG: indicatorConfig.chochRequireFVG,
+            showMitigated: indicatorConfig.chochShowMitigated
+        )
+    }
+
     /// Session-based Volume Profile sessions — per-day histograms with POC, VAH, VAL.
     /// Only used when ZigZag mode is disabled.
     private var volumeProfileSessions: [VolumeProfile.SessionVP] {
@@ -517,6 +529,7 @@ struct ChartView: View {
             orderBlockMarks
             steroidOrderBlockMarks
             sonarlabOBMarks
+            chochMarks
             scenarioMarks
             tradeMarks
             journalMarks
@@ -1904,6 +1917,107 @@ struct ChartView: View {
         }
     }
 
+
+    /// Change of Character overlays. For every CHoCH we always draw the
+    /// broken-structure line + a "CHoCH↑/↓" capsule at the break bar; the
+    /// order block, the displacement FVG and the inverse FVG each draw as
+    /// their own rectangle, gated by the indicator's show-OB / show-FVG /
+    /// show-iFVG toggles.
+    @ChartContentBuilder
+    private var chochMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(chochZones) { zone in
+            chochMark(for: zone, lastIndex: lastIndex)
+        }
+    }
+
+    /// One tinted zone rectangle (fill + top/bottom edges + a right-edge
+    /// letter tag), shared by the OB / FVG / iFVG layers.
+    @ChartContentBuilder
+    private func chochZoneRect(
+        id: String, xStart: Double, xEnd: Double,
+        low: Double, high: Double, color: Color,
+        fill: Double, dashed: Bool, tag: String
+    ) -> some ChartContent {
+        let edge: StrokeStyle = dashed
+            ? StrokeStyle(lineWidth: 1.0, dash: [4, 3])
+            : StrokeStyle(lineWidth: 1.0)
+        RectangleMark(
+            xStart: .value("\(id) x0", xStart), xEnd: .value("\(id) x1", xEnd),
+            yStart: .value("\(id) y0", low),    yEnd: .value("\(id) y1", high)
+        )
+        .foregroundStyle(color.opacity(fill))
+        RuleMark(xStart: .value("\(id) hx0", xStart), xEnd: .value("\(id) hx1", xEnd), y: .value("\(id) hy", high))
+            .foregroundStyle(color.opacity(0.6)).lineStyle(edge)
+        RuleMark(xStart: .value("\(id) lx0", xStart), xEnd: .value("\(id) lx1", xEnd), y: .value("\(id) ly", low))
+            .foregroundStyle(color.opacity(0.6)).lineStyle(edge)
+        PointMark(x: .value("\(id) tx", xEnd), y: .value("\(id) ty", high))
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                Text(tag)
+                    .font(.system(size: 7, weight: .heavy))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 3).padding(.vertical, 1)
+                    .background(Capsule().fill(color))
+            }
+    }
+
+    @ChartContentBuilder
+    private func chochMark(for zone: ChangeOfCharacter.Zone, lastIndex: Int) -> some ChartContent {
+        let baseColor: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
+        let accentColor = IndicatorKind.changeOfCharacter.color
+        let fvgColor = Color(red: 0.30, green: 0.80, blue: 0.75)   // teal, matches FVG indicator
+        let xEnd = Double(lastIndex)
+        let dim = zone.status == .fresh ? 1.0 : 0.6
+
+        // Order block layer.
+        if indicatorConfig.chochShowOB {
+            chochZoneRect(
+                id: "\(zone.id)-OB", xStart: Double(zone.obIndex), xEnd: xEnd,
+                low: zone.obLow, high: zone.obHigh, color: baseColor,
+                fill: 0.12 * dim, dashed: !zone.hasFVG, tag: "OB"
+            )
+        }
+        // Displacement FVG layer.
+        if indicatorConfig.chochShowFVG, let fl = zone.fvgLow, let fh = zone.fvgHigh, let fi = zone.fvgIndex {
+            chochZoneRect(
+                id: "\(zone.id)-FVG", xStart: Double(fi), xEnd: xEnd,
+                low: fl, high: fh, color: fvgColor, fill: 0.16 * dim, dashed: false, tag: "FVG"
+            )
+        }
+        // Inverse FVG layer (dashed to read as flipped).
+        if indicatorConfig.chochShowIFVG, let il = zone.ifvgLow, let ih = zone.ifvgHigh, let ii = zone.ifvgIndex {
+            chochZoneRect(
+                id: "\(zone.id)-IFVG", xStart: Double(ii), xEnd: xEnd,
+                low: il, high: ih, color: accentColor, fill: 0.10 * dim, dashed: true, tag: "iFVG"
+            )
+        }
+
+        // Broken-structure level — dashed rule from the OB across to the break.
+        RuleMark(
+            xStart: .value("CHoCH lvl start", Double(zone.obIndex)),
+            xEnd:   .value("CHoCH lvl end",   Double(zone.chochIndex)),
+            y:      .value("CHoCH lvl",       zone.brokenLevel)
+        )
+        .foregroundStyle(accentColor.opacity(0.8))
+        .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+
+        // Break marker + label at the CHoCH bar.
+        let tagText = zone.isBullish ? "CHoCH↑" : "CHoCH↓"
+        PointMark(
+            x: .value("CHoCH label x", Double(zone.chochIndex)),
+            y: .value("CHoCH label y", zone.brokenLevel)
+        )
+        .symbolSize(0)
+        .annotation(position: zone.isBullish ? .top : .bottom, alignment: .center, spacing: 2) {
+            Text(tagText)
+                .font(.system(size: 8, weight: .heavy))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(accentColor))
+        }
+    }
 
     /// Volume Profile — either zigzag-based (last trend, right side) or
     /// session-based (per-day histograms), depending on `vpUseZigzag`.
@@ -3417,6 +3531,10 @@ struct ChartView: View {
             if zone.high > hi { hi = zone.high }
         }
         for zone in sonarlabOBZones {
+            if zone.low < lo { lo = zone.low }
+            if zone.high > hi { hi = zone.high }
+        }
+        for zone in chochZones {
             if zone.low < lo { lo = zone.low }
             if zone.high > hi { hi = zone.high }
         }

@@ -449,6 +449,49 @@ final class ChartDerivedCache: ObservableObject {
         }
     }
 
+    // ── Change of Character (CHoCH + OB/FVG confluence) ────────────────
+
+    private struct CHoCHSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastClose: Double
+        let swingLength: Int
+        let minSwingPct: Double
+        let requireFVG: Bool
+        let showMitigated: Bool
+    }
+    private let chochSlot = Slot<CHoCHSig, [ChangeOfCharacter.Zone]>([])
+
+    /// Memoized CHoCH detection. Folds the last bar's close into the
+    /// signature so the live in-progress bar closing beyond a protected
+    /// swing (i.e. a CHoCH forming right now) re-runs detection.
+    func changeOfCharacter(
+        candles: [Candle],
+        swingLength: Int,
+        minSwingPct: Double,
+        requireFVG: Bool,
+        showMitigated: Bool
+    ) -> [ChangeOfCharacter.Zone] {
+        let sig = CHoCHSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastClose: candles.last?.close ?? 0,
+            swingLength: swingLength,
+            minSwingPct: minSwingPct,
+            requireFVG: requireFVG,
+            showMitigated: showMitigated
+        )
+        return resolve(chochSlot, signature: sig) {
+            ChangeOfCharacter.compute(
+                candles,
+                swingLength: swingLength,
+                minSwingPct: minSwingPct,
+                requireFVG: requireFVG,
+                showMitigated: showMitigated
+            )
+        }
+    }
+
     // ── Volume Profile ─────────────────────────────────────────────────
 
     private struct VPSig: Equatable {

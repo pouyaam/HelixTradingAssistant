@@ -383,7 +383,32 @@ final class AlertStore: ObservableObject {
                                   isBullish: $0.isBullish, high: $0.high, low: $0.low,
                                   stage: BlockStage(rawValue: $0.status.rawValue) ?? .fresh)
             },
-            namespace: "ob", label: "Order Block", pairID: pairID, pairLabel: pairLabel
+            namespace: "ob", label: "Order Block", category: .orderBlock,
+            pairID: pairID, pairLabel: pairLabel
+        )
+    }
+
+    /// Change-of-Character lifecycle notifications. Maps each CHoCH's
+    /// confluence bounding box through the same appeared/retested/exhausted
+    /// diff as order blocks, but under its own namespace + category so the
+    /// wording reads as a trend-change signal. `.mitigated` maps to the
+    /// shared `.exhausted` stage. Gated by `OscillatorConfig.chochNotifyEvents`.
+    func evaluateCHoCH(_ zones: [ChangeOfCharacter.Zone], pairID: String, pairLabel: String) {
+        evaluateBlockZones(
+            zones.map { z -> BlockZoneSnapshot in
+                let stage: BlockStage
+                switch z.status {
+                case .fresh:     stage = .fresh
+                case .tested:    stage = .tested
+                case .mitigated: stage = .exhausted
+                }
+                return BlockZoneSnapshot(
+                    key: BlockZoneSnapshot.stableKey(isBullish: z.isBullish, high: z.high, low: z.low),
+                    isBullish: z.isBullish, high: z.high, low: z.low, stage: stage
+                )
+            },
+            namespace: "choch", label: "CHoCH", category: .changeOfCharacter,
+            pairID: pairID, pairLabel: pairLabel
         )
     }
 
@@ -398,7 +423,8 @@ final class AlertStore: ObservableObject {
                                   isBullish: $0.isBullish, high: $0.high, low: $0.low,
                                   stage: BlockStage(rawValue: $0.status.rawValue) ?? .fresh)
             },
-            namespace: "sob", label: "Steroid Order Block", pairID: pairID, pairLabel: pairLabel
+            namespace: "sob", label: "Steroid Order Block", category: .orderBlock,
+            pairID: pairID, pairLabel: pairLabel
         )
     }
 
@@ -406,6 +432,7 @@ final class AlertStore: ObservableObject {
         _ zones: [BlockZoneSnapshot],
         namespace: String,
         label: String,
+        category: NotificationRecord.Category,
         pairID: String,
         pairLabel: String
     ) {
@@ -423,11 +450,11 @@ final class AlertStore: ObservableObject {
             guard !isFirstObservation else { continue }
 
             if previousStage == nil {
-                notifyBlockLifecycle(.appeared, label: label, pairID: pairID, pairLabel: pairLabel, zone: zone)
+                notifyBlockLifecycle(.appeared, label: label, category: category, namespace: namespace, pairID: pairID, pairLabel: pairLabel, zone: zone)
             } else if previousStage == .fresh, zone.stage == .tested {
-                notifyBlockLifecycle(.retested, label: label, pairID: pairID, pairLabel: pairLabel, zone: zone)
+                notifyBlockLifecycle(.retested, label: label, category: category, namespace: namespace, pairID: pairID, pairLabel: pairLabel, zone: zone)
             } else if previousStage != .exhausted, zone.stage == .exhausted {
-                notifyBlockLifecycle(.exhausted, label: label, pairID: pairID, pairLabel: pairLabel, zone: zone)
+                notifyBlockLifecycle(.exhausted, label: label, category: category, namespace: namespace, pairID: pairID, pairLabel: pairLabel, zone: zone)
             }
         }
 
@@ -441,6 +468,8 @@ final class AlertStore: ObservableObject {
     private func notifyBlockLifecycle(
         _ event: BlockLifecycleEvent,
         label: String,
+        category: NotificationRecord.Category,
+        namespace: String,
         pairID: String,
         pairLabel: String,
         zone: BlockZoneSnapshot
@@ -449,27 +478,43 @@ final class AlertStore: ObservableObject {
         let range = "\(Self.formatPrice(zone.low))–\(Self.formatPrice(zone.high))"
         let title: String
         let body: String
-        switch event {
-        case .appeared:
-            title = "\(pairLabel) — \(direction) \(label) formed"
-            body = "New \(direction.lowercased()) \(label.lowercased()) at \(range). Watch for a reaction on a return visit."
-        case .retested:
-            title = "\(pairLabel) — \(direction) \(label) retested"
-            body = "Price returned to the \(direction.lowercased()) \(label.lowercased()) at \(range)."
-        case .exhausted:
-            title = "\(pairLabel) — \(direction) \(label) exhausted"
-            body = "Price closed through the \(direction.lowercased()) \(label.lowercased()) at \(range) — zone invalidated."
+        if category == .changeOfCharacter {
+            // Structure-break wording: the "appear" event is the CHoCH itself.
+            switch event {
+            case .appeared:
+                title = "\(pairLabel) — \(direction) Change of Character"
+                body = "Trend broke \(direction.lowercased()). Watch the OB/FVG confluence zone at \(range)."
+            case .retested:
+                title = "\(pairLabel) — CHoCH zone retested"
+                body = "Price returned to the \(direction.lowercased()) CHoCH zone at \(range)."
+            case .exhausted:
+                title = "\(pairLabel) — CHoCH zone invalidated"
+                body = "Price closed through the \(direction.lowercased()) CHoCH zone at \(range)."
+            }
+        } else {
+            switch event {
+            case .appeared:
+                title = "\(pairLabel) — \(direction) \(label) formed"
+                body = "New \(direction.lowercased()) \(label.lowercased()) at \(range). Watch for a reaction on a return visit."
+            case .retested:
+                title = "\(pairLabel) — \(direction) \(label) retested"
+                body = "Price returned to the \(direction.lowercased()) \(label.lowercased()) at \(range)."
+            case .exhausted:
+                title = "\(pairLabel) — \(direction) \(label) exhausted"
+                body = "Price closed through the \(direction.lowercased()) \(label.lowercased()) at \(range) — zone invalidated."
+            }
         }
-        // Dedup key covers the zone + lifecycle event so re-testing a
-        // zone later (a genuinely new event) still gets its own key,
-        // while the same transition can't double-fire.
-        let dedupKey = "ob|\(zone.key)|\(event)"
+        // Dedup key covers the namespace + zone + lifecycle event so
+        // re-testing a zone later (a genuinely new event) still gets its
+        // own key, while the same transition can't double-fire — and OB
+        // vs CHoCH zones at the same price never collide.
+        let dedupKey = "\(namespace)|\(zone.key)|\(event)"
         inbox?.record(
             dedupKey: dedupKey,
             cooldown: 60 * 60 * 6,
             pairID: pairID,
             pairLabel: pairLabel,
-            category: .orderBlock,
+            category: category,
             title: title,
             body: body,
             timeframeLabel: timeframeLabel.isEmpty ? nil : timeframeLabel

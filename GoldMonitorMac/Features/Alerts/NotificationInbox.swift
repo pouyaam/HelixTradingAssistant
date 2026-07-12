@@ -31,6 +31,7 @@ struct NotificationRecord: Identifiable, Codable, Equatable {
         case rsiAlert
         case orderBlock
         case scanner
+        case changeOfCharacter
 
         var icon: String {
             switch self {
@@ -38,6 +39,7 @@ struct NotificationRecord: Identifiable, Codable, Equatable {
             case .rsiAlert:   return "waveform.path.ecg"
             case .orderBlock: return "square.stack.3d.up.fill"
             case .scanner:    return "scope"
+            case .changeOfCharacter: return "arrow.triangle.2.circlepath"
             }
         }
 
@@ -47,6 +49,7 @@ struct NotificationRecord: Identifiable, Codable, Equatable {
             case .rsiAlert:   return "RSI Alert"
             case .orderBlock: return "Order Block"
             case .scanner:    return "Scanner"
+            case .changeOfCharacter: return "Change of Character"
             }
         }
     }
