@@ -12,8 +12,11 @@ struct AnalysisPageiPad: View {
     var onApplyTAScenario: ((PromptBuilder.TAScenario) -> Void)?
     var onApplyTAAltScenario: ((PromptBuilder.TAScenario) -> Void)?
     var onActivateTradeFromScenario: ((PromptBuilder.TAScenario, UUID?) -> Void)?
+    /// Dismisses the analysis overlay. The iPad dashboard shows this page via
+    /// its own local state, so dismissal must route back through here rather
+    /// than the macOS-only `AppState.showAnalysisFullPage` flag.
+    var onClose: (() -> Void)?
 
-    @EnvironmentObject private var app: AppState
     @EnvironmentObject private var store: AnalysisStore
 
     @State private var selectedKind: AnalysisKind = .combined
@@ -93,7 +96,7 @@ struct AnalysisPageiPad: View {
     private var headerBar: some View {
         HStack(spacing: Theme.Spacing.md) {
             Button {
-                app.showAnalysisFullPage = false
+                onClose?()
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 22))
@@ -268,7 +271,7 @@ struct AnalysisPageiPad: View {
                         livePrice: livePrice,
                         onAddToChart: {
                             onApplyTAScenario?(s)
-                            app.showAnalysisFullPage = false
+                            onClose?()
                         },
                         onActivate: {
                             onActivateTradeFromScenario?(s, nil)
@@ -284,7 +287,7 @@ struct AnalysisPageiPad: View {
                         livePrice: livePrice,
                         onAddToChart: {
                             onApplyTAAltScenario?(s)
-                            app.showAnalysisFullPage = false
+                            onClose?()
                         }
                     )
                     .padding(.horizontal, Theme.Spacing.lg)
@@ -346,7 +349,7 @@ struct AnalysisPageiPad: View {
             }
             Button {
                 onApplySRLevels?(sr)
-                app.showAnalysisFullPage = false
+                onClose?()
             } label: {
                 Label("Add to chart", systemImage: "chart.line.uptrend.xyaxis")
                     .font(.system(size: 11, weight: .semibold))
@@ -375,7 +378,7 @@ struct AnalysisPageiPad: View {
             }
             Button {
                 onApplyFVGZones?(fvgs)
-                app.showAnalysisFullPage = false
+                onClose?()
             } label: {
                 Label("Add to chart", systemImage: "rectangle.dashed")
                     .font(.system(size: 11, weight: .semibold))
@@ -404,7 +407,7 @@ struct AnalysisPageiPad: View {
             }
             Button {
                 onApplySupplyDemand?(zones)
-                app.showAnalysisFullPage = false
+                onClose?()
             } label: {
                 Label("Add to chart", systemImage: "rectangle.righthalf.filled")
                     .font(.system(size: 11, weight: .semibold))
@@ -491,7 +494,7 @@ struct AnalysisPageiPad: View {
     // MARK: - History sheet
 
     private var historySheet: some View {
-        NavigationView {
+        NavigationStack {
             List {
                 let entries = store.history.filter { $0.pairID == pair.id }
                 if entries.isEmpty {

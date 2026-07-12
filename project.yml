@@ -139,6 +139,10 @@ targets:
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         UILaunchStoryboardName: LaunchScreen
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         UISupportedInterfaceOrientations~ipad:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationPortraitUpsideDown
@@ -148,7 +152,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: club.helixtrading.app.ipad
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-        TARGETED_DEVICE_FAMILY: 2
+        # 1,2 = iPhone + iPad (was iPad-only). The UI adapts to compact
+        # width via AppMetrics / AdaptiveRootView.
+        TARGETED_DEVICE_FAMILY: "1,2"
         IPHONEOS_DEPLOYMENT_TARGET: "16.0"
         ENABLE_USER_SCRIPT_SANDBOXING: NO
         CODE_SIGN_STYLE: Automatic
