@@ -1,241 +1,168 @@
 import Foundation
 
-/// Order Block Finder — institutional order-block detection.
-///
-/// Ported from wugamlo's PineScript v4 "Order Block Finder". An order
-/// block is the last counter-trend candle before a sequential run in the
-/// opposite direction:
-///   • Bullish OB — the last DOWN candle before `periods` consecutive UP
-///     candles. The marked range runs from the candle's low up to its
-///     open (or its high when `useWicks`).
-///   • Bearish OB — the last UP candle before `periods` consecutive DOWN
-///     candles. The marked range runs from the candle's high down to its
-///     open (or its low when `useWicks`).
-///
-/// These levels often mark the origin of a strong move and tend to get
-/// revisited, so traders watch them as limit-order zones. Matching the
-/// Pine source, detection fires one bar *after* the run completes and the
-/// block is anchored back onto the originating candle.
-///
-/// Pure-function, no state — `ChartView` maps the result into
-/// `RectangleMark`s, mirroring how UT Bot / FVG overlays are rendered.
+/// Non-repainting order-block detector. A block is the final opposing candle
+/// before a directional displacement which also breaks the recent structure.
+/// The old colour-run rule is intentionally retained only as a minimum
+/// impulse-shape filter; colour alone is never sufficient to create a zone.
 enum OrderBlocks {
-    /// One detected order block, anchored at the originating candle's bar
-    /// index. `high`/`low` bound the marked range; `avg` is the
-    /// equilibrium midline the Pine plots as a solid channel.
-    enum ExhaustionStatus: String, Codable, Hashable {
-        case fresh
-        case tested
-        case exhausted
-    }
+    enum ExhaustionStatus: String, Codable, Hashable { case fresh, tested, exhausted }
 
-    /// One detected order block, anchored at the originating candle's bar
-    /// index. `high`/`low` bound the marked range; `avg` is the
-    /// equilibrium midline the Pine plots as a solid channel.
     struct Zone: Identifiable, Hashable {
-        /// Bar index of the OB candle within the input series.
         let index: Int
+        let breakIndex: Int
         let high: Double
         let low: Double
         let isBullish: Bool
+        let impulseATR: Double
+        /// 0…100, based on structural break + displacement strength.
+        let quality: Int
         let status: ExhaustionStatus
         let testCount: Int
-
-        /// Equilibrium — the average of the block's two edges. An
-        /// interesting interaction level in its own right (Pine draws it
-        /// as the solid channel line).
         var avg: Double { (high + low) / 2 }
-
         var id: String { "\(index)-\(isBullish ? "bull" : "bear")" }
     }
 
-    // MARK: - Shared Volume Profile Helpers
-
-    /// Pre-computed volume profile data shared between `OrderBlocks` and
-    /// `SteroidOrderBlocks` so the HVN / volume-SMA work is done once.
     struct VolumeProfileData {
-        let volumeSMAs: [Double]
+        let priorVolumeSMA: Double?
         let hvnRanges: [ClosedRange<Double>]
+        let hasReliableVolume: Bool
     }
 
-    /// Compute a rolling 20-period volume SMA and identify High Volume
-    /// Nodes (price ranges whose accumulated volume ≥ `hvnThreshold`
-    /// of the peak bucket). Used by both OrderBlocks (when
-    /// `detectSteroids` is true) and SteroidOrderBlocks.
+    /// A profile computed from `lookback` candles ending at `endIndex`.
+    /// No data after `endIndex` is read, so historic qualification cannot
+    /// repaint as future candles arrive.
     static func computeVolumeProfile(
-        candles: [Candle],
-        bucketCount: Int = 30,
-        hvnThreshold: Double = 0.70
+        candles: [Candle], endIndex: Int? = nil, candidateIndex: Int? = nil, lookback: Int = 120,
+        bucketCount: Int = 30, hvnThreshold: Double = 0.70
     ) -> VolumeProfileData {
-        // Rolling volume SMA (period 20).
-        let volPeriod = 20
-        var volSMAs = [Double](repeating: 0, count: candles.count)
-        var volSum: Double = 0
-        for i in 0..<candles.count {
-            let vol = candles[i].volume ?? 0
-            volSum += vol
-            if i >= volPeriod {
-                volSum -= candles[i - volPeriod].volume ?? 0
+        guard !candles.isEmpty else { return .init(priorVolumeSMA: nil, hvnRanges: [], hasReliableVolume: false) }
+        let end = min(max(endIndex ?? candles.count - 1, 0), candles.count - 1)
+        let start = max(0, end - max(lookback, 20) + 1)
+        let sample = Array(candles[start...end])
+
+        // Baseline deliberately excludes the candidate candle itself.
+        var rolling: [Double] = []
+        var candidateAverage: Double?
+        for i in max(0, start - 20)...end {
+            let prior = rolling.suffix(20)
+            if i == candidateIndex, prior.count >= 10 {
+                candidateAverage = prior.reduce(0, +) / Double(prior.count)
             }
-            let activePeriod = min(i + 1, volPeriod)
-            volSMAs[i] = volSum / Double(activePeriod)
+            if let volume = candles[i].volume, volume > 0 { rolling.append(volume) }
         }
 
-        // Volume Profile — bucket typical price into equal bands.
-        let prices = candles.flatMap { [$0.low, $0.high] }
-        var hvnRanges: [ClosedRange<Double>] = []
-        if let priceMin = prices.min(), let priceMax = prices.max(), priceMax > priceMin {
-            let bucketSize = (priceMax - priceMin) / Double(bucketCount)
-            var bucketVolumes = [Double](repeating: 0, count: bucketCount)
-            for c in candles {
-                let typical = (c.high + c.low + c.close) / 3
-                let idx = min(bucketCount - 1, max(0, Int((typical - priceMin) / bucketSize)))
-                let vol = c.volume ?? 0
-                bucketVolumes[idx] += vol > 0 ? vol : 1
-            }
-            let maxVol = bucketVolumes.max() ?? 1
-            let hvnLimit = maxVol * hvnThreshold
-            for i in 0..<bucketCount {
-                if bucketVolumes[i] >= hvnLimit {
-                    let rangeMin = priceMin + Double(i) * bucketSize
-                    hvnRanges.append(rangeMin...rangeMin + bucketSize)
-                }
-            }
+        let volumeCandles = sample.filter { ($0.volume ?? 0) > 0 }
+        guard volumeCandles.count >= max(10, sample.count / 3) else {
+            return .init(priorVolumeSMA: candidateAverage, hvnRanges: [], hasReliableVolume: false)
         }
-        return VolumeProfileData(volumeSMAs: volSMAs, hvnRanges: hvnRanges)
+        let minPrice = sample.map(\.low).min()!, maxPrice = sample.map(\.high).max()!
+        guard maxPrice > minPrice else { return .init(priorVolumeSMA: candidateAverage, hvnRanges: [], hasReliableVolume: true) }
+        let size = (maxPrice - minPrice) / Double(max(1, bucketCount))
+        var buckets = [Double](repeating: 0, count: max(1, bucketCount))
+        // Spread a candle's volume across every crossed price bucket instead
+        // of putting all of it at one typical price.
+        for candle in volumeCandles {
+            let lower = max(0, min(buckets.count - 1, Int((candle.low - minPrice) / size)))
+            let upper = max(0, min(buckets.count - 1, Int((candle.high - minPrice) / size)))
+            let share = (candle.volume ?? 0) / Double(upper - lower + 1)
+            for bucket in lower...upper { buckets[bucket] += share }
+        }
+        let floor = (buckets.max() ?? 0) * hvnThreshold
+        let ranges = buckets.indices.compactMap { i -> ClosedRange<Double>? in
+            guard buckets[i] >= floor, floor > 0 else { return nil }
+            let low = minPrice + Double(i) * size
+            return low...min(maxPrice, low + size)
+        }
+        return .init(priorVolumeSMA: candidateAverage, hvnRanges: ranges, hasReliableVolume: true)
     }
 
-    /// Scan the series for order blocks.
-    ///
-    /// - periods:   required run of same-direction candles after the OB
-    ///              candle (Pine's `periods`, default 5).
-    /// - threshold: minimum % move from the OB close to the last run
-    ///              candle's close for the block to validate (Pine's
-    ///              `threshold`, default 0 ⇒ no filter).
-    /// - useWicks:  mark the whole high/low range instead of open→low
-    ///              (bull) / open→high (bear). Pine's `usewicks`.
     static func compute(
-        _ candles: [Candle],
-        periods: Int,
-        threshold: Double,
-        useWicks: Bool,
-        detectSteroids: Bool = false,
-        volumeMultiplier: Double = 1.2,
-        bucketCount: Int = 30,
-        hvnThreshold: Double = 0.70
+        _ candles: [Candle], periods: Int, threshold: Double, useWicks: Bool,
+        detectSteroids: Bool = false, volumeMultiplier: Double = 1.2,
+        bucketCount: Int = 30, hvnThreshold: Double = 0.70,
+        atrMultiplier: Double = 0.8, maxCandidates: Int = 64
     ) -> [Zone] {
-        // Need the OB candle + its run + one evaluation bar.
-        guard periods >= 1, candles.count >= periods + 2 else { return [] }
-        let n = candles.count
+        guard periods >= 1, candles.count >= periods + 3 else { return [] }
+        let atr = atrSeries(candles, period: 14)
+        var detected: [(index: Int, breakIndex: Int, high: Double, low: Double, bullish: Bool, impulseATR: Double, quality: Int)] = []
 
-        // ── Precompute Volume SMA & HVNs (if detectSteroids) ────────
-        let vpData: VolumeProfileData? = detectSteroids
-            ? computeVolumeProfile(candles: candles, bucketCount: bucketCount, hvnThreshold: hvnThreshold)
-            : nil
-        let volSMAs = vpData?.volumeSMAs ?? []
-        let hvnRanges = vpData?.hvnRanges ?? []
+        for index in 0..<(candles.count - periods - 1) {
+            let origin = candles[index]
+            let breakIndex = index + periods
+            guard let atrValue = atr[breakIndex], atrValue > 0 else { continue }
+            let close = candles[breakIndex].close
+            let bullish = origin.close < origin.open
+            let bearish = origin.close > origin.open
+            guard bullish || bearish else { continue }
 
-        // ── Stage 1: detect zones ──────────────────────────────────
-        // Each zone starts as `.fresh`; stage 2 updates status.
-        struct DetectedZone {
-            let index: Int
-            let high: Double
-            let low: Double
-            let isBullish: Bool
-        }
-        var detected: [DetectedZone] = []
+            let directionalCandles = candles[(index + 1)...breakIndex].filter {
+                bullish ? $0.close > $0.open : $0.close < $0.open
+            }.count
+            // Strong moves may contain a small pause; demand a decisive
+            // majority rather than an unrealistically perfect colour run.
+            guard directionalCandles >= max(1, Int(ceil(Double(periods) * 0.7))) else { continue }
+            let move = bullish ? close - origin.close : origin.close - close
+            guard move > 0, move >= atrValue * atrMultiplier else { continue }
+            let movePct = move / max(abs(origin.close), .leastNonzeroMagnitude) * 100
+            guard movePct >= threshold else { continue }
 
-        for e in (periods + 1)..<n {
-            let obIdx = e - (periods + 1)
-            let ob = candles[obIdx]
-            guard ob.close != 0 else { continue }
+            let structureStart = max(0, index - periods)
+            let prior = candles[structureStart...index]
+            let brokeStructure = bullish
+                ? close > prior.map(\.high).max()!
+                : close < prior.map(\.low).min()!
+            guard brokeStructure else { continue }
 
-            let absMove = abs(ob.close - candles[e - 1].close) / ob.close * 100
-            guard absMove >= threshold else { continue }
-
-            var up = 0, down = 0
-            for k in (obIdx + 1)...(e - 1) {
-                if candles[k].close > candles[k].open { up += 1 }
-                else if candles[k].close < candles[k].open { down += 1 }
-            }
-
-            if ob.close < ob.open, up == periods {
-                let zHigh = useWicks ? ob.high : ob.open
-                let zLow = ob.low
-                if detectSteroids {
-                    let obVol = ob.volume ?? 0
-                    let avgVol = volSMAs[obIdx]
-                    let isHighVolume = obVol >= avgVol * volumeMultiplier
-                    let zoneRange = zLow...zHigh
-                    let overlapsHVN = hvnRanges.contains { zoneRange.overlaps($0) }
-                    guard isHighVolume || overlapsHVN else { continue }
-                }
-                detected.append(DetectedZone(index: obIdx, high: zHigh, low: zLow, isBullish: true))
-            }
-            else if ob.close > ob.open, down == periods {
-                let zHigh = ob.high
-                let zLow = useWicks ? ob.low : ob.open
-                if detectSteroids {
-                    let obVol = ob.volume ?? 0
-                    let avgVol = volSMAs[obIdx]
-                    let isHighVolume = obVol >= avgVol * volumeMultiplier
-                    let zoneRange = zLow...zHigh
-                    let overlapsHVN = hvnRanges.contains { zoneRange.overlaps($0) }
-                    guard isHighVolume || overlapsHVN else { continue }
-                }
-                detected.append(DetectedZone(index: obIdx, high: zHigh, low: zLow, isBullish: false))
-            }
+            let high = bullish ? (useWicks ? origin.high : origin.open) : origin.high
+            let low = bullish ? origin.low : (useWicks ? origin.low : origin.open)
+            let strength = min(25, Int((move / atrValue - atrMultiplier) * 10))
+            let quality = min(100, 75 + max(0, strength)) // structure + ATR are mandatory
+            detected.append((index, breakIndex, high, low, bullish, move / atrValue, quality))
         }
 
-        guard !detected.isEmpty else { return [] }
+        // Lifecycle scanning is proportional to candidates × bars. The chart
+        // only renders recent actionable blocks, so bound historical work.
+        detected = Array(detected.suffix(max(1, maxCandidates)))
+        if detectSteroids {
+            detected = detected.filter { candidate in
+                let vp = computeVolumeProfile(candles: candles, endIndex: candidate.breakIndex, candidateIndex: candidate.index, bucketCount: bucketCount, hvnThreshold: hvnThreshold)
+                guard vp.hasReliableVolume,
+                      let average = vp.priorVolumeSMA, average > 0,
+                      let volume = candles[candidate.index].volume, volume > 0 else { return false }
+                let highVolume = volume >= average * volumeMultiplier
+                let inHVN = vp.hvnRanges.contains { (candidate.low...candidate.high).overlaps($0) }
+                return highVolume && inHVN
+            }
+        }
+        return applyLifecycle(candles: candles, detected: detected)
+    }
 
-        // ── Stage 2: single forward pass for exhaustion ────────────
-        // Walk each candle once, updating test counts and exhaustion
-        // status for every zone simultaneously. O(n × zones) total but
-        // each candle is visited once — eliminates the prior O(n²) that
-        // re-scanned the tail for every zone independently.
-        var testCounts = [Int](repeating: 0, count: detected.count)
-        var statuses = [ExhaustionStatus](repeating: .fresh, count: detected.count)
-
-        for ci in 0..<candles.count {
-            let c = candles[ci]
-            for zi in 0..<detected.count {
-                guard statuses[zi] != .exhausted else { continue }
-                let z = detected[zi]
-                let startIdx = z.index + periods + 1
-                guard ci >= startIdx else { continue }
-
-                if z.isBullish {
-                    if c.low <= z.high && c.high >= z.low {
-                        testCounts[zi] += 1
-                        statuses[zi] = .tested
-                    }
-                    if c.close < z.low {
-                        statuses[zi] = .exhausted
-                    }
-                } else {
-                    if c.high >= z.low && c.low <= z.high {
-                        testCounts[zi] += 1
-                        statuses[zi] = .tested
-                    }
-                    if c.close > z.high {
-                        statuses[zi] = .exhausted
-                    }
+    private static func applyLifecycle(
+        candles: [Candle],
+        detected: [(index: Int, breakIndex: Int, high: Double, low: Double, bullish: Bool, impulseATR: Double, quality: Int)]
+    ) -> [Zone] {
+        detected.map { item in
+            var status: ExhaustionStatus = .fresh, tests = 0
+            if item.breakIndex + 1 < candles.count {
+                for candle in candles[(item.breakIndex + 1)...] {
+                    if candle.low <= item.high && candle.high >= item.low { tests += 1; status = .tested }
+                    if item.bullish ? candle.close < item.low : candle.close > item.high { status = .exhausted; break }
                 }
             }
+            return Zone(index: item.index, breakIndex: item.breakIndex, high: item.high, low: item.low,
+                        isBullish: item.bullish, impulseATR: item.impulseATR, quality: item.quality,
+                        status: status, testCount: tests)
         }
+    }
 
-        // ── Assemble results ───────────────────────────────────────
-        return (0..<detected.count).map { i in
-            let z = detected[i]
-            return Zone(
-                index: z.index,
-                high: z.high,
-                low: z.low,
-                isBullish: z.isBullish,
-                status: statuses[i],
-                testCount: testCounts[i]
-            )
+    private static func atrSeries(_ candles: [Candle], period: Int) -> [Double?] {
+        var output = [Double?](repeating: nil, count: candles.count), ranges: [Double] = []
+        for i in candles.indices {
+            let previous = i > 0 ? candles[i - 1].close : candles[i].close
+            ranges.append(max(candles[i].high - candles[i].low, abs(candles[i].high - previous), abs(candles[i].low - previous)))
+            guard i >= period - 1 else { continue }
+            output[i] = ranges[(i - period + 1)...i].reduce(0, +) / Double(period)
         }
+        return output
     }
 }

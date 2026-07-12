@@ -26,6 +26,9 @@ enum SteroidOrderBlocks {
         let isBullish: Bool
         let volume: Double
         let volumeAvg: Double
+        let hasHighRelativeVolume: Bool
+        let hasHVN: Bool
+        let quality: Int
         let status: ExhaustionStatus
         let testCount: Int
         
@@ -52,32 +55,39 @@ enum SteroidOrderBlocks {
     ) -> [Zone] {
         // Step 1: Compute standard order blocks (without steroid filtering).
         let standardZones = OrderBlocks.compute(
-            candles, periods: periods, threshold: threshold, useWicks: useWicks
+            candles, periods: periods, threshold: threshold, useWicks: useWicks,
+            maxCandidates: 24
         )
         guard !standardZones.isEmpty, !candles.isEmpty else { return [] }
 
-        // Step 2: Shared volume profile data — computed once by the helper.
-        let vp = OrderBlocks.computeVolumeProfile(
-            candles: candles, bucketCount: bucketCount, hvnThreshold: hvnThreshold
-        )
-
-        // Step 3: Filter to steroid zones and collect their indices.
+        // Step 2: Validate each block only with information known at its
+        // confirmation bar. A global, present-day profile would make past
+        // blocks change qualification as new candles arrive.
         struct Candidate {
             let zone: OrderBlocks.Zone
             let obVol: Double
             let avgVol: Double
+            let hasHighRelativeVolume: Bool
+            let hasHVN: Bool
         }
         var candidates: [Candidate] = []
         for zone in standardZones {
             let obIdx = zone.index
             guard obIdx < candles.count else { continue }
+            let vp = OrderBlocks.computeVolumeProfile(
+                candles: candles, endIndex: zone.breakIndex, candidateIndex: obIdx,
+                bucketCount: bucketCount, hvnThreshold: hvnThreshold
+            )
             let obVol = candles[obIdx].volume ?? 0
-            let avgVol = vp.volumeSMAs[obIdx]
-            let isHighVolume = obVol >= avgVol * volumeMultiplier
+            let avgVol = vp.priorVolumeSMA ?? 0
+            let isHighVolume = obVol > 0 && avgVol > 0 && obVol >= avgVol * volumeMultiplier
             let zoneRange = zone.low...zone.high
             let overlapsHVN = vp.hvnRanges.contains { zoneRange.overlaps($0) }
-            if !detectSteroids || isHighVolume || overlapsHVN {
-                candidates.append(Candidate(zone: zone, obVol: obVol, avgVol: avgVol))
+            // Strict mode requires both independent validators. If the feed
+            // has no usable volume, no "Steroid" badge is fabricated.
+            if !detectSteroids || (vp.hasReliableVolume && isHighVolume && overlapsHVN) {
+                candidates.append(Candidate(zone: zone, obVol: obVol, avgVol: avgVol,
+                                            hasHighRelativeVolume: isHighVolume, hasHVN: overlapsHVN))
             }
         }
         guard !candidates.isEmpty else { return [] }
@@ -124,6 +134,9 @@ enum SteroidOrderBlocks {
                 isBullish: c.zone.isBullish,
                 volume: c.obVol,
                 volumeAvg: c.avgVol,
+                hasHighRelativeVolume: c.hasHighRelativeVolume,
+                hasHVN: c.hasHVN,
+                quality: min(100, c.zone.quality + (c.hasHighRelativeVolume ? 12 : 0) + (c.hasHVN ? 13 : 0)),
                 status: statuses[i],
                 testCount: testCounts[i]
             )

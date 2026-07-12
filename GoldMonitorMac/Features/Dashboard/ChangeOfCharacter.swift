@@ -49,10 +49,17 @@ enum ChangeOfCharacter {
         /// The swing level that was broken — drawn as a dashed rule from
         /// the broken pivot across to the break bar.
         let brokenLevel: Double
-        /// Upper boundary of the confluence zone.
+        /// Upper display bound: the union of the constituent layers, used so
+        /// the chart's auto-Y-domain does not clip an optional FVG/iFVG.
         let high: Double
-        /// Lower boundary of the confluence zone.
+        /// Lower display bound; see `high`.
         let low: Double
+        /// The actual actionable band: the OB∩FVG overlap when present,
+        /// otherwise the raw order block. `low`/`high` above are deliberately
+        /// wider display bounds so all optional layers remain inside the chart
+        /// domain; alerts and lifecycle checks must use this pair instead.
+        let confluenceLow: Double
+        let confluenceHigh: Double
         /// Bullish (demand) zone vs bearish (supply) zone.
         let isBullish: Bool
         /// True when an FVG overlapped the order block — the zone was
@@ -84,7 +91,7 @@ enum ChangeOfCharacter {
         let ifvgIndex: Int?
 
         var id: String { "\(chochIndex)-\(isBullish ? "bull" : "bear")" }
-        var mid: Double { (high + low) / 2 }
+        var mid: Double { (confluenceHigh + confluenceLow) / 2 }
     }
 
     /// Scan `candles` for CHoCH confluence zones.
@@ -133,14 +140,33 @@ enum ChangeOfCharacter {
         var trend = 0                                   // +1 up, -1 down, 0 unknown
         var activeHigh: (bar: Int, price: Double)? = nil // resistance to break
         var activeLow:  (bar: Int, price: Double)? = nil // support to break
+        var previousHigh: (bar: Int, price: Double)? = nil
+        var previousLow: (bar: Int, price: Double)? = nil
         var pi = 0
 
         for j in 0..<n {
             // Activate every pivot confirmed by bar j.
             while pi < ordered.count && ordered[pi].barIndex + swingLength <= j {
                 let p = ordered[pi]; pi += 1
-                if p.isHigh { activeHigh = (p.barIndex, p.price) }
-                else        { activeLow  = (p.barIndex, p.price) }
+                if p.isHigh {
+                    previousHigh = activeHigh
+                    activeHigh = (p.barIndex, p.price)
+                } else {
+                    previousLow = activeLow
+                    activeLow = (p.barIndex, p.price)
+                }
+
+                // Do not infer direction from a single broken level. A
+                // trend exists only after both sides of the swing sequence
+                // agree: HH+HL for bullish structure or LL+LH for bearish.
+                if let high = activeHigh, let priorHigh = previousHigh,
+                   let low = activeLow, let priorLow = previousLow {
+                    if high.price > priorHigh.price && low.price > priorLow.price {
+                        trend = 1
+                    } else if high.price < priorHigh.price && low.price < priorLow.price {
+                        trend = -1
+                    }
+                }
             }
 
             let close = candles[j].close
@@ -182,12 +208,17 @@ enum ChangeOfCharacter {
 
             // Order block = last opposite-colour candle before the impulse.
             // Bullish CHoCH ⇒ up impulse ⇒ OB is the last DOWN candle.
-            var obIdx = breakBar
-            if ev.isBullish {
-                while obIdx > legStart && candles[obIdx].close >= candles[obIdx].open { obIdx -= 1 }
-            } else {
-                while obIdx > legStart && candles[obIdx].close <= candles[obIdx].open { obIdx -= 1 }
+            var obIdx: Int?
+            for i in stride(from: breakBar, through: legStart, by: -1) {
+                let candle = candles[i]
+                if ev.isBullish ? candle.close < candle.open : candle.close > candle.open {
+                    obIdx = i
+                    break
+                }
             }
+            // An order block is explicitly an opposite-colour origin candle;
+            // never substitute the leg-start pivot when no such candle exists.
+            guard let obIdx else { continue }
             let obHigh = candles[obIdx].high
             let obLow  = candles[obIdx].low
 
@@ -229,7 +260,7 @@ enum ChangeOfCharacter {
 
             // Same-direction FVG for display: prefer one overlapping the OB
             // (that's the confluence), else the most recent one.
-            let overlapping = sameDir.first { $0.high >= obLow && $0.low <= obHigh }
+            let overlapping = sameDir.last { $0.high >= obLow && $0.low <= obHigh }
             let fvg = overlapping ?? sameDir.last
             let ifvg = inverted.last
             let hasFVG = overlapping != nil
@@ -279,6 +310,8 @@ enum ChangeOfCharacter {
                 brokenLevel: ev.brokenLevel,
                 high: boundHigh,
                 low: boundLow,
+                confluenceLow: zoneLow,
+                confluenceHigh: zoneHigh,
                 isBullish: ev.isBullish,
                 hasFVG: hasFVG,
                 status: status,

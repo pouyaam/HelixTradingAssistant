@@ -1637,7 +1637,7 @@ struct ChartView: View {
                 borderOpacity: 0.7,
                 borderStyle: StrokeStyle(lineWidth: 1),
                 midLineStyle: StrokeStyle(lineWidth: 1, dash: [3, 3]),
-                labelText: zone.isBullish ? "OB↑" : "OB↓"
+                labelText: "\(zone.isBullish ? "OB↑" : "OB↓") · Q\(zone.quality)"
             )
         case .tested:
             return OrderOBStyle(
@@ -1768,7 +1768,7 @@ struct ChartView: View {
                 borderOpacity: 0.85,
                 borderStyle: StrokeStyle(lineWidth: 1.2),
                 midLineStyle: StrokeStyle(lineWidth: 1.2, dash: [4, 2]),
-                labelText: zone.isBullish ? "⚡ SOB↑" : "⚡ SOB↓"
+                labelText: "\(zone.isBullish ? "⚡ SOB↑" : "⚡ SOB↓") · Q\(zone.quality) RVOL+HVN"
             )
         case .tested:
             return SteroidOBStyle(
@@ -1778,7 +1778,7 @@ struct ChartView: View {
                 borderOpacity: 0.45,
                 borderStyle: StrokeStyle(lineWidth: 1.0, dash: [3, 3]),
                 midLineStyle: StrokeStyle(lineWidth: 1.0, dash: [2, 4]),
-                labelText: zone.isBullish ? "⚡ SOB↑ · Tested" : "⚡ SOB↓ · Tested"
+                labelText: "\(zone.isBullish ? "⚡ SOB↑" : "⚡ SOB↓") · Q\(zone.quality) Tested"
             )
         case .exhausted:
             return SteroidOBStyle(
@@ -3667,4 +3667,3 @@ struct ChartView: View {
         return f
     }()
 }
-

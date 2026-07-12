@@ -403,8 +403,8 @@ final class AlertStore: ObservableObject {
                 case .mitigated: stage = .exhausted
                 }
                 return BlockZoneSnapshot(
-                    key: BlockZoneSnapshot.stableKey(isBullish: z.isBullish, high: z.high, low: z.low),
-                    isBullish: z.isBullish, high: z.high, low: z.low, stage: stage
+                    key: BlockZoneSnapshot.stableKey(isBullish: z.isBullish, high: z.confluenceHigh, low: z.confluenceLow),
+                    isBullish: z.isBullish, high: z.confluenceHigh, low: z.confluenceLow, stage: stage
                 )
             },
             namespace: "choch", label: "CHoCH", category: .changeOfCharacter,

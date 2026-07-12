@@ -57,10 +57,11 @@ enum SonarlabOrderBlocks {
         // Need at least 16 bars: 4 for ROC lookback + up to 15 for OB search + 1 eval.
         guard candles.count >= 16, sensitivity > 0 else { return [] }
 
-        // Mirrors Pine's `sens /= 100` — the UI/config value is the raw
-        // Pine `input.int` (e.g. 26), but `pc` below is already a percentage,
-        // so the threshold must be scaled down to match.
-        let sens = sensitivity / 100
+        // `pc` is expressed as a percentage (`* 100` below), therefore the
+        // user-facing threshold is compared in the same unit. Dividing the
+        // default 26 by 100 previously made a 0.26% move trigger a setting
+        // labelled 26, producing far too many zones.
+        let sens = sensitivity
         var zones: [Zone] = []
         // Track the bar index of the last trigger to enforce the 5-bar cooldown.
         var lastTriggerIndex: Int = -10

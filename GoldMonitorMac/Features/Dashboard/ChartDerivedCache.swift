@@ -37,6 +37,27 @@ import Combine
 @MainActor
 final class ChartDerivedCache: ObservableObject {
 
+    /// The current bucket is revised in place by live feeds. Count and first
+    /// timestamp alone therefore cannot safely cache price-action overlays:
+    /// a wick can retest/invalidate a zone without adding a new candle.
+    private struct CandleTail: Equatable {
+        let id: TimeInterval
+        let open: Double
+        let high: Double
+        let low: Double
+        let close: Double
+        let volume: Double?
+
+        init(_ candle: Candle?) {
+            id = candle?.id.timeIntervalSince1970 ?? 0
+            open = candle?.open ?? 0
+            high = candle?.high ?? 0
+            low = candle?.low ?? 0
+            close = candle?.close ?? 0
+            volume = candle?.volume
+        }
+    }
+
     /// One async-memoized slot: `signature` is the last input we
     /// computed for, `value` is the most recent result (possibly
     /// stale while a fresh compute is in flight). Marked
@@ -324,6 +345,7 @@ final class ChartDerivedCache: ObservableObject {
     private struct OBSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
+        let tail: CandleTail
         let periods: Int
         let threshold: Double
         let useWicks: Bool
@@ -341,6 +363,7 @@ final class ChartDerivedCache: ObservableObject {
         let sig = OBSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            tail: CandleTail(candles.last),
             periods: periods,
             threshold: threshold,
             useWicks: useWicks,
@@ -362,6 +385,7 @@ final class ChartDerivedCache: ObservableObject {
     private struct SteroidOBSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
+        let tail: CandleTail
         let periods: Int
         let threshold: Double
         let useWicks: Bool
@@ -381,6 +405,7 @@ final class ChartDerivedCache: ObservableObject {
         let sig = SteroidOBSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            tail: CandleTail(candles.last),
             periods: periods,
             threshold: threshold,
             useWicks: useWicks,
@@ -404,6 +429,7 @@ final class ChartDerivedCache: ObservableObject {
     private struct FVGSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
+        let tail: CandleTail
         let threshold: Double
     }
     private let fvgSlot = Slot<FVGSig, [FairValueGap.Zone]>([])
@@ -412,6 +438,7 @@ final class ChartDerivedCache: ObservableObject {
         let sig = FVGSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            tail: CandleTail(candles.last),
             threshold: threshold
         )
         return resolve(fvgSlot, signature: sig) {
@@ -424,6 +451,7 @@ final class ChartDerivedCache: ObservableObject {
     private struct SonarlabOBSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
+        let tail: CandleTail
         let sensitivity: Double
         let mitigationType: String
     }
@@ -437,6 +465,7 @@ final class ChartDerivedCache: ObservableObject {
         let sig = SonarlabOBSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            tail: CandleTail(candles.last),
             sensitivity: sensitivity,
             mitigationType: mitigationType.rawValue
         )
@@ -454,7 +483,7 @@ final class ChartDerivedCache: ObservableObject {
     private struct CHoCHSig: Equatable {
         let count: Int
         let firstTS: TimeInterval
-        let lastClose: Double
+        let tail: CandleTail
         let swingLength: Int
         let minSwingPct: Double
         let requireFVG: Bool
@@ -462,9 +491,9 @@ final class ChartDerivedCache: ObservableObject {
     }
     private let chochSlot = Slot<CHoCHSig, [ChangeOfCharacter.Zone]>([])
 
-    /// Memoized CHoCH detection. Folds the last bar's close into the
-    /// signature so the live in-progress bar closing beyond a protected
-    /// swing (i.e. a CHoCH forming right now) re-runs detection.
+    /// Memoized CHoCH detection. Folds the entire last bar into the
+    /// signature so a live wick/volume update can refresh retests and
+    /// invalidations even before the current bucket closes.
     func changeOfCharacter(
         candles: [Candle],
         swingLength: Int,
@@ -475,7 +504,7 @@ final class ChartDerivedCache: ObservableObject {
         let sig = CHoCHSig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            lastClose: candles.last?.close ?? 0,
+            tail: CandleTail(candles.last),
             swingLength: swingLength,
             minSwingPct: minSwingPct,
             requireFVG: requireFVG,
