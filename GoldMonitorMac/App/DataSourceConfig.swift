@@ -116,6 +116,17 @@ final class DataSourceConfig: ObservableObject {
         save()
     }
 
+    /// Persist a session cookie captured by the in-app Faraz login flow
+    /// (`FarazLoginSheet`). Subsequent Faraz requests read `farazCookie`
+    /// fresh each call, so the next scheduled tick picks this up; the
+    /// scheduler also observes `$farazCookie` to restart the live WS.
+    func setFarazCookie(_ cookie: String) {
+        let trimmed = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed != farazCookie else { return }
+        farazCookie = trimmed
+        save()
+    }
+
     // ── Persistence ────────────────────────────────────────────────
 
     private struct Stored: Codable {

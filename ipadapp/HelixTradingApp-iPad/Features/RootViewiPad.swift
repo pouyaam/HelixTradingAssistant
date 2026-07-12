@@ -10,6 +10,9 @@ import SwiftUI
 struct RootViewiPad: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
 
+    /// Drives the in-app Faraz re-login sheet when a 401 is reported.
+    @ObservedObject private var farazAuth = FarazAuthCoordinator.shared
+
     var body: some View {
         Group {
             if sizeClass == .compact {
@@ -19,6 +22,13 @@ struct RootViewiPad: View {
             }
         }
         .provideAdaptiveMetrics()
+        .sheet(isPresented: $farazAuth.isPresentingLogin) {
+            FarazLoginSheet(
+                reason: farazAuth.lastReason,
+                onCapture: { farazAuth.completeLogin(cookieHeader: $0) },
+                onCancel: { farazAuth.cancel() }
+            )
+        }
     }
 }
 

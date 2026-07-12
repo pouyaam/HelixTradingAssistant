@@ -82,7 +82,19 @@ struct DataSourcesCard: View {
                     .help(showFarazCookie ? "Hide cookie" : "Show cookie")
                 }
                 .onChange(of: farazCookieDraft) { _ in isDirty = true }
-                Text("In a logged-in faraz.io tab open DevTools → Network → any request → Headers, copy the full Cookie value and paste it here. Polled every 10s. Drives gold + BTC/SOL/ETH from Faraz. Changing the source clears those pairs' stored bars and refetches.")
+                Button {
+                    FarazAuthCoordinator.shared.presentLoginManually()
+                } label: {
+                    Label("Log in to Faraz…", systemImage: "person.crop.circle.badge.checkmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Theme.accentGradient))
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 2)
+                Text("Log in above to capture your session automatically — or paste the Cookie header manually (DevTools → Network → any request → Headers). Faraz is polled every 10s and drives gold + BTC/SOL/ETH. A 401 re-opens the login automatically.")
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.Color.textMuted)
 

@@ -87,9 +87,13 @@ enum FarazHistorySource {
 
         guard let http = response as? HTTPURLResponse else { throw FarazError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else {
-            // 401 here almost always means the cookie expired — make that
-            // explicit so the UI can nudge the user to re-paste it.
-            if http.statusCode == 401 { throw FarazError.unauthorized }
+            // 401 here almost always means the cookie expired. Trigger the
+            // in-app re-login flow (opens a faraz.io WKWebView, captures a
+            // fresh session cookie) and surface the explicit error.
+            if http.statusCode == 401 {
+                FarazAuthCoordinator.shared.reportUnauthorized()
+                throw FarazError.unauthorized
+            }
             throw FarazError.http(status: http.statusCode)
         }
 

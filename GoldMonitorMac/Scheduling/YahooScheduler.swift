@@ -90,6 +90,11 @@ final class YahooScheduler: ObservableObject {
     /// change we clear the ounce bars and refetch from the new upstream.
     private var goldSourceCancellable: AnyCancellable?
 
+    /// Combine subscription to `DataSourceConfig.$farazCookie`. A fresh
+    /// cookie (e.g. captured by the in-app re-login flow after a 401)
+    /// restarts the Faraz WS with the new credential and backfills.
+    private var farazCookieCancellable: AnyCancellable?
+
     /// Active data source, read live from the shared config (both this
     /// scheduler and the config are `@MainActor`, so this is safe).
     private var goldSource: GoldDataSource { DataSourceConfig.shared.goldSource }
@@ -423,6 +428,19 @@ final class YahooScheduler: ObservableObject {
                 Task { await self.switchGoldSource(repo: repo) }
             }
 
+        // Watch for a fresh Faraz cookie (the in-app re-login flow saves one
+        // after a 401). Restart the WS with the new credential and backfill
+        // so live data resumes without a source switch. Only relevant while
+        // Faraz is the active source.
+        farazCookieCancellable = DataSourceConfig.shared.$farazCookie
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                guard DataSourceConfig.shared.goldSource == .faraz else { return }
+                Task { await self.reloadFarazAfterAuth(repo: repo) }
+            }
+
         // 2) Bootstrap + polling/sync loop.
         // Mac: dual-speed — selected pair at 5s, others at 60min.
         // iPad: single loop via focusedPairID (already gates pairs).
@@ -460,6 +478,21 @@ final class YahooScheduler: ObservableObject {
         stopFarazStream()
         goldSourceCancellable?.cancel()
         goldSourceCancellable = nil
+        farazCookieCancellable?.cancel()
+        farazCookieCancellable = nil
+    }
+
+    /// Resume the Faraz feed after a fresh cookie is captured (in-app
+    /// re-login). Unlike `switchGoldSource` this does NOT wipe stored bars —
+    /// the source is unchanged, only the credential — so we just restart the
+    /// live WS and backfill each Faraz pair, then nudge the dashboard.
+    @MainActor
+    private func reloadFarazAfterAuth(repo: OHLCRepo) async {
+        startFarazStream(repo: repo)
+        for pairID in farazPairIDs {
+            await backfillAll(pairID: pairID)
+        }
+        dataResetToken &+= 1
     }
 
     // ── Gold-source switch (clear + refetch) ──────────────────────────
