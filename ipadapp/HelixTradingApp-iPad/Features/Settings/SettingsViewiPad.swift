@@ -100,6 +100,21 @@ struct SettingsViewiPad: View {
                             .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Color.surface))
                             .onChange(of: farazTokenDraft) { _ in dataDirty = true }
 
+                        Button {
+                            FarazAuthCoordinator.shared.presentLoginManually()
+                        } label: {
+                            Label("Log in to Faraz…", systemImage: "person.crop.circle.badge.checkmark")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 14)
+                                .frame(height: 40)
+                                .background(Capsule().fill(Theme.accentGradient))
+                        }
+                        .buttonStyle(.plain)
+                        Text("Log in to capture your session automatically. A 401 re-opens this login on its own.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.Color.textMuted)
+
                         Text("FARAZ API BASE URL")
                             .font(.system(size: 9, weight: .bold))
                             .tracking(0.8)

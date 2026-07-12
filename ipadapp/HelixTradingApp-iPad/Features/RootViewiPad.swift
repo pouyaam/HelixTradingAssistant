@@ -1,41 +1,156 @@
 import SwiftUI
 
+/// Adaptive root. Picks the navigation shell by horizontal size class:
+/// - **regular** (iPad, big iPhone landscape) → `SplitRootView`
+///   (`NavigationSplitView`: sidebar with nav + live watchlist, detail pane).
+/// - **compact** (iPhone portrait) → `TabRootView` (bottom `TabView`).
+///
+/// Both drive the same `AppState.selectedSidebarItem` / `selectedPairID`,
+/// so no screen logic is duplicated.
 struct RootViewiPad: View {
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
+    /// Drives the in-app Faraz re-login sheet when a 401 is reported.
+    @ObservedObject private var farazAuth = FarazAuthCoordinator.shared
+
+    var body: some View {
+        Group {
+            if sizeClass == .compact {
+                TabRootView()
+            } else {
+                SplitRootView()
+            }
+        }
+        .provideAdaptiveMetrics()
+        .sheet(isPresented: $farazAuth.isPresentingLogin) {
+            FarazLoginSheet(
+                reason: farazAuth.lastReason,
+                onCapture: { farazAuth.completeLogin(cookieHeader: $0) },
+                onCancel: { farazAuth.cancel() }
+            )
+        }
+    }
+}
+
+// MARK: - Shared detail routing
+
+/// Maps a `SidebarItem` to its screen. Shared by both shells.
+@ViewBuilder
+func destinationView(for item: SidebarItem?) -> some View {
+    switch item {
+    case .dashboard, .none: DashboardViewiPad()
+    case .news:             NewsView()
+    case .portfolio:        AnalyticsView()
+    case .journal:          JournalView()
+    case .inbox:            NotificationInboxView()
+    case .settings:         SettingsViewiPad()
+    }
+}
+
+// MARK: - Regular (iPad) shell
+
+private struct SplitRootView: View {
     @EnvironmentObject private var app: AppState
-    @EnvironmentObject private var yahoo: YahooScheduler
 
     var body: some View {
         NavigationSplitView {
             List(selection: $app.selectedSidebarItem) {
-                ForEach(SidebarItem.allCases) { item in
-                    Label(item.label, systemImage: item.symbol)
-                        .tag(item)
+                Section {
+                    ForEach(SidebarItem.allCases) { item in
+                        Label(item.label, systemImage: item.symbol)
+                            .tag(item)
+                    }
+                } header: {
+                    Text("Navigate")
+                }
+
+                Section {
+                    ForEach(app.pairs) { pair in
+                        Button {
+                            app.selectedPairID = pair.id
+                            app.selectedSidebarItem = .dashboard
+                        } label: {
+                            PairRowiPad(
+                                pair: pair,
+                                isSelected: pair.id == app.selectedPairID,
+                                livePrice: nil
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(
+                            pair.id == app.selectedPairID
+                                ? Theme.Color.surfaceMax.opacity(0.4)
+                                : Color.clear
+                        )
+                    }
+                } header: {
+                    Text("Watchlist")
                 }
             }
             .listStyle(.sidebar)
             .navigationTitle("Helix Trading")
         } detail: {
-            detailView
+            destinationView(for: app.selectedSidebarItem)
                 .navigationBarHidden(true)
         }
     }
+}
 
-    @ViewBuilder
-    private var detailView: some View {
-        switch app.selectedSidebarItem {
-        case .dashboard, .none:
-            DashboardViewiPad()
-        case .news:
-            NewsView()
-        case .portfolio:
-            AnalyticsView()
-        case .journal:
-            JournalView()
-        case .inbox:
-            NotificationInboxView()
-        case .settings:
-            SettingsViewiPad()
+// MARK: - Compact (iPhone) shell
+
+private struct TabRootView: View {
+    @EnvironmentObject private var app: AppState
+    @State private var tab: Tab = .chart
+
+    private enum Tab: Hashable { case chart, markets, journal, inbox, more }
+
+    var body: some View {
+        TabView(selection: $tab) {
+            NavigationStack {
+                DashboardViewiPad()
+                    .navigationBarHidden(true)
+            }
+            .tabItem { Label("Chart", systemImage: "chart.line.uptrend.xyaxis") }
+            .tag(Tab.chart)
+
+            NavigationStack {
+                MarketsView(onPick: { tab = .chart })
+            }
+            .tabItem { Label("Markets", systemImage: "list.bullet") }
+            .tag(Tab.markets)
+
+            NavigationStack { JournalView() }
+                .tabItem { Label("Journal", systemImage: "book.closed.fill") }
+                .tag(Tab.journal)
+
+            NavigationStack { NotificationInboxView() }
+                .tabItem { Label("Inbox", systemImage: "bell.fill") }
+                .tag(Tab.inbox)
+
+            NavigationStack { MoreView() }
+                .tabItem { Label("More", systemImage: "ellipsis.circle.fill") }
+                .tag(Tab.more)
         }
+        .tint(Theme.Color.accentStart)
+    }
+}
+
+/// Compact-only overflow list for the secondary destinations that don't
+/// earn a first-class tab.
+private struct MoreView: View {
+    var body: some View {
+        List {
+            NavigationLink { NewsView() } label: {
+                Label("News", systemImage: "newspaper.fill")
+            }
+            NavigationLink { AnalyticsView() } label: {
+                Label("Portfolio", systemImage: "briefcase.fill")
+            }
+            NavigationLink { SettingsViewiPad() } label: {
+                Label("Settings", systemImage: "gearshape.fill")
+            }
+        }
+        .navigationTitle("More")
     }
 }
 

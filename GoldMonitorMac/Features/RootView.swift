@@ -7,6 +7,9 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var app: AppState
 
+    /// Drives the in-app Faraz re-login sheet when a 401 is reported.
+    @ObservedObject private var farazAuth = FarazAuthCoordinator.shared
+
     /// One-shot guard so we only auto-toggle fullscreen on the very first
     /// `WindowConfigurator` callback. Without this, things like sheet
     /// dismissals (which can re-trigger the view's NSView lifecycle)
@@ -65,6 +68,13 @@ struct RootView: View {
                 lastSeenVersion = AppInfo.version
                 showWhatsNew = false
             }
+        }
+        .sheet(isPresented: $farazAuth.isPresentingLogin) {
+            FarazLoginSheet(
+                reason: farazAuth.lastReason,
+                onCapture: { farazAuth.completeLogin(cookieHeader: $0) },
+                onCancel: { farazAuth.cancel() }
+            )
         }
         .onAppear {
             // Fire the What's New popup once when the running version is

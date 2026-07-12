@@ -15,6 +15,8 @@ struct DashboardViewiPad: View {
     @EnvironmentObject private var autoTrader: AutoTraderEngine
     @EnvironmentObject private var paperBalance: PaperBalance
 
+    @Environment(\.metrics) private var metrics
+
     @AppStorage("dashboard.timeframe")  private var timeframe: Timeframe = .h1
     @AppStorage("dashboard.chartType")  private var userChartType: ChartType = .candle
     @AppStorage("dashboard.showVolume") private var showVolume: Bool = true
@@ -120,6 +122,22 @@ struct DashboardViewiPad: View {
         hiddenOscillatorsRaw = s.map(\.rawValue).sorted().joined(separator: ",")
     }
 
+    /// Drives the compact-width indicator-settings sheet. Presented only when
+    /// the draggable overlay is suppressed (iPhone). Saving on dismiss mirrors
+    /// the overlay's `onDismiss`.
+    private var compactSettingsSheet: Binding<Bool> {
+        Binding(
+            get: { showIndicatorSettings && metrics.isCompact },
+            set: { newValue in
+                if !newValue {
+                    oscillatorConfig.save()
+                    showIndicatorSettings = false
+                    settingsFocusSection = nil
+                }
+            }
+        )
+    }
+
     private static func parseIndicators(_ raw: String) -> Set<IndicatorKind> {
         Set(raw.split(separator: ",").compactMap { IndicatorKind(rawValue: String($0)) })
     }
@@ -183,7 +201,8 @@ struct DashboardViewiPad: View {
                             scenario: scenario,
                             sourceHistoryEntryID: entryID
                         )
-                    }
+                    },
+                    onClose: { showAnalysis = false }
                 )
                 .environmentObject(analysisStore)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -207,8 +226,12 @@ struct DashboardViewiPad: View {
         }
         .onChange(of: userChartType) { _ in }
         .onChange(of: showVolume) { _ in }
+        // Regular width (iPad): a non-modal, draggable panel lets the user
+        // tune params while watching the chart update live. On compact
+        // (iPhone) that floating panel is wider than the screen, so we
+        // present a proper detented sheet instead.
         .overlay {
-            if showIndicatorSettings {
+            if showIndicatorSettings && !metrics.isCompact {
                 DraggableSettingsOverlay(
                     config: $oscillatorConfig,
                     focusSection: settingsFocusSection,
@@ -220,6 +243,23 @@ struct DashboardViewiPad: View {
                     }
                 )
             }
+        }
+        .sheet(isPresented: compactSettingsSheet) {
+            NavigationStack {
+                ScrollView {
+                    IndicatorSettingsBody(config: $oscillatorConfig)
+                }
+                .background(Theme.Color.surface)
+                .navigationTitle("Indicator Settings")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { compactSettingsSheet.wrappedValue = false }
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $showAlertSheet) {
             if let cur = pair {
@@ -1097,151 +1137,181 @@ struct IPadChartHeaderToolbar: View, Equatable {
     @Binding var showDebugLogSheet: Bool
     @Binding var showAlertSheet: Bool
     @Binding var isChartFullscreen: Bool
-    
+
+    @Environment(\.metrics) private var metrics
+
     var body: some View {
-        HStack(spacing: Theme.Spacing.sm) {
-            TimeframeSelector(selected: $timeframe)
-            ChartTypeToggle(selected: $userChartType, isDisabled: false)
+        // On compact width (iPhone portrait) the ~14 controls can't share one
+        // row without overflowing, so we split into a primary row (timeframe /
+        // type / Analyze) plus a horizontally scrollable secondary row of
+        // touch-sized icons. On regular width everything stays on one row.
+        if metrics.isCompact {
+            VStack(spacing: 8) {
+                HStack(spacing: Theme.Spacing.sm) {
+                    TimeframeSelector(selected: $timeframe)
+                    ChartTypeToggle(selected: $userChartType, isDisabled: false)
+                    Spacer(minLength: 8)
+                    analyzeButton
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        drawingTools
+                        deleteSelectedButton
+                        verticalDivider
+                        replayControl
+                        verticalDivider
+                        indicatorsMenu
+                        layersMenu
+                        alertsButton
+                        fullscreenButton
+                        overflowMenu
+                    }
+                    .padding(.horizontal, 2)
+                }
+            }
+        } else {
+            HStack(spacing: Theme.Spacing.sm) {
+                TimeframeSelector(selected: $timeframe)
+                ChartTypeToggle(selected: $userChartType, isDisabled: false)
+                Spacer()
+                drawingTools
+                deleteSelectedButton
+                verticalDivider
+                replayControl
+                verticalDivider
+                indicatorsMenu
+                layersMenu
+                alertsButton
+                analyzeButton
+                fullscreenButton
+                overflowMenu
+            }
+        }
+    }
 
-            Spacer()
+    // MARK: - Control groups
 
-            // Drawing tools toolbar
+    private var verticalDivider: some View {
+        Divider().frame(height: 20).background(Theme.Color.border)
+    }
+
+    private var drawingTools: some View {
+        HStack(spacing: 4) {
+            ForEach(DrawingTool.allCases.filter { $0 != .none }) { tool in
+                IconButton(
+                    systemName: tool.systemImage,
+                    isActive: activeDrawingTool == tool
+                ) {
+                    activeDrawingTool = activeDrawingTool == tool ? .none : tool
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var deleteSelectedButton: some View {
+        if selectedDrawingID != nil {
+            IconButton(systemName: "trash", tint: Theme.Color.danger) {
+                if let id = selectedDrawingID, let pairID = selectedPairID {
+                    drawingStore.remove(id: id, for: pairID)
+                    selectedDrawingID = nil
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var replayControl: some View {
+        if replay.isActive {
             HStack(spacing: 4) {
-                ForEach(DrawingTool.allCases.filter { $0 != .none }) { tool in
-                    Button {
-                        activeDrawingTool = activeDrawingTool == tool ? .none : tool
-                    } label: {
-                        Image(systemName: tool.systemImage)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(activeDrawingTool == tool ? Theme.Color.accentStart : Theme.Color.textSecondary)
-                            .frame(width: 32, height: 32)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(activeDrawingTool == tool ? Theme.Color.surfaceMax : Color.clear)
-                            )
-                    }
-                    .help(tool.label)
+                Button { replay.exit() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(Theme.Color.danger)
                 }
-                if selectedDrawingID != nil {
-                    Button {
-                        if let id = selectedDrawingID, let pairID = selectedPairID {
-                            drawingStore.remove(id: id, for: pairID)
-                            selectedDrawingID = nil
-                        }
-                    } label: {
-                        Image(systemName: "trash")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Theme.Color.danger)
-                            .frame(width: 32, height: 32)
-                    }
-                    .help("Delete selected drawing")
-                }
+                Text("REPLAY")
+                    .font(.system(size: 9, weight: .heavy))
+                    .foregroundStyle(Theme.Color.warn)
             }
+        } else {
+            IconButton(systemName: "clock.arrow.circlepath") { replay.arm() }
+        }
+    }
 
-            Divider().frame(height: 20).background(Theme.Color.border)
+    private var indicatorsMenu: some View {
+        IPadIndicatorsMenu(
+            indicatorsRaw: $indicatorsRaw,
+            oscillatorsRaw: $oscillatorsRaw,
+            hiddenIndicatorsRaw: $hiddenIndicatorsRaw,
+            hiddenOscillatorsRaw: $hiddenOscillatorsRaw,
+            showIndicatorSettings: $showIndicatorSettings
+        )
+        .equatable()
+    }
 
-            // Replay controls
-            if replay.isActive {
-                HStack(spacing: 4) {
-                    Button { replay.exit() } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 14))
-                            .foregroundStyle(Theme.Color.danger)
-                    }
-                    Text("REPLAY")
-                        .font(.system(size: 9, weight: .heavy))
-                        .foregroundStyle(Theme.Color.warn)
-                }
-            } else {
-                Button { replay.arm() } label: {
-                    Image(systemName: "clock.arrow.circlepath")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Theme.Color.textSecondary)
-                        .frame(width: 32, height: 32)
-                }
-                .help("Replay mode")
-            }
+    private var layersMenu: some View {
+        IPadLayersMenu(
+            indicatorsRaw: $indicatorsRaw,
+            hiddenIndicatorsRaw: $hiddenIndicatorsRaw,
+            oscillatorsRaw: $oscillatorsRaw,
+            hiddenOscillatorsRaw: $hiddenOscillatorsRaw,
+            srVisible: $srVisible,
+            fvgVisible: $fvgVisible,
+            supplyDemandVisible: $supplyDemandVisible,
+            scenarioVisible: $scenarioVisible,
+            altScenarioVisible: $altScenarioVisible,
+            hasSRLevels: hasSRLevels,
+            hasFVGZones: hasFVGZones,
+            hasSupplyDemandZones: hasSupplyDemandZones,
+            hasScenario: hasScenario,
+            hasAltScenario: hasAltScenario,
+            drawings: drawings,
+            selectedDrawingID: $selectedDrawingID,
+            drawingStore: drawingStore,
+            selectedPairID: selectedPairID
+        )
+        .equatable()
+    }
 
-            Divider().frame(height: 20).background(Theme.Color.border)
+    private var alertsButton: some View {
+        IconButton(systemName: "bell") { showAlertSheet = true }
+    }
 
-            // Indicators menu
-            IPadIndicatorsMenu(
-                indicatorsRaw: $indicatorsRaw,
-                oscillatorsRaw: $oscillatorsRaw,
-                hiddenIndicatorsRaw: $hiddenIndicatorsRaw,
-                hiddenOscillatorsRaw: $hiddenOscillatorsRaw,
-                showIndicatorSettings: $showIndicatorSettings
-            )
-            .equatable()
+    private var analyzeButton: some View {
+        PillButton(title: "Analyze", systemName: "sparkles") {
+            showAnalysis = true
+        }
+    }
 
-            // Layers popover
-            IPadLayersMenu(
-                indicatorsRaw: $indicatorsRaw,
-                hiddenIndicatorsRaw: $hiddenIndicatorsRaw,
-                oscillatorsRaw: $oscillatorsRaw,
-                hiddenOscillatorsRaw: $hiddenOscillatorsRaw,
-                srVisible: $srVisible,
-                fvgVisible: $fvgVisible,
-                supplyDemandVisible: $supplyDemandVisible,
-                scenarioVisible: $scenarioVisible,
-                altScenarioVisible: $altScenarioVisible,
-                hasSRLevels: hasSRLevels,
-                hasFVGZones: hasFVGZones,
-                hasSupplyDemandZones: hasSupplyDemandZones,
-                hasScenario: hasScenario,
-                hasAltScenario: hasAltScenario,
-                drawings: drawings,
-                selectedDrawingID: $selectedDrawingID,
-                drawingStore: drawingStore,
-                selectedPairID: selectedPairID
-            )
-            .equatable()
+    private var fullscreenButton: some View {
+        IconButton(
+            systemName: isChartFullscreen
+                ? "arrow.down.right.and.arrow.up.left"
+                : "arrow.up.left.and.arrow.down.right"
+        ) {
+            isChartFullscreen.toggle()
+        }
+    }
 
-            // Alerts button
-            Button { showAlertSheet = true } label: {
-                Image(systemName: "bell")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.Color.textSecondary)
-                    .frame(width: 32, height: 32)
-            }
-
-            // AI Analyze button
-            Button {
-                showAnalysis = true
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 12, weight: .bold))
-                    Text("Analyze")
-                        .font(.system(size: 12, weight: .semibold))
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(Capsule().fill(Theme.accentGradient))
-            }
-
-            // Network debug button
+    /// Secondary/rarely-used actions, consolidated out of the main row so the
+    /// chrome stays uncluttered. The network-debug tool used to sit inline as
+    /// a ladybug button on every screen — it lives here now.
+    private var overflowMenu: some View {
+        Menu {
             Button {
                 showDebugLogSheet = true
             } label: {
-                Image(systemName: "ladybug.fill")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(NetworkLog.shared.isEnabled ? Theme.Color.warn : Theme.Color.textSecondary)
-                    .frame(width: 32, height: 32)
+                Label(
+                    NetworkLog.shared.isEnabled ? "Network Debug · capturing" : "Network Debug",
+                    systemImage: "ladybug"
+                )
             }
-            .help(NetworkLog.shared.isEnabled ? "Network debug · capturing" : "Network debug")
-
-            // Fullscreen toggle
-            Button {
-                isChartFullscreen.toggle()
-            } label: {
-                Image(systemName: isChartFullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.Color.textSecondary)
-                    .frame(width: 32, height: 32)
-            }
-            .help(isChartFullscreen ? "Exit fullscreen" : "Fullscreen")
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: metrics.iconGlyph, weight: .semibold))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .frame(width: metrics.iconHit, height: metrics.iconHit)
+                .contentShape(Rectangle())
         }
     }
     
