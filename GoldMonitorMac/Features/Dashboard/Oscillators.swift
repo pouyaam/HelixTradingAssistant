@@ -146,6 +146,85 @@ struct OscillatorConfig: Codable, Equatable {
     var nyAtrMult: Double = 1.0
     var nyAMOnly: Bool = true
 
+    // SP2L defaults follow the source video: a short 2-4 bar pressure
+    // move out of balance, first-pullback limit entry, EMA(60) context,
+    // and a 1R target. Detection runs on every chart timeframe; numeric
+    // thresholds not specified by the teacher remain tunable.
+    var sp2lMinSpikeBars: Int = 2
+    var sp2lMaxSpikeBars: Int = 4
+    var sp2lRangeBars: Int = 4
+    var sp2lATRPeriod: Int = 14
+    var sp2lMinSpikeATR: Double = 1.0
+    var sp2lMaxSpikeATR: Double = 3.0
+    var sp2lMaxRangeATR: Double = 1.5
+    var sp2lMinGapPct: Double = 0.0
+    var sp2lMaxPressureGapBar: Int = 3
+    var sp2lEMAPeriod: Int = 60
+    var sp2lUseEMAContext: Bool = true
+    var sp2lMaxEMADistanceATR: Double = 1.0
+    var sp2lMaxPullbackBars: Int = 6
+    var sp2lMaxContinuationBars: Int = 10
+    var sp2lRiskReward: Double = 1.0
+    var sp2lTargetCount: Int = 1
+
+    // Pin-bar confirmation for SP2L pullbacks and BTB broken-level retests.
+    var pinBarEnableSP2L: Bool = true
+    var pinBarEnableBTB: Bool = true
+    var pinBarATRPeriod: Int = 14
+    var pinBarMinWickBodyRatio: Double = 2.0
+    var pinBarMinWickRangeRatio: Double = 0.55
+    var pinBarMaxBodyRangeRatio: Double = 0.35
+    var pinBarMinCloseLocation: Double = 0.65
+    var pinBarOppositeWickDominance: Double = 1.5
+    var pinBarTouchToleranceATR: Double = 0.10
+    var pinBarStopBufferATR: Double = 0.05
+    var pinBarMaxConfirmationBars: Int = 8
+    var pinBarBTBLookbackBars: Int = 12
+    var pinBarMinBreakoutBodyATR: Double = 0.50
+    var pinBarRiskReward: Double = 2.0
+    var pinBarMaxContinuationBars: Int = 20
+
+    // MicroMap continuation strategy. Entries and stops are confirmed by
+    // candle close; targets use the candle high/low after entry.
+    var microMapATRPeriod: Int = 14
+    var microMapMinSpikeBars: Int = 2
+    var microMapMaxSpikeBars: Int = 6
+    var microMapMinSpikeATR: Double = 1.5
+    var microMapMinDirectionalRatio: Double = 0.65
+    var microMapMinBodyRatio: Double = 0.60
+    var microMapMaxCloseFromExtreme: Double = 0.25
+    var microMapMinMicroBars: Int = 2
+    var microMapMaxMicroBars: Int = 8
+    var microMapMaxMicroRangeRatio: Double = 0.70
+    var microMapMaxRetracement: Double = 0.60
+    var microMapStructureToleranceATR: Double = 0.10
+    var microMapMaxReentryBars: Int = 8
+    var microMapRiskReward: Double = 2.0
+    var microMapNotifyEvents: Bool = true
+    var microMapConfluenceBalanceBars: Int = 4
+    var microMapConfluenceEMAPeriod: Int = 60
+    var microMapMinPressureGapPct: Double = 0.0
+    var microMapMaxPressureGapBar: Int = 3
+    var microMapRequirePressureGap: Bool = false
+    var microMapRequireKeyLevelBreak: Bool = false
+    var microMapMinConfluenceScore: Int = 0
+
+    // Major Trend Reversal: confirmed pivots define the prior channel;
+    // confirmation is a close through the neckline after the old extreme
+    // has been retested.
+    var mtrPivotDepth: Int = 3
+    var mtrATRPeriod: Int = 14
+    var mtrMinTrendLegATR: Double = 1.0
+    var mtrBreakBufferATR: Double = 0.10
+    var mtrRetestToleranceATR: Double = 0.25
+    var mtrMaxFailedBreakATR: Double = 0.75
+    var mtrMaxRetestBars: Int = 20
+    var mtrMaxConfirmationBars: Int = 20
+    var mtrStopBufferATR: Double = 0.10
+    var mtrRiskReward: Double = 2.0
+    var mtrMaxTradeBars: Int = 50
+    var mtrMaxResults: Int = 12
+
     // Fair Value Gap parameters (LuxAlgo port). `fvgThreshold` is the
     // minimum gap size as a % of the gap floor (0 = no filter, the default).
     // `fvgShowMitigated` keeps absorbed gaps visible at reduced opacity;
@@ -234,6 +313,71 @@ struct OscillatorConfig: Codable, Equatable {
         sessShowNewYork    = try c.decodeIfPresent(Bool.self,   forKey: .sessShowNewYork)    ?? true
         nyAtrMult          = try c.decodeIfPresent(Double.self, forKey: .nyAtrMult)          ?? 1.0
         nyAMOnly           = try c.decodeIfPresent(Bool.self,   forKey: .nyAMOnly)           ?? true
+        sp2lMinSpikeBars   = try c.decodeIfPresent(Int.self,    forKey: .sp2lMinSpikeBars)   ?? 2
+        sp2lMaxSpikeBars   = try c.decodeIfPresent(Int.self,    forKey: .sp2lMaxSpikeBars)   ?? 4
+        sp2lRangeBars      = try c.decodeIfPresent(Int.self,    forKey: .sp2lRangeBars)      ?? 4
+        sp2lATRPeriod      = try c.decodeIfPresent(Int.self,    forKey: .sp2lATRPeriod)      ?? 14
+        sp2lMinSpikeATR    = try c.decodeIfPresent(Double.self, forKey: .sp2lMinSpikeATR)    ?? 1.0
+        sp2lMaxSpikeATR    = try c.decodeIfPresent(Double.self, forKey: .sp2lMaxSpikeATR)    ?? 3.0
+        sp2lMaxRangeATR    = try c.decodeIfPresent(Double.self, forKey: .sp2lMaxRangeATR)    ?? 1.5
+        sp2lMinGapPct      = try c.decodeIfPresent(Double.self, forKey: .sp2lMinGapPct)      ?? 0.0
+        sp2lMaxPressureGapBar = try c.decodeIfPresent(Int.self, forKey: .sp2lMaxPressureGapBar) ?? 3
+        sp2lEMAPeriod      = try c.decodeIfPresent(Int.self,    forKey: .sp2lEMAPeriod)      ?? 60
+        sp2lUseEMAContext  = try c.decodeIfPresent(Bool.self,   forKey: .sp2lUseEMAContext)  ?? true
+        sp2lMaxEMADistanceATR = try c.decodeIfPresent(Double.self, forKey: .sp2lMaxEMADistanceATR) ?? 1.0
+        sp2lMaxPullbackBars = try c.decodeIfPresent(Int.self,   forKey: .sp2lMaxPullbackBars) ?? 6
+        sp2lMaxContinuationBars = try c.decodeIfPresent(Int.self, forKey: .sp2lMaxContinuationBars) ?? 10
+        sp2lRiskReward     = try c.decodeIfPresent(Double.self, forKey: .sp2lRiskReward)     ?? 1.0
+        sp2lTargetCount    = try c.decodeIfPresent(Int.self, forKey: .sp2lTargetCount)       ?? 1
+        pinBarEnableSP2L   = try c.decodeIfPresent(Bool.self,   forKey: .pinBarEnableSP2L)   ?? true
+        pinBarEnableBTB    = try c.decodeIfPresent(Bool.self,   forKey: .pinBarEnableBTB)    ?? true
+        pinBarATRPeriod    = try c.decodeIfPresent(Int.self,    forKey: .pinBarATRPeriod)    ?? 14
+        pinBarMinWickBodyRatio = try c.decodeIfPresent(Double.self, forKey: .pinBarMinWickBodyRatio) ?? 2.0
+        pinBarMinWickRangeRatio = try c.decodeIfPresent(Double.self, forKey: .pinBarMinWickRangeRatio) ?? 0.55
+        pinBarMaxBodyRangeRatio = try c.decodeIfPresent(Double.self, forKey: .pinBarMaxBodyRangeRatio) ?? 0.35
+        pinBarMinCloseLocation = try c.decodeIfPresent(Double.self, forKey: .pinBarMinCloseLocation) ?? 0.65
+        pinBarOppositeWickDominance = try c.decodeIfPresent(Double.self, forKey: .pinBarOppositeWickDominance) ?? 1.5
+        pinBarTouchToleranceATR = try c.decodeIfPresent(Double.self, forKey: .pinBarTouchToleranceATR) ?? 0.10
+        pinBarStopBufferATR = try c.decodeIfPresent(Double.self, forKey: .pinBarStopBufferATR) ?? 0.05
+        pinBarMaxConfirmationBars = try c.decodeIfPresent(Int.self, forKey: .pinBarMaxConfirmationBars) ?? 8
+        pinBarBTBLookbackBars = try c.decodeIfPresent(Int.self, forKey: .pinBarBTBLookbackBars) ?? 12
+        pinBarMinBreakoutBodyATR = try c.decodeIfPresent(Double.self, forKey: .pinBarMinBreakoutBodyATR) ?? 0.50
+        pinBarRiskReward = try c.decodeIfPresent(Double.self, forKey: .pinBarRiskReward) ?? 2.0
+        pinBarMaxContinuationBars = try c.decodeIfPresent(Int.self, forKey: .pinBarMaxContinuationBars) ?? 20
+        microMapATRPeriod  = try c.decodeIfPresent(Int.self,    forKey: .microMapATRPeriod)  ?? 14
+        microMapMinSpikeBars = try c.decodeIfPresent(Int.self,  forKey: .microMapMinSpikeBars) ?? 2
+        microMapMaxSpikeBars = try c.decodeIfPresent(Int.self,  forKey: .microMapMaxSpikeBars) ?? 6
+        microMapMinSpikeATR = try c.decodeIfPresent(Double.self, forKey: .microMapMinSpikeATR) ?? 1.5
+        microMapMinDirectionalRatio = try c.decodeIfPresent(Double.self, forKey: .microMapMinDirectionalRatio) ?? 0.65
+        microMapMinBodyRatio = try c.decodeIfPresent(Double.self, forKey: .microMapMinBodyRatio) ?? 0.60
+        microMapMaxCloseFromExtreme = try c.decodeIfPresent(Double.self, forKey: .microMapMaxCloseFromExtreme) ?? 0.25
+        microMapMinMicroBars = try c.decodeIfPresent(Int.self, forKey: .microMapMinMicroBars) ?? 2
+        microMapMaxMicroBars = try c.decodeIfPresent(Int.self, forKey: .microMapMaxMicroBars) ?? 8
+        microMapMaxMicroRangeRatio = try c.decodeIfPresent(Double.self, forKey: .microMapMaxMicroRangeRatio) ?? 0.70
+        microMapMaxRetracement = try c.decodeIfPresent(Double.self, forKey: .microMapMaxRetracement) ?? 0.60
+        microMapStructureToleranceATR = try c.decodeIfPresent(Double.self, forKey: .microMapStructureToleranceATR) ?? 0.10
+        microMapMaxReentryBars = try c.decodeIfPresent(Int.self, forKey: .microMapMaxReentryBars) ?? 8
+        microMapRiskReward = try c.decodeIfPresent(Double.self, forKey: .microMapRiskReward) ?? 2.0
+        microMapNotifyEvents = try c.decodeIfPresent(Bool.self, forKey: .microMapNotifyEvents) ?? true
+        microMapConfluenceBalanceBars = try c.decodeIfPresent(Int.self, forKey: .microMapConfluenceBalanceBars) ?? 4
+        microMapConfluenceEMAPeriod = try c.decodeIfPresent(Int.self, forKey: .microMapConfluenceEMAPeriod) ?? 60
+        microMapMinPressureGapPct = try c.decodeIfPresent(Double.self, forKey: .microMapMinPressureGapPct) ?? 0.0
+        microMapMaxPressureGapBar = try c.decodeIfPresent(Int.self, forKey: .microMapMaxPressureGapBar) ?? 3
+        microMapRequirePressureGap = try c.decodeIfPresent(Bool.self, forKey: .microMapRequirePressureGap) ?? false
+        microMapRequireKeyLevelBreak = try c.decodeIfPresent(Bool.self, forKey: .microMapRequireKeyLevelBreak) ?? false
+        microMapMinConfluenceScore = try c.decodeIfPresent(Int.self, forKey: .microMapMinConfluenceScore) ?? 0
+        mtrPivotDepth       = try c.decodeIfPresent(Int.self, forKey: .mtrPivotDepth) ?? 3
+        mtrATRPeriod        = try c.decodeIfPresent(Int.self, forKey: .mtrATRPeriod) ?? 14
+        mtrMinTrendLegATR   = try c.decodeIfPresent(Double.self, forKey: .mtrMinTrendLegATR) ?? 1.0
+        mtrBreakBufferATR   = try c.decodeIfPresent(Double.self, forKey: .mtrBreakBufferATR) ?? 0.10
+        mtrRetestToleranceATR = try c.decodeIfPresent(Double.self, forKey: .mtrRetestToleranceATR) ?? 0.25
+        mtrMaxFailedBreakATR = try c.decodeIfPresent(Double.self, forKey: .mtrMaxFailedBreakATR) ?? 0.75
+        mtrMaxRetestBars    = try c.decodeIfPresent(Int.self, forKey: .mtrMaxRetestBars) ?? 20
+        mtrMaxConfirmationBars = try c.decodeIfPresent(Int.self, forKey: .mtrMaxConfirmationBars) ?? 20
+        mtrStopBufferATR    = try c.decodeIfPresent(Double.self, forKey: .mtrStopBufferATR) ?? 0.10
+        mtrRiskReward       = try c.decodeIfPresent(Double.self, forKey: .mtrRiskReward) ?? 2.0
+        mtrMaxTradeBars     = try c.decodeIfPresent(Int.self, forKey: .mtrMaxTradeBars) ?? 50
+        mtrMaxResults       = try c.decodeIfPresent(Int.self, forKey: .mtrMaxResults) ?? 12
         fvgThreshold       = try c.decodeIfPresent(Double.self, forKey: .fvgThreshold)       ?? 0.0
         fvgShowMitigated   = try c.decodeIfPresent(Bool.self,   forKey: .fvgShowMitigated)   ?? true
         sonarlabSensitivity = try c.decodeIfPresent(Double.self, forKey: .sonarlabSensitivity) ?? 26.0
@@ -277,6 +421,69 @@ struct OscillatorConfig: Codable, Equatable {
         if let data = try? JSONEncoder().encode(self) {
             UserDefaults.standard.set(data, forKey: Self.storageKey)
         }
+    }
+
+    var pinBarComboConfiguration: PinBarComboSetup.Configuration {
+        var config = PinBarComboSetup.Configuration()
+        config.enableSP2L = pinBarEnableSP2L
+        config.enableBTB = pinBarEnableBTB
+        config.atrPeriod = pinBarATRPeriod
+        config.minWickBodyRatio = pinBarMinWickBodyRatio
+        config.minWickRangeRatio = pinBarMinWickRangeRatio
+        config.maxBodyRangeRatio = pinBarMaxBodyRangeRatio
+        config.minCloseLocation = pinBarMinCloseLocation
+        config.oppositeWickDominance = pinBarOppositeWickDominance
+        config.touchToleranceATR = pinBarTouchToleranceATR
+        config.stopBufferATR = pinBarStopBufferATR
+        config.maxConfirmationBars = pinBarMaxConfirmationBars
+        config.btbLookbackBars = pinBarBTBLookbackBars
+        config.minBreakoutBodyATR = pinBarMinBreakoutBodyATR
+        config.riskReward = pinBarRiskReward
+        config.maxContinuationBars = pinBarMaxContinuationBars
+        return config
+    }
+
+    var microMapConfiguration: MicroMapSetup.Configuration {
+        var config = MicroMapSetup.Configuration()
+        config.atrPeriod = microMapATRPeriod
+        config.minSpikeBars = microMapMinSpikeBars
+        config.maxSpikeBars = microMapMaxSpikeBars
+        config.minSpikeATR = microMapMinSpikeATR
+        config.minDirectionalRatio = microMapMinDirectionalRatio
+        config.minBodyRatio = microMapMinBodyRatio
+        config.maxCloseFromExtreme = microMapMaxCloseFromExtreme
+        config.minMicroBars = microMapMinMicroBars
+        config.maxMicroBars = microMapMaxMicroBars
+        config.maxMicroRangeRatio = microMapMaxMicroRangeRatio
+        config.maxRetracement = microMapMaxRetracement
+        config.structureToleranceATR = microMapStructureToleranceATR
+        config.maxReentryBars = microMapMaxReentryBars
+        config.riskReward = microMapRiskReward
+        config.confluenceBalanceBars = microMapConfluenceBalanceBars
+        config.confluenceEMAPeriod = microMapConfluenceEMAPeriod
+        config.minPressureGapPct = microMapMinPressureGapPct
+        config.maxPressureGapBar = microMapMaxPressureGapBar
+        config.requirePressureGap = microMapRequirePressureGap
+        config.requireKeyLevelBreak = microMapRequireKeyLevelBreak
+        config.minConfluenceScore = microMapMinConfluenceScore
+        return config
+    }
+
+    var mtrConfiguration: MTRSetup.Configuration {
+        var config = MTRSetup.Configuration()
+        config.pivotDepth = mtrPivotDepth
+        config.atrPeriod = mtrATRPeriod
+        config.minTrendLegATR = mtrMinTrendLegATR
+        config.breakBufferATR = mtrBreakBufferATR
+        config.retestToleranceATR = mtrRetestToleranceATR
+        config.maxFailedBreakATR = mtrMaxFailedBreakATR
+        config.maxRetestBars = mtrMaxRetestBars
+        config.maxConfirmationBars = mtrMaxConfirmationBars
+        config.stopBufferATR = mtrStopBufferATR
+        config.riskReward = mtrRiskReward
+        config.maxTradeBars = mtrMaxTradeBars
+        config.maxResults = mtrMaxResults
+        return config
     }
 }
 

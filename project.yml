@@ -77,6 +77,18 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_USER_SCRIPT_SANDBOXING: NO
 
+  HelixTradingAppTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: GoldMonitorMacTests
+    dependencies:
+      - target: HelixTradingApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: club.helixtrading.app.tests
+        GENERATE_INFOPLIST_FILE: YES
+
   HelixTradingAppiPad:
     type: application
     platform: iOS

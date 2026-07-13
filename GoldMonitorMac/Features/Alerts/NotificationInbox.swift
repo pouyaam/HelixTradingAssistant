@@ -1,6 +1,20 @@
 import Foundation
 import UserNotifications
 
+/// Presents local notifications even while Helix is the foreground app.
+/// macOS otherwise accepts the request but suppresses the visible banner.
+private final class ForegroundNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = ForegroundNotificationDelegate()
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+}
+
 /// One entry in the app-wide notification history ("Inbox"). Every
 /// code path that wants to alert the user — price/RSI alerts, order
 /// block lifecycle events (`AlertStore`), Confluence Scanner
@@ -30,6 +44,7 @@ struct NotificationRecord: Identifiable, Codable, Equatable {
         case priceAlert
         case rsiAlert
         case orderBlock
+        case strategy
         case scanner
         case changeOfCharacter
 
@@ -38,6 +53,7 @@ struct NotificationRecord: Identifiable, Codable, Equatable {
             case .priceAlert: return "bell.badge.fill"
             case .rsiAlert:   return "waveform.path.ecg"
             case .orderBlock: return "square.stack.3d.up.fill"
+            case .strategy:   return "point.3.connected.trianglepath.dotted"
             case .scanner:    return "scope"
             case .changeOfCharacter: return "arrow.triangle.2.circlepath"
             }
@@ -48,6 +64,7 @@ struct NotificationRecord: Identifiable, Codable, Equatable {
             case .priceAlert: return "Price Alert"
             case .rsiAlert:   return "RSI Alert"
             case .orderBlock: return "Order Block"
+            case .strategy:   return "Strategy"
             case .scanner:    return "Scanner"
             case .changeOfCharacter: return "Change of Character"
             }
@@ -104,6 +121,8 @@ struct NotificationRecord: Identifiable, Codable, Equatable {
 @MainActor
 final class NotificationInbox: ObservableObject {
     @Published private(set) var records: [NotificationRecord] = []
+    @Published private(set) var systemPermissionChecked = false
+    @Published private(set) var systemPermissionGranted = false
 
     private static let storageKey = "notifications.inbox.v1"
     private static let cap = 300
@@ -128,6 +147,7 @@ final class NotificationInbox: ObservableObject {
 
     init() {
         load()
+        configureSystemNotifications()
     }
 
     /// Record + post a system notification for `dedupKey`, unless the
@@ -207,13 +227,44 @@ final class NotificationInbox: ObservableObject {
 
     // ── System notification ────────────────────────────────────────
 
+    private func configureSystemNotifications() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = ForegroundNotificationDelegate.shared
+        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error {
+                NSLog("Helix notification permission error: %@", error.localizedDescription)
+            } else if !granted {
+                NSLog("Helix notification permission was not granted")
+            }
+            Task { @MainActor [weak self] in
+                self?.refreshSystemNotificationPermission()
+            }
+        }
+        refreshSystemNotificationPermission()
+    }
+
+    func refreshSystemNotificationPermission() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            let granted = settings.authorizationStatus == .authorized
+                || settings.authorizationStatus == .provisional
+            Task { @MainActor [weak self] in
+                self?.systemPermissionGranted = granted
+                self?.systemPermissionChecked = true
+            }
+        }
+    }
+
     private func post(_ record: NotificationRecord) {
         let content = UNMutableNotificationContent()
         content.title = record.title
         content.body = record.body
         content.sound = .default
         let request = UNNotificationRequest(identifier: record.id.uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                NSLog("Helix notification delivery error: %@", error.localizedDescription)
+            }
+        }
     }
 
     // ── Persistence ───────────────────────────────────────────────

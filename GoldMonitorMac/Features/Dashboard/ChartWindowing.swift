@@ -79,4 +79,51 @@ enum ChartWindow {
         if out.last != hi { out.append(hi) }
         return out
     }
+
+    /// X positions that separate calendar days in an intraday candle
+    /// series. Charts use bar indices rather than dates, so each boundary
+    /// sits halfway between the last bar of one day and the first bar of
+    /// the next. Daily-or-coarser series deliberately return no boundaries
+    /// because drawing one at every bar would only add visual noise.
+    static func dayBoundaryPositions(
+        candles: [Candle],
+        domain: ClosedRange<Double>,
+        calendar: Calendar = .current
+    ) -> [Double] {
+        guard candles.count > 1,
+              isIntraday(candles),
+              let visible = visibleBounds(domain: domain, count: candles.count)
+        else { return [] }
+
+        // Include one bar on either side so a boundary at the plot edge
+        // does not blink out while the user pans.
+        let lo = max(1, visible.lo - 1)
+        let hi = min(candles.count - 1, visible.hi + 1)
+        guard lo <= hi else { return [] }
+
+        var positions: [Double] = []
+        positions.reserveCapacity(max(1, (hi - lo) / 24))
+        for i in lo ... hi {
+            if !calendar.isDate(
+                candles[i - 1].bucketStart,
+                inSameDayAs: candles[i].bucketStart
+            ) {
+                positions.append(Double(i) - 0.5)
+            }
+        }
+        return positions
+    }
+
+    /// Detect the series resolution from recent positive gaps. The median
+    /// is resilient to weekends and market closures in otherwise-intraday
+    /// data (for example a 4-hour series with a two-day weekend gap).
+    private static func isIntraday(_ candles: [Candle]) -> Bool {
+        let sampleStart = max(1, candles.count - 65)
+        let gaps = (sampleStart ..< candles.count)
+            .map { candles[$0].bucketStart.timeIntervalSince(candles[$0 - 1].bucketStart) }
+            .filter { $0 > 0 }
+            .sorted()
+        guard !gaps.isEmpty else { return false }
+        return gaps[gaps.count / 2] < 20 * 60 * 60
+    }
 }

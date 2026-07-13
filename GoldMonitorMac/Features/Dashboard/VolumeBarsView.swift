@@ -23,6 +23,15 @@ struct VolumeBarsView: View {
 
     var body: some View {
         Chart {
+            ForEach(
+                ChartWindow.dayBoundaryPositions(candles: candles, domain: effectiveDomain),
+                id: \.self
+            ) { x in
+                RuleMark(x: .value("Day boundary", x))
+                    .foregroundStyle(Theme.Color.textMuted.opacity(0.20))
+                    .lineStyle(StrokeStyle(lineWidth: 1))
+            }
+
             ForEach(ChartWindow.renderIndices(domain: effectiveDomain, count: candles.count), id: \.self) { i in
                 let c = candles[i]
                 BarMark(

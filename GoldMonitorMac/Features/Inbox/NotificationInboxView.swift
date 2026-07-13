@@ -78,6 +78,7 @@ struct NotificationInboxView: View {
             filterChip(.priceAlert, label: "Price")
             filterChip(.rsiAlert, label: "RSI")
             filterChip(.orderBlock, label: "Order Blocks")
+            filterChip(.strategy, label: "Strategy")
             Spacer()
         }
     }
@@ -170,6 +171,7 @@ struct NotificationInboxView: View {
         case .priceAlert: return Theme.Color.info
         case .rsiAlert:   return Theme.Color.warn
         case .orderBlock: return Theme.Color.accentStart
+        case .strategy:   return Theme.Color.success
         case .scanner:    return Theme.Color.danger
         case .changeOfCharacter: return Theme.Color.accentEnd
         }
