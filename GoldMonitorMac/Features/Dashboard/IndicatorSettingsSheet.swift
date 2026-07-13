@@ -382,6 +382,145 @@ struct IndicatorSettingsSheet: View {
 
             Divider().background(Theme.Color.border)
 
+            section(title: "SP2L Strategy") {
+                periodStepper(label: "Min spike candles", value: $config.sp2lMinSpikeBars, range: 2...8)
+                periodStepper(label: "Max spike candles", value: $config.sp2lMaxSpikeBars, range: 2...10)
+                periodStepper(label: "Balance candles", value: $config.sp2lRangeBars, range: 2...12)
+                periodStepper(label: "ATR period", value: $config.sp2lATRPeriod, range: 2...100)
+                doubleStepper(
+                    label: "Min spike width (× ATR)",
+                    value: $config.sp2lMinSpikeATR,
+                    range: 0.1...5.0,
+                    step: 0.1
+                )
+                doubleStepper(
+                    label: "Max spike width (× ATR)",
+                    value: $config.sp2lMaxSpikeATR,
+                    range: 0.5...10.0,
+                    step: 0.25
+                )
+                doubleStepper(
+                    label: "Max balance width (× ATR)",
+                    value: $config.sp2lMaxRangeATR,
+                    range: 0.25...5.0,
+                    step: 0.1
+                )
+                doubleStepper(
+                    label: "Min. gap size %",
+                    value: $config.sp2lMinGapPct,
+                    range: 0.0...5.0,
+                    step: 0.1
+                )
+                periodStepper(label: "Latest P-Gap candle", value: $config.sp2lMaxPressureGapBar, range: 3...6)
+                periodStepper(label: "Equilibrium EMA", value: $config.sp2lEMAPeriod, range: 10...200)
+                Toggle(isOn: $config.sp2lUseEMAContext) {
+                    checkboxLabel("Require EMA equilibrium context")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                doubleStepper(
+                    label: "Max start distance from EMA (× ATR)",
+                    value: $config.sp2lMaxEMADistanceATR,
+                    range: 0.0...5.0,
+                    step: 0.1
+                )
+                periodStepper(label: "Limit order expiry", value: $config.sp2lMaxPullbackBars, range: 1...30)
+                periodStepper(label: "Continuation timeout", value: $config.sp2lMaxContinuationBars, range: 1...50)
+                doubleStepper(
+                    label: "Risk reward",
+                    value: $config.sp2lRiskReward,
+                    range: 0.25...5.0,
+                    step: 0.25
+                )
+                periodStepper(label: "Take-profit targets", value: $config.sp2lTargetCount, range: 1...3)
+                Text("Detects balance, breakout, follow-through and an early pressure gap. Entry is a resting limit at the first pullback level.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider().background(Theme.Color.border)
+
+            section(title: "Pin Bar · SP2L + BTB") {
+                Toggle(isOn: $config.pinBarEnableSP2L) {
+                    checkboxLabel("Confirm SP2L pullbacks")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                Toggle(isOn: $config.pinBarEnableBTB) {
+                    checkboxLabel("Detect BTB broken-level retests")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                periodStepper(label: "ATR period", value: $config.pinBarATRPeriod, range: 2...100)
+                doubleStepper(
+                    label: "Min rejection wick / body",
+                    value: $config.pinBarMinWickBodyRatio,
+                    range: 1...8,
+                    step: 0.25
+                )
+                doubleStepper(
+                    label: "Min rejection wick / range",
+                    value: $config.pinBarMinWickRangeRatio,
+                    range: 0.3...0.9,
+                    step: 0.05
+                )
+                doubleStepper(
+                    label: "Max body / range",
+                    value: $config.pinBarMaxBodyRangeRatio,
+                    range: 0.05...0.6,
+                    step: 0.05
+                )
+                doubleStepper(
+                    label: "Min close near rejection side",
+                    value: $config.pinBarMinCloseLocation,
+                    range: 0.5...0.95,
+                    step: 0.05
+                )
+                doubleStepper(
+                    label: "Level tolerance (× ATR)",
+                    value: $config.pinBarTouchToleranceATR,
+                    range: 0...1,
+                    step: 0.05
+                )
+                doubleStepper(
+                    label: "Stop buffer (× ATR)",
+                    value: $config.pinBarStopBufferATR,
+                    range: 0...1,
+                    step: 0.05
+                )
+                periodStepper(label: "Retest expiry", value: $config.pinBarMaxConfirmationBars, range: 1...30)
+                periodStepper(label: "BTB level lookback", value: $config.pinBarBTBLookbackBars, range: 3...50)
+                doubleStepper(
+                    label: "Min BTB breakout body (× ATR)",
+                    value: $config.pinBarMinBreakoutBodyATR,
+                    range: 0...3,
+                    step: 0.1
+                )
+                doubleStepper(
+                    label: "Risk reward",
+                    value: $config.pinBarRiskReward,
+                    range: 0.25...10,
+                    step: 0.25
+                )
+                periodStepper(label: "Trade timeout", value: $config.pinBarMaxContinuationBars, range: 1...100)
+                Text("Waits for a rejection pin bar at the SP2L pullback or a broken BTB level. Entry is the pin-bar close; stop sits beyond its wick.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider().background(Theme.Color.border)
+
             section(title: "Volume Profile") {
                 Toggle(isOn: $config.vpUseZigzag) {
                     checkboxLabel("ZigZag trend mode (last trend only)")

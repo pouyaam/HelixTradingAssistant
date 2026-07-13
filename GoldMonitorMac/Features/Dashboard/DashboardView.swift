@@ -13,6 +13,8 @@ struct DashboardView: View {
     @AppStorage("dashboard.timeframe")  private var timeframe: Timeframe = .h1
     @AppStorage("dashboard.chartType")  private var userChartType: ChartType = .candle
     @AppStorage("dashboard.showVolume") private var showVolume: Bool = true
+    @AppStorage("notifications.strategySignals.enabled")
+    private var strategyNotificationsEnabled: Bool = true
     /// Multi-instance indicator/oscillator storage — JSON-encoded arrays
     /// persisted to UserDefaults. Each instance holds its kind, params,
     /// and hide/show state.
@@ -166,6 +168,31 @@ struct DashboardView: View {
     /// 1-minute bar closes — see `refreshNYSetupScenario`.
     @State private var nyLiveScenario: PromptBuilder.TAScenario?
 
+    /// MicroMap notifications are edge-triggered from closed candles only.
+    /// The context + timestamp baseline prevents historical alerts when the
+    /// indicator is enabled, settings change, or deeper history is prepended.
+    @State private var microMapAlertContext: String?
+    @State private var microMapSeenEventKeys: Set<String> = []
+    @State private var microMapLastClosedTimestamp: TimeInterval?
+
+    /// SP2L setup notifications use the same closed-candle edge-triggering
+    /// rules as MicroMap. Enabling the indicator seeds the current results,
+    /// so opening a chart never floods Notification Center with history.
+    @State private var sp2lAlertContext: String?
+    @State private var sp2lSeenEventKeys: Set<String> = []
+    @State private var sp2lLastClosedTimestamp: TimeInterval?
+
+    /// Close-confirmed pin bars for SP2L pullbacks and BTB retests.
+    @State private var pinBarAlertContext: String?
+    @State private var pinBarSeenEventKeys: Set<String> = []
+    @State private var pinBarLastClosedTimestamp: TimeInterval?
+
+    /// MTR alerts fire only when the neckline break is confirmed by a
+    /// closed candle. Formation itself remains visual-only.
+    @State private var mtrAlertContext: String?
+    @State private var mtrSeenEventKeys: Set<String> = []
+    @State private var mtrLastClosedTimestamp: TimeInterval?
+
     /// Wraps a scenario + its source history entry ID for
     /// presentation via `.sheet(item:)`. Identifiable on the
     /// scenario's stable id (composed from bias + prices) so two
@@ -265,6 +292,354 @@ struct DashboardView: View {
     private func refreshNYSetupScenario() {
         nyLiveScenario = currentNYSetupScenario()
     }
+
+    private func refreshMicroMapNotifications(seedOnly: Bool) {
+        guard let pairID = app.selectedPairID,
+              let pair = app.pairs.first(where: { $0.id == pairID }),
+              isStrategyNotificationActive(.microMapStrategy),
+              candles.count > 1
+        else {
+            microMapAlertContext = nil
+            microMapSeenEventKeys = []
+            microMapLastClosedTimestamp = nil
+            return
+        }
+
+        // The last chart candle may still be forming. Removing it makes
+        // entries/stops strictly close-confirmed while targets can still use
+        // the completed candle's high/low inside the detector.
+        let closedCandles = Array(candles.dropLast())
+        guard let newestClosed = closedCandles.last else { return }
+        let results = MicroMapSetup.compute(
+            closedCandles,
+            configuration: oscillatorConfig.microMapConfiguration
+        )
+        let context = "\(pairID)|\(timeframe.rawValue)"
+        let allKeys = microMapEventKeys(results)
+
+        guard !seedOnly,
+              microMapAlertContext == context,
+              let previousTimestamp = microMapLastClosedTimestamp
+        else {
+            microMapAlertContext = context
+            microMapSeenEventKeys = allKeys
+            microMapLastClosedTimestamp = newestClosed.id.timeIntervalSince1970
+            return
+        }
+
+        for result in results {
+            let formedKey = microMapFormedEventKey(result)
+            if result.microEndIndex < closedCandles.count,
+               closedCandles[result.microEndIndex].id.timeIntervalSince1970 > previousTimestamp,
+               !microMapSeenEventKeys.contains(formedKey) {
+                let side = result.direction == .long ? "LONG" : "SHORT"
+                notificationInbox.record(
+                    dedupKey: formedKey,
+                    cooldown: 10 * 365 * 24 * 60 * 60,
+                    pairID: pairID,
+                    pairLabel: pair.name,
+                    category: .strategy,
+                    title: "\(pair.name) - MicroMap is forming",
+                    body: "A \(side) micro-channel setup has formed and is waiting for entry confirmation.",
+                    timeframeLabel: timeframe.rawValue
+                )
+            }
+
+            for attempt in result.attempts {
+                guard let trigger = attempt.triggerIndex,
+                      trigger < closedCandles.count,
+                      closedCandles[trigger].id.timeIntervalSince1970 > previousTimestamp
+                else { continue }
+                let key = microMapEntryEventKey(result: result, attempt: attempt)
+                guard !microMapSeenEventKeys.contains(key) else { continue }
+                let side = result.direction == .long ? "LONG" : "SHORT"
+                let quality: String
+                switch result.confluence.quality {
+                case .standard: quality = "standard"
+                case .confirmed: quality = "confirmed"
+                case .strong: quality = "strong"
+                }
+                notificationInbox.record(
+                    dedupKey: key,
+                    cooldown: 10 * 365 * 24 * 60 * 60,
+                    pairID: pairID,
+                    pairLabel: pair.name,
+                    category: .strategy,
+                    title: "\(pair.name) - MicroMap entry \(attempt.number)",
+                    body: "\(side) entry confirmed at \(PriceFormat.exact(attempt.entry ?? closedCandles[trigger].close)). \(quality.capitalized) confluence \(result.confluence.score)/6.",
+                    timeframeLabel: timeframe.rawValue
+                )
+            }
+
+            if result.stage == .invalidated,
+               let end = result.endIndex,
+               end < closedCandles.count,
+               closedCandles[end].id.timeIntervalSince1970 > previousTimestamp {
+                let key = microMapInvalidationEventKey(result)
+                if !microMapSeenEventKeys.contains(key) {
+                    notificationInbox.record(
+                        dedupKey: key,
+                        cooldown: 10 * 365 * 24 * 60 * 60,
+                        pairID: pairID,
+                        pairLabel: pair.name,
+                        category: .strategy,
+                        title: "\(pair.name) - MicroMap invalidated",
+                        body: "The third close-confirmed stop invalidated the \(result.direction.rawValue.uppercased()) setup.",
+                        timeframeLabel: timeframe.rawValue
+                    )
+                }
+            }
+        }
+
+        microMapSeenEventKeys.formUnion(allKeys)
+        microMapLastClosedTimestamp = newestClosed.id.timeIntervalSince1970
+    }
+
+    private func microMapEventKeys(_ results: [MicroMapSetup.Result]) -> Set<String> {
+        var keys: Set<String> = []
+        for result in results {
+            keys.insert(microMapFormedEventKey(result))
+            for attempt in result.attempts where attempt.triggerIndex != nil {
+                keys.insert(microMapEntryEventKey(result: result, attempt: attempt))
+            }
+            if result.stage == .invalidated {
+                keys.insert(microMapInvalidationEventKey(result))
+            }
+        }
+        return keys
+    }
+
+    private func microMapFormedEventKey(_ result: MicroMapSetup.Result) -> String {
+        "micromap|\(app.selectedPairID ?? "")|\(timeframe.rawValue)|\(result.id)|formed"
+    }
+
+    private func microMapEntryEventKey(
+        result: MicroMapSetup.Result,
+        attempt: MicroMapSetup.Attempt
+    ) -> String {
+        "micromap|\(app.selectedPairID ?? "")|\(timeframe.rawValue)|\(result.id)|entry|\(attempt.number)"
+    }
+
+    private func microMapInvalidationEventKey(_ result: MicroMapSetup.Result) -> String {
+        "micromap|\(app.selectedPairID ?? "")|\(timeframe.rawValue)|\(result.id)|invalidated"
+    }
+
+    private func refreshSP2LNotifications(seedOnly: Bool) {
+        guard let pairID = app.selectedPairID,
+              let pair = app.pairs.first(where: { $0.id == pairID }),
+              isStrategyNotificationActive(.sp2lStrategy),
+              candles.count > 1
+        else {
+            sp2lAlertContext = nil
+            sp2lSeenEventKeys = []
+            sp2lLastClosedTimestamp = nil
+            return
+        }
+
+        let closedCandles = Array(candles.dropLast())
+        guard let newestClosed = closedCandles.last else { return }
+        let results = SP2LSetup.compute(
+            closedCandles,
+            minSpikeBars: oscillatorConfig.sp2lMinSpikeBars,
+            maxSpikeBars: oscillatorConfig.sp2lMaxSpikeBars,
+            rangeBars: oscillatorConfig.sp2lRangeBars,
+            atrPeriod: oscillatorConfig.sp2lATRPeriod,
+            minSpikeATR: oscillatorConfig.sp2lMinSpikeATR,
+            maxSpikeATR: oscillatorConfig.sp2lMaxSpikeATR,
+            maxRangeATR: oscillatorConfig.sp2lMaxRangeATR,
+            minGapPct: oscillatorConfig.sp2lMinGapPct,
+            maxPressureGapBar: oscillatorConfig.sp2lMaxPressureGapBar,
+            emaPeriod: oscillatorConfig.sp2lEMAPeriod,
+            useEMAContext: oscillatorConfig.sp2lUseEMAContext,
+            maxEMADistanceATR: oscillatorConfig.sp2lMaxEMADistanceATR,
+            maxPullbackBars: oscillatorConfig.sp2lMaxPullbackBars,
+            maxContinuationBars: oscillatorConfig.sp2lMaxContinuationBars,
+            riskReward: oscillatorConfig.sp2lRiskReward,
+            targetCount: oscillatorConfig.sp2lTargetCount
+        )
+        let context = "\(pairID)|\(timeframe.rawValue)"
+        let allKeys = Set(results.map(sp2lFormedEventKey))
+
+        guard !seedOnly,
+              sp2lAlertContext == context,
+              let previousTimestamp = sp2lLastClosedTimestamp
+        else {
+            sp2lAlertContext = context
+            sp2lSeenEventKeys = allKeys
+            sp2lLastClosedTimestamp = newestClosed.id.timeIntervalSince1970
+            return
+        }
+
+        for result in results {
+            guard result.followThroughIndex < closedCandles.count,
+                  closedCandles[result.followThroughIndex].id.timeIntervalSince1970 > previousTimestamp
+            else { continue }
+            let key = sp2lFormedEventKey(result)
+            guard !sp2lSeenEventKeys.contains(key) else { continue }
+            let side = result.direction == .long ? "LONG" : "SHORT"
+            notificationInbox.record(
+                dedupKey: key,
+                cooldown: 10 * 365 * 24 * 60 * 60,
+                pairID: pairID,
+                pairLabel: pair.name,
+                category: .strategy,
+                title: "\(pair.name) - SP2L is forming",
+                body: "A \(side) SP2L setup has formed. Limit entry: \(PriceFormat.exact(result.entry)), stop: \(PriceFormat.exact(result.stopLoss)).",
+                timeframeLabel: timeframe.rawValue
+            )
+        }
+
+        sp2lSeenEventKeys.formUnion(allKeys)
+        sp2lLastClosedTimestamp = newestClosed.id.timeIntervalSince1970
+    }
+
+    private func sp2lFormedEventKey(_ result: SP2LSetup.Result) -> String {
+        "sp2l|\(app.selectedPairID ?? "")|\(timeframe.rawValue)|\(result.id)|formed"
+    }
+
+    private func refreshPinBarNotifications(seedOnly: Bool) {
+        guard let pairID = app.selectedPairID,
+              let pair = app.pairs.first(where: { $0.id == pairID }),
+              isStrategyNotificationActive(.pinBarCombo),
+              candles.count > 1
+        else {
+            pinBarAlertContext = nil
+            pinBarSeenEventKeys = []
+            pinBarLastClosedTimestamp = nil
+            return
+        }
+
+        let closedCandles = Array(candles.dropLast())
+        guard let newestClosed = closedCandles.last else { return }
+        let sp2lResults = SP2LSetup.compute(
+            closedCandles,
+            minSpikeBars: oscillatorConfig.sp2lMinSpikeBars,
+            maxSpikeBars: oscillatorConfig.sp2lMaxSpikeBars,
+            rangeBars: oscillatorConfig.sp2lRangeBars,
+            atrPeriod: oscillatorConfig.sp2lATRPeriod,
+            minSpikeATR: oscillatorConfig.sp2lMinSpikeATR,
+            maxSpikeATR: oscillatorConfig.sp2lMaxSpikeATR,
+            maxRangeATR: oscillatorConfig.sp2lMaxRangeATR,
+            minGapPct: oscillatorConfig.sp2lMinGapPct,
+            maxPressureGapBar: oscillatorConfig.sp2lMaxPressureGapBar,
+            emaPeriod: oscillatorConfig.sp2lEMAPeriod,
+            useEMAContext: oscillatorConfig.sp2lUseEMAContext,
+            maxEMADistanceATR: oscillatorConfig.sp2lMaxEMADistanceATR,
+            maxPullbackBars: oscillatorConfig.sp2lMaxPullbackBars,
+            maxContinuationBars: oscillatorConfig.sp2lMaxContinuationBars,
+            riskReward: oscillatorConfig.sp2lRiskReward,
+            targetCount: oscillatorConfig.sp2lTargetCount
+        )
+        let results = PinBarComboSetup.compute(
+            closedCandles,
+            sp2lResults: sp2lResults,
+            configuration: oscillatorConfig.pinBarComboConfiguration
+        )
+        let context = "\(pairID)|\(timeframe.rawValue)"
+        let allKeys = Set(results.map(pinBarConfirmedEventKey))
+
+        guard !seedOnly,
+              pinBarAlertContext == context,
+              let previousTimestamp = pinBarLastClosedTimestamp
+        else {
+            pinBarAlertContext = context
+            pinBarSeenEventKeys = allKeys
+            pinBarLastClosedTimestamp = newestClosed.id.timeIntervalSince1970
+            return
+        }
+
+        for result in results {
+            guard result.confirmationIndex < closedCandles.count,
+                  closedCandles[result.confirmationIndex].id.timeIntervalSince1970 > previousTimestamp
+            else { continue }
+            let key = pinBarConfirmedEventKey(result)
+            guard !pinBarSeenEventKeys.contains(key) else { continue }
+            let side = result.direction == .long ? "LONG" : "SHORT"
+            let setup = result.kind == .sp2l ? "SP2L + Pin Bar" : "BTB + Pin Bar"
+            notificationInbox.record(
+                dedupKey: key,
+                cooldown: 10 * 365 * 24 * 60 * 60,
+                pairID: pairID,
+                pairLabel: pair.name,
+                category: .strategy,
+                title: "\(pair.name) - \(setup) \(side) confirmed",
+                body: "Entry \(PriceFormat.exact(result.entry)), stop \(PriceFormat.exact(result.stopLoss)), target \(PriceFormat.exact(result.takeProfit)).",
+                timeframeLabel: timeframe.rawValue
+            )
+        }
+
+        pinBarSeenEventKeys.formUnion(allKeys)
+        pinBarLastClosedTimestamp = newestClosed.id.timeIntervalSince1970
+    }
+
+    private func pinBarConfirmedEventKey(_ result: PinBarComboSetup.Result) -> String {
+        "pinbar|\(app.selectedPairID ?? "")|\(timeframe.rawValue)|\(result.id)|confirmed"
+    }
+
+    private func refreshMTRNotifications(seedOnly: Bool) {
+        guard let pairID = app.selectedPairID,
+              let pair = app.pairs.first(where: { $0.id == pairID }),
+              isStrategyNotificationActive(.mtrStrategy),
+              candles.count > 1
+        else {
+            mtrAlertContext = nil
+            mtrSeenEventKeys = []
+            mtrLastClosedTimestamp = nil
+            return
+        }
+
+        // The chart's tail can still be changing. Confirmation alerts are
+        // intentionally evaluated only after that candle becomes closed.
+        let closedCandles = Array(candles.dropLast())
+        guard let newestClosed = closedCandles.last else { return }
+        let results = MTRSetup.compute(
+            closedCandles,
+            configuration: oscillatorConfig.mtrConfiguration
+        )
+        let confirmed = results.filter(\.isConfirmed)
+        let context = "\(pairID)|\(timeframe.rawValue)"
+        let allKeys = Set(confirmed.map(mtrConfirmedEventKey))
+
+        guard !seedOnly,
+              mtrAlertContext == context,
+              let previousTimestamp = mtrLastClosedTimestamp
+        else {
+            mtrAlertContext = context
+            mtrSeenEventKeys = allKeys
+            mtrLastClosedTimestamp = newestClosed.id.timeIntervalSince1970
+            return
+        }
+
+        for result in confirmed {
+            guard let confirmation = result.confirmationIndex,
+                  confirmation < closedCandles.count,
+                  closedCandles[confirmation].id.timeIntervalSince1970 > previousTimestamp,
+                  let entry = result.entry,
+                  let stop = result.stopLoss,
+                  let target = result.takeProfit
+            else { continue }
+            let key = mtrConfirmedEventKey(result)
+            guard !mtrSeenEventKeys.contains(key) else { continue }
+            let side = result.direction == .long ? "LONG" : "SHORT"
+            notificationInbox.record(
+                dedupKey: key,
+                cooldown: 10 * 365 * 24 * 60 * 60,
+                pairID: pairID,
+                pairLabel: pair.name,
+                category: .strategy,
+                title: "\(pair.name) - MTR \(side) confirmed",
+                body: "\(result.variant.label). Entry \(PriceFormat.exact(entry)), stop \(PriceFormat.exact(stop)), target \(PriceFormat.exact(target)).",
+                timeframeLabel: timeframe.rawValue
+            )
+        }
+
+        mtrSeenEventKeys.formUnion(allKeys)
+        mtrLastClosedTimestamp = newestClosed.id.timeIntervalSince1970
+    }
+
+    private func mtrConfirmedEventKey(_ result: MTRSetup.Result) -> String {
+        "mtr|\(app.selectedPairID ?? "")|\(timeframe.rawValue)|\(result.direction.rawValue)|\(result.channelStartIndex)|\(result.channelEndIndex)|\(result.breakoutIndex)|\(result.retestIndex)|\(result.confirmationIndex ?? -1)"
+    }
     /// Tool currently armed in the chart toolbar. `.none` ⇒ pointer
     /// (drag pans). Set via the drawing toolbar buttons; deliberately
     /// NOT persisted — relaunching with a tool armed would be
@@ -306,6 +681,12 @@ struct DashboardView: View {
 
     private var visibleIndicatorInstances: [IndicatorInstance] {
         indicatorInstances.filter { !$0.hidden }
+    }
+
+    /// The eye icon is the per-indicator notification switch. Settings keeps
+    /// one master switch that can silence every strategy at once.
+    private func isStrategyNotificationActive(_ kind: IndicatorKind) -> Bool {
+        strategyNotificationsEnabled && visibleIndicatorInstances.contains { $0.kind == kind }
     }
 
     private var visibleOscillatorInstances: [OscillatorInstance] {
@@ -457,6 +838,75 @@ struct DashboardView: View {
         case .nyOpenSetup:
             if let v = p["atrMult"] { oscillatorConfig.nyAtrMult = v.doubleValue }
             if let v = p["amOnly"]  { oscillatorConfig.nyAMOnly = v.boolValue }
+        case .sp2lStrategy:
+            if let v = p["minSpikeBars"]        { oscillatorConfig.sp2lMinSpikeBars = Int(v.doubleValue) }
+            if let v = p["maxSpikeBars"]        { oscillatorConfig.sp2lMaxSpikeBars = Int(v.doubleValue) }
+            if let v = p["rangeBars"]           { oscillatorConfig.sp2lRangeBars = Int(v.doubleValue) }
+            if let v = p["atrPeriod"]           { oscillatorConfig.sp2lATRPeriod = Int(v.doubleValue) }
+            if let v = p["minSpikeATR"]         { oscillatorConfig.sp2lMinSpikeATR = v.doubleValue }
+            if let v = p["maxSpikeATR"]         { oscillatorConfig.sp2lMaxSpikeATR = v.doubleValue }
+            if let v = p["maxRangeATR"]         { oscillatorConfig.sp2lMaxRangeATR = v.doubleValue }
+            if let v = p["minGapPct"]           { oscillatorConfig.sp2lMinGapPct = v.doubleValue }
+            if let v = p["maxPressureGapBar"]   { oscillatorConfig.sp2lMaxPressureGapBar = Int(v.doubleValue) }
+            if let v = p["emaPeriod"]           { oscillatorConfig.sp2lEMAPeriod = Int(v.doubleValue) }
+            if let v = p["useEMAContext"]       { oscillatorConfig.sp2lUseEMAContext = v.boolValue }
+            if let v = p["maxEMADistanceATR"]   { oscillatorConfig.sp2lMaxEMADistanceATR = v.doubleValue }
+            if let v = p["maxPullbackBars"]     { oscillatorConfig.sp2lMaxPullbackBars = Int(v.doubleValue) }
+            if let v = p["maxContinuationBars"] { oscillatorConfig.sp2lMaxContinuationBars = Int(v.doubleValue) }
+            if let v = p["riskReward"]          { oscillatorConfig.sp2lRiskReward = v.doubleValue }
+            if let v = p["targetCount"]         { oscillatorConfig.sp2lTargetCount = Int(v.doubleValue) }
+        case .pinBarCombo:
+            if let v = p["enableSP2L"]            { oscillatorConfig.pinBarEnableSP2L = v.boolValue }
+            if let v = p["enableBTB"]             { oscillatorConfig.pinBarEnableBTB = v.boolValue }
+            if let v = p["atrPeriod"]             { oscillatorConfig.pinBarATRPeriod = Int(v.doubleValue) }
+            if let v = p["minWickBodyRatio"]      { oscillatorConfig.pinBarMinWickBodyRatio = v.doubleValue }
+            if let v = p["minWickRangeRatio"]     { oscillatorConfig.pinBarMinWickRangeRatio = v.doubleValue }
+            if let v = p["maxBodyRangeRatio"]     { oscillatorConfig.pinBarMaxBodyRangeRatio = v.doubleValue }
+            if let v = p["minCloseLocation"]      { oscillatorConfig.pinBarMinCloseLocation = v.doubleValue }
+            if let v = p["oppositeWickDominance"] { oscillatorConfig.pinBarOppositeWickDominance = v.doubleValue }
+            if let v = p["touchToleranceATR"]     { oscillatorConfig.pinBarTouchToleranceATR = v.doubleValue }
+            if let v = p["stopBufferATR"]         { oscillatorConfig.pinBarStopBufferATR = v.doubleValue }
+            if let v = p["maxConfirmationBars"]   { oscillatorConfig.pinBarMaxConfirmationBars = Int(v.doubleValue) }
+            if let v = p["btbLookbackBars"]       { oscillatorConfig.pinBarBTBLookbackBars = Int(v.doubleValue) }
+            if let v = p["minBreakoutBodyATR"]    { oscillatorConfig.pinBarMinBreakoutBodyATR = v.doubleValue }
+            if let v = p["riskReward"]            { oscillatorConfig.pinBarRiskReward = v.doubleValue }
+            if let v = p["maxContinuationBars"]   { oscillatorConfig.pinBarMaxContinuationBars = Int(v.doubleValue) }
+        case .microMapStrategy:
+            if let v = p["atrPeriod"]             { oscillatorConfig.microMapATRPeriod = Int(v.doubleValue) }
+            if let v = p["minSpikeBars"]          { oscillatorConfig.microMapMinSpikeBars = Int(v.doubleValue) }
+            if let v = p["maxSpikeBars"]          { oscillatorConfig.microMapMaxSpikeBars = Int(v.doubleValue) }
+            if let v = p["minSpikeATR"]           { oscillatorConfig.microMapMinSpikeATR = v.doubleValue }
+            if let v = p["minDirectionalRatio"]  { oscillatorConfig.microMapMinDirectionalRatio = v.doubleValue }
+            if let v = p["minBodyRatio"]          { oscillatorConfig.microMapMinBodyRatio = v.doubleValue }
+            if let v = p["maxCloseFromExtreme"]  { oscillatorConfig.microMapMaxCloseFromExtreme = v.doubleValue }
+            if let v = p["minMicroBars"]          { oscillatorConfig.microMapMinMicroBars = Int(v.doubleValue) }
+            if let v = p["maxMicroBars"]          { oscillatorConfig.microMapMaxMicroBars = Int(v.doubleValue) }
+            if let v = p["maxMicroRangeRatio"]   { oscillatorConfig.microMapMaxMicroRangeRatio = v.doubleValue }
+            if let v = p["maxRetracement"]        { oscillatorConfig.microMapMaxRetracement = v.doubleValue }
+            if let v = p["structureToleranceATR"] { oscillatorConfig.microMapStructureToleranceATR = v.doubleValue }
+            if let v = p["maxReentryBars"]        { oscillatorConfig.microMapMaxReentryBars = Int(v.doubleValue) }
+            if let v = p["riskReward"]             { oscillatorConfig.microMapRiskReward = v.doubleValue }
+            if let v = p["confluenceBalanceBars"] { oscillatorConfig.microMapConfluenceBalanceBars = Int(v.doubleValue) }
+            if let v = p["confluenceEMAPeriod"]   { oscillatorConfig.microMapConfluenceEMAPeriod = Int(v.doubleValue) }
+            if let v = p["minPressureGapPct"]     { oscillatorConfig.microMapMinPressureGapPct = v.doubleValue }
+            if let v = p["maxPressureGapBar"]     { oscillatorConfig.microMapMaxPressureGapBar = Int(v.doubleValue) }
+            if let v = p["requirePressureGap"]    { oscillatorConfig.microMapRequirePressureGap = v.boolValue }
+            if let v = p["requireKeyLevelBreak"] { oscillatorConfig.microMapRequireKeyLevelBreak = v.boolValue }
+            if let v = p["minConfluenceScore"]   { oscillatorConfig.microMapMinConfluenceScore = Int(v.doubleValue) }
+            if let v = p["notifyEvents"]           { oscillatorConfig.microMapNotifyEvents = v.boolValue }
+        case .mtrStrategy:
+            if let v = p["pivotDepth"]          { oscillatorConfig.mtrPivotDepth = Int(v.doubleValue) }
+            if let v = p["atrPeriod"]           { oscillatorConfig.mtrATRPeriod = Int(v.doubleValue) }
+            if let v = p["minTrendLegATR"]      { oscillatorConfig.mtrMinTrendLegATR = v.doubleValue }
+            if let v = p["breakBufferATR"]      { oscillatorConfig.mtrBreakBufferATR = v.doubleValue }
+            if let v = p["retestToleranceATR"]  { oscillatorConfig.mtrRetestToleranceATR = v.doubleValue }
+            if let v = p["maxFailedBreakATR"]   { oscillatorConfig.mtrMaxFailedBreakATR = v.doubleValue }
+            if let v = p["maxRetestBars"]       { oscillatorConfig.mtrMaxRetestBars = Int(v.doubleValue) }
+            if let v = p["maxConfirmationBars"] { oscillatorConfig.mtrMaxConfirmationBars = Int(v.doubleValue) }
+            if let v = p["stopBufferATR"]       { oscillatorConfig.mtrStopBufferATR = v.doubleValue }
+            if let v = p["riskReward"]          { oscillatorConfig.mtrRiskReward = v.doubleValue }
+            if let v = p["maxTradeBars"]        { oscillatorConfig.mtrMaxTradeBars = Int(v.doubleValue) }
+            if let v = p["maxResults"]           { oscillatorConfig.mtrMaxResults = Int(v.doubleValue) }
         case .fairValueGap:
             if let v = p["threshold"]     { oscillatorConfig.fvgThreshold = v.doubleValue }
             if let v = p["showMitigated"] { oscillatorConfig.fvgShowMitigated = v.boolValue }
@@ -919,10 +1369,32 @@ struct DashboardView: View {
         // already-registered alerts fire on price touch via the tick
         // evaluator above.
         .onChange(of: candles.count) { _ in refreshNYSetupScenario() }
-        .onChange(of: indicatorInstances) { _ in refreshNYSetupScenario() }
+        .onChange(of: candles.last?.id) { _ in
+            refreshMicroMapNotifications(seedOnly: false)
+            refreshSP2LNotifications(seedOnly: false)
+            refreshPinBarNotifications(seedOnly: false)
+            refreshMTRNotifications(seedOnly: false)
+        }
+        .onChange(of: indicatorInstances) { _ in
+            refreshNYSetupScenario()
+            refreshMicroMapNotifications(seedOnly: true)
+            refreshSP2LNotifications(seedOnly: true)
+            refreshPinBarNotifications(seedOnly: true)
+            refreshMTRNotifications(seedOnly: true)
+        }
         .onChange(of: oscillatorConfig) { _ in
             refreshNYSetupScenario()
             syncConfigToOscillatorInstances()
+            refreshMicroMapNotifications(seedOnly: true)
+            refreshSP2LNotifications(seedOnly: true)
+            refreshPinBarNotifications(seedOnly: true)
+            refreshMTRNotifications(seedOnly: true)
+        }
+        .onChange(of: strategyNotificationsEnabled) { enabled in
+            refreshMicroMapNotifications(seedOnly: enabled)
+            refreshSP2LNotifications(seedOnly: enabled)
+            refreshPinBarNotifications(seedOnly: enabled)
+            refreshMTRNotifications(seedOnly: enabled)
         }
         // Activation sheet — driven by `pendingActivation` so the
         // analysis sheet can dismiss first and this one presents on
@@ -2940,13 +3412,14 @@ struct DashboardView: View {
 
     /// Feeds the freshest Order Block / Steroid Order Block zones to
     /// the alert evaluator so it can fire a notification on
-    /// appear/retest/exhaust transitions. Gated behind each
-    /// indicator's own notify toggle in `OscillatorConfig` — opt-in,
-    /// so users who don't have it turned on pay no extra compute.
+    /// appear/retest/exhaust transitions. The chart eye controls whether
+    /// each detector runs; the Settings switch is the global kill switch.
     /// Mirrors the RSI-alert feed just above.
     private func notifyOrderBlockEvents(_ candles: [Candle], pairID: String) {
-        guard oscillatorConfig.obNotifyEvents || oscillatorConfig.sobNotifyEvents
-                || oscillatorConfig.chochNotifyEvents else { return }
+        let orderBlockActive = isStrategyNotificationActive(.orderBlock)
+        let steroidOrderBlockActive = isStrategyNotificationActive(.steroidOrderBlock)
+        let chochActive = isStrategyNotificationActive(.changeOfCharacter)
+        guard orderBlockActive || steroidOrderBlockActive || chochActive else { return }
         let pairLabel = app.pairs.first(where: { $0.id == pairID })?.name ?? pairID
 
         // Each indicator's full-history `compute` runs on its own
@@ -2954,7 +3427,7 @@ struct DashboardView: View {
         // is real work (order-block run-length scans, volume-profile
         // bucketing) and must never block the main thread just because
         // the notify toggle happens to be on.
-        if oscillatorConfig.obNotifyEvents {
+        if orderBlockActive {
             let config = oscillatorConfig
             Task.detached(priority: .utility) {
                 let zones = OrderBlocks.compute(
@@ -2967,7 +3440,7 @@ struct DashboardView: View {
                 await self.alertStore.evaluateOrderBlocks(zones, pairID: pairID, pairLabel: pairLabel)
             }
         }
-        if oscillatorConfig.sobNotifyEvents {
+        if steroidOrderBlockActive {
             let config = oscillatorConfig
             Task.detached(priority: .utility) {
                 let zones = SteroidOrderBlocks.compute(
@@ -2981,7 +3454,7 @@ struct DashboardView: View {
                 await self.alertStore.evaluateSteroidOrderBlocks(zones, pairID: pairID, pairLabel: pairLabel)
             }
         }
-        if oscillatorConfig.chochNotifyEvents {
+        if chochActive {
             let config = oscillatorConfig
             Task.detached(priority: .utility) {
                 // Compute with showMitigated:true so the invalidation
@@ -3293,6 +3766,10 @@ struct DashboardView: View {
 }
 
 struct DashboardIndicatorMenu: View, Equatable {
+    @State private var isPresented = false
+    @State private var addIndicatorsExpanded = false
+    @State private var addPanelsExpanded = false
+
     @Binding var showVolume: Bool
     @Binding var indicatorInstances: [IndicatorInstance]
     @Binding var oscillatorInstances: [OscillatorInstance]
@@ -3319,139 +3796,8 @@ struct DashboardIndicatorMenu: View, Equatable {
     let onSaveOscillators: () -> Void
     
     var body: some View {
-        Menu {
-            Section("Overlays") {
-                Toggle(isOn: $showVolume) {
-                    Label("Volume", systemImage: showVolume
-                          ? "checkmark.circle.fill" : "circle")
-                }
-                ForEach(indicatorInstances) { inst in
-                    let isHidden = inst.hidden
-                    Button {
-                        onToggleIndicatorHidden(inst.id)
-                    } label: {
-                        Label {
-                            HStack(spacing: 6) {
-                                Text(inst.label)
-                                    .foregroundStyle(isHidden ? Theme.Color.textMuted : inst.kind.color)
-                                Spacer()
-                                if editingIndicatorID == inst.id {
-                                    Image(systemName: "slider.horizontal.3")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(Theme.Color.info)
-                                }
-                            }
-                        } icon: {
-                            Image(systemName: isHidden ? "eye.slash" : "checkmark.circle.fill")
-                                .foregroundStyle(isHidden ? Theme.Color.textMuted : inst.kind.color)
-                        }
-                    }
-                    .contextMenu {
-                        Button {
-                            editingIndicatorID = inst.id
-                        } label: {
-                            Label("Settings", systemImage: "slider.horizontal.3")
-                        }
-                        Button(role: .destructive) {
-                            onRemoveIndicator(inst.id)
-                        } label: {
-                            Label("Remove", systemImage: "trash")
-                        }
-                    }
-                }
-                Menu("Add indicator") {
-                    ForEach(IndicatorKind.allCases) { kind in
-                        Button {
-                            onAddIndicator(kind)
-                        } label: {
-                            Text(kind.label)
-                        }
-                    }
-                }
-            }
-            Section("Panels") {
-                ForEach(oscillatorInstances) { inst in
-                    Button {
-                        onToggleOscillatorHidden(inst.id)
-                    } label: {
-                        Label {
-                            HStack(spacing: 6) {
-                                Text(inst.label)
-                                if editingOscillatorID == inst.id {
-                                    Image(systemName: "slider.horizontal.3")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(Theme.Color.info)
-                                }
-                            }
-                        } icon: {
-                            Image(systemName: inst.hidden ? "eye.slash" : "checkmark.circle.fill")
-                        }
-                    }
-                    .contextMenu {
-                        Button {
-                            editingOscillatorID = inst.id
-                        } label: {
-                            Label("Settings", systemImage: "slider.horizontal.3")
-                        }
-                        Button(role: .destructive) {
-                            onRemoveOscillator(inst.id)
-                        } label: {
-                            Label("Remove", systemImage: "trash")
-                        }
-                    }
-                }
-                Menu("Add panel") {
-                    ForEach(OscillatorKind.allCases) { kind in
-                        Button {
-                            onAddOscillator(kind)
-                        } label: {
-                            Text(kind.label)
-                        }
-                    }
-                }
-            }
-            Divider()
-            Button {
-                showIndicatorSettings = true
-            } label: {
-                Label("Settings…", systemImage: "slider.horizontal.3")
-            }
-            if !srLevels.isEmpty {
-                Divider()
-                Button("Clear S/R lines") {
-                    srLevels = .init(support: [], resistance: [])
-                }
-            }
-            if !fvgZones.isEmpty {
-                Divider()
-                Button("Clear FVG zones") { fvgZones = [] }
-            }
-            if taScenario != nil {
-                Divider()
-                Button("Clear scenario") { taScenario = nil }
-            }
-            if taAltScenario != nil {
-                Divider()
-                Button("Clear alt scenario") { taAltScenario = nil }
-            }
-            if let scenario = nyLiveScenario {
-                Divider()
-                Button("Activate NY Open setup…") {
-                    pendingActivation = DashboardView.PendingActivation(
-                        scenario: scenario,
-                        sourceHistoryEntryID: nil
-                    )
-                }
-            }
-            if !enabledIndicatorKinds.isEmpty || !enabledOscillators.isEmpty {
-                Divider()
-                Button("Clear all") {
-                    indicatorInstances = []
-                    oscillatorInstances = []
-                    onSaveIndicators()
-                    onSaveOscillators()
-                }
-            }
+        Button {
+            isPresented.toggle()
         } label: {
             ZStack(alignment: .topTrailing) {
                 Image(systemName: "function")
@@ -3475,9 +3821,190 @@ struct DashboardIndicatorMenu: View, Equatable {
             }
             .help(activeCount(label: enabledIndicatorKinds.count + enabledOscillators.count))
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
         .fixedSize()
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            indicatorPopoverContent
+        }
+    }
+
+    /// A SwiftUI popover deliberately replaces the native nested `Menu`.
+    /// AppKit dismisses an open submenu whenever its SwiftUI host is
+    /// refreshed by a live price tick. The popover owns its presentation
+    /// state, so candle updates can redraw the dashboard without collapsing
+    /// either the panel or the expanded add lists.
+    private var indicatorPopoverContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                popoverSectionTitle("Overlays")
+
+                Toggle(isOn: $showVolume) {
+                    Label("Volume", systemImage: showVolume
+                          ? "checkmark.circle.fill" : "circle")
+                }
+                .toggleStyle(.button)
+                .buttonStyle(.plain)
+
+                ForEach(indicatorInstances) { inst in
+                    let isHidden = inst.hidden
+                    Button {
+                        onToggleIndicatorHidden(inst.id)
+                    } label: {
+                        Label {
+                            HStack(spacing: 6) {
+                                Text(inst.label)
+                                    .foregroundStyle(isHidden ? Theme.Color.textMuted : inst.kind.color)
+                                Spacer()
+                                if editingIndicatorID == inst.id {
+                                    Image(systemName: "slider.horizontal.3")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Theme.Color.info)
+                                }
+                            }
+                        } icon: {
+                            Image(systemName: isHidden ? "eye.slash" : "checkmark.circle.fill")
+                                .foregroundStyle(isHidden ? Theme.Color.textMuted : inst.kind.color)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button {
+                            editingIndicatorID = inst.id
+                        } label: {
+                            Label("Settings", systemImage: "slider.horizontal.3")
+                        }
+                        Button(role: .destructive) {
+                            onRemoveIndicator(inst.id)
+                        } label: {
+                            Label("Remove", systemImage: "trash")
+                        }
+                    }
+                }
+
+                DisclosureGroup(isExpanded: $addIndicatorsExpanded) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(IndicatorKind.allCases) { kind in
+                            Button {
+                                onAddIndicator(kind)
+                            } label: {
+                                Label(kind.label, systemImage: "plus")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.leading, 12)
+                    .padding(.top, 6)
+                } label: {
+                    Label("Add indicator", systemImage: "plus.circle")
+                }
+
+                Divider()
+                popoverSectionTitle("Panels")
+
+                ForEach(oscillatorInstances) { inst in
+                    Button {
+                        onToggleOscillatorHidden(inst.id)
+                    } label: {
+                        Label {
+                            HStack(spacing: 6) {
+                                Text(inst.label)
+                                if editingOscillatorID == inst.id {
+                                    Image(systemName: "slider.horizontal.3")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Theme.Color.info)
+                                }
+                            }
+                        } icon: {
+                            Image(systemName: inst.hidden ? "eye.slash" : "checkmark.circle.fill")
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button {
+                            editingOscillatorID = inst.id
+                        } label: {
+                            Label("Settings", systemImage: "slider.horizontal.3")
+                        }
+                        Button(role: .destructive) {
+                            onRemoveOscillator(inst.id)
+                        } label: {
+                            Label("Remove", systemImage: "trash")
+                        }
+                    }
+                }
+
+                DisclosureGroup(isExpanded: $addPanelsExpanded) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(OscillatorKind.allCases) { kind in
+                            Button {
+                                onAddOscillator(kind)
+                            } label: {
+                                Label(kind.label, systemImage: "plus")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.leading, 12)
+                    .padding(.top, 6)
+                } label: {
+                    Label("Add panel", systemImage: "plus.rectangle.on.rectangle")
+                }
+
+                Divider()
+
+                Button {
+                    showIndicatorSettings = true
+                    isPresented = false
+                } label: {
+                    Label("Settings…", systemImage: "slider.horizontal.3")
+                }
+
+                if !srLevels.isEmpty {
+                    Button("Clear S/R lines") {
+                        srLevels = .init(support: [], resistance: [])
+                    }
+                }
+                if !fvgZones.isEmpty {
+                    Button("Clear FVG zones") { fvgZones = [] }
+                }
+                if taScenario != nil {
+                    Button("Clear scenario") { taScenario = nil }
+                }
+                if taAltScenario != nil {
+                    Button("Clear alt scenario") { taAltScenario = nil }
+                }
+                if let scenario = nyLiveScenario {
+                    Button("Activate NY Open setup…") {
+                        pendingActivation = DashboardView.PendingActivation(
+                            scenario: scenario,
+                            sourceHistoryEntryID: nil
+                        )
+                        isPresented = false
+                    }
+                }
+                if !enabledIndicatorKinds.isEmpty || !enabledOscillators.isEmpty {
+                    Divider()
+                    Button("Clear all") {
+                        indicatorInstances = []
+                        oscillatorInstances = []
+                        onSaveIndicators()
+                        onSaveOscillators()
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(14)
+        }
+        .frame(width: 300)
+        .frame(maxHeight: 520)
+    }
+
+    private func popoverSectionTitle(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(Theme.Color.textMuted)
     }
     
     private func activeCount(label n: Int) -> String {

@@ -8,6 +8,7 @@ import SwiftUI
 /// bridge).
 struct SettingsView: View {
     @EnvironmentObject private var app: AppState
+    @EnvironmentObject private var notificationInbox: NotificationInbox
 
     // ── State ─────────────────────────────────────────────────────
 
@@ -31,6 +32,11 @@ struct SettingsView: View {
     @AppStorage("markets.forex.enabled")   private var forexEnabled: Bool = true
     @AppStorage("markets.crypto.enabled")  private var cryptoEnabled: Bool = true
     @AppStorage("markets.indices.enabled") private var indicesEnabled: Bool = true
+
+    // Strategy formation alerts. DashboardView reads the same key and
+    // suppresses both inbox records and macOS banners when disabled.
+    @AppStorage("notifications.strategySignals.enabled")
+    private var strategyNotificationsEnabled: Bool = true
 
     // Codex model + effort. Mirrors the Claude keys; read by
     // CodexEngine at run time. Defaults match the user's frontier
@@ -71,6 +77,7 @@ struct SettingsView: View {
         }
         .background(Theme.Color.canvas)
         .onAppear {
+            notificationInbox.refreshSystemNotificationPermission()
             // Load keychain values once on first appear, not in
             // @State initializers (which re-run on every SwiftUI
             // body re-evaluation and trigger password prompts).
@@ -171,6 +178,7 @@ struct SettingsView: View {
     private var contentBody: some View {
         switch selectedSettingsCategory {
         case .general:    generalSection
+        case .notifications: notificationsSection
         case .data:       DataSourcesCard()
         case .ai:         aiSection
         case .network:    proxyCard
@@ -186,6 +194,56 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
             wizardCard
             marketsCard
+        }
+    }
+
+    // ── Notifications section ─────────────────────────────────────
+
+    private var notificationsSection: some View {
+        Card {
+            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                sectionTitle(
+                    icon: "point.3.connected.trianglepath.dotted",
+                    title: "Strategy signals",
+                    subtitle: "The eye icon on each chart layer controls its alerts. This switch silences or enables all strategy notifications."
+                )
+
+                Toggle(isOn: $strategyNotificationsEnabled) {
+                    HStack(spacing: Theme.Spacing.sm) {
+                        Image(systemName: "bell.and.waves.left.and.right.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Theme.Color.textSecondary)
+                            .frame(width: 18)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Strategy formation notifications")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Theme.Color.textPrimary)
+                            Text("Visible SP2L, Pin Bar, BTB, MicroMap, MTR, CHoCH and order-block layers")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.Color.textMuted)
+                        }
+                    }
+                }
+                .toggleStyle(.switch)
+                .tint(Theme.Color.accentStart)
+
+                if notificationInbox.systemPermissionChecked {
+                    Label(
+                        notificationInbox.systemPermissionGranted
+                            ? "macOS notification permission is enabled"
+                            : "macOS notification permission is disabled in System Settings",
+                        systemImage: notificationInbox.systemPermissionGranted
+                            ? "checkmark.circle.fill"
+                            : "exclamationmark.triangle.fill"
+                    )
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(
+                        notificationInbox.systemPermissionGranted
+                            ? Theme.Color.success
+                            : Theme.Color.accentStart
+                    )
+                }
+            }
         }
     }
 

@@ -627,6 +627,205 @@ final class ChartDerivedCache: ObservableObject {
         }
     }
 
+    // ── SP2L Strategy ────────────────────────────────────────────────
+
+    private struct SP2LSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let lastClose: Double
+        let lastHigh: Double
+        let lastLow: Double
+        let minSpikeBars: Int
+        let maxSpikeBars: Int
+        let rangeBars: Int
+        let atrPeriod: Int
+        let minSpikeATR: Double
+        let maxSpikeATR: Double
+        let maxRangeATR: Double
+        let minGapPct: Double
+        let maxPressureGapBar: Int
+        let emaPeriod: Int
+        let useEMAContext: Bool
+        let maxEMADistanceATR: Double
+        let maxPullbackBars: Int
+        let maxContinuationBars: Int
+        let riskReward: Double
+        let targetCount: Int
+    }
+    private let sp2lSlot = Slot<SP2LSig, [SP2LSetup.Result]>([])
+
+    func sp2lSetup(candles: [Candle], config: OscillatorConfig) -> [SP2LSetup.Result] {
+        let last = candles.last
+        let minSpikeBars = config.sp2lMinSpikeBars
+        let maxSpikeBars = config.sp2lMaxSpikeBars
+        let rangeBars = config.sp2lRangeBars
+        let atrPeriod = config.sp2lATRPeriod
+        let minSpikeATR = config.sp2lMinSpikeATR
+        let maxSpikeATR = config.sp2lMaxSpikeATR
+        let maxRangeATR = config.sp2lMaxRangeATR
+        let minGapPct = config.sp2lMinGapPct
+        let maxPressureGapBar = config.sp2lMaxPressureGapBar
+        let emaPeriod = config.sp2lEMAPeriod
+        let useEMAContext = config.sp2lUseEMAContext
+        let maxEMADistanceATR = config.sp2lMaxEMADistanceATR
+        let maxPullbackBars = config.sp2lMaxPullbackBars
+        let maxContinuationBars = config.sp2lMaxContinuationBars
+        let riskReward = config.sp2lRiskReward
+        let targetCount = config.sp2lTargetCount
+        let sig = SP2LSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: last?.id.timeIntervalSince1970 ?? 0,
+            lastClose: last?.close ?? 0,
+            lastHigh: last?.high ?? 0,
+            lastLow: last?.low ?? 0,
+            minSpikeBars: minSpikeBars,
+            maxSpikeBars: maxSpikeBars,
+            rangeBars: rangeBars,
+            atrPeriod: atrPeriod,
+            minSpikeATR: minSpikeATR,
+            maxSpikeATR: maxSpikeATR,
+            maxRangeATR: maxRangeATR,
+            minGapPct: minGapPct,
+            maxPressureGapBar: maxPressureGapBar,
+            emaPeriod: emaPeriod,
+            useEMAContext: useEMAContext,
+            maxEMADistanceATR: maxEMADistanceATR,
+            maxPullbackBars: maxPullbackBars,
+            maxContinuationBars: maxContinuationBars,
+            riskReward: riskReward,
+            targetCount: targetCount
+        )
+        return resolve(sp2lSlot, signature: sig) {
+            SP2LSetup.compute(
+                candles,
+                minSpikeBars: minSpikeBars,
+                maxSpikeBars: maxSpikeBars,
+                rangeBars: rangeBars,
+                atrPeriod: atrPeriod,
+                minSpikeATR: minSpikeATR,
+                maxSpikeATR: maxSpikeATR,
+                maxRangeATR: maxRangeATR,
+                minGapPct: minGapPct,
+                maxPressureGapBar: maxPressureGapBar,
+                emaPeriod: emaPeriod,
+                useEMAContext: useEMAContext,
+                maxEMADistanceATR: maxEMADistanceATR,
+                maxPullbackBars: maxPullbackBars,
+                maxContinuationBars: maxContinuationBars,
+                riskReward: riskReward,
+                targetCount: targetCount
+            )
+        }
+    }
+
+    // ── Pin Bar · SP2L + BTB ────────────────────────────────────────
+
+    private struct PinBarComboSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let lastOpen: Double
+        let lastHigh: Double
+        let lastLow: Double
+        let lastClose: Double
+        let sp2lHash: Int
+        let config: PinBarComboSetup.Configuration
+    }
+    private let pinBarComboSlot = Slot<PinBarComboSig, [PinBarComboSetup.Result]>([])
+
+    func pinBarComboSetup(
+        candles: [Candle],
+        sp2lResults: [SP2LSetup.Result],
+        config: OscillatorConfig
+    ) -> [PinBarComboSetup.Result] {
+        let last = candles.last
+        let strategyConfig = config.pinBarComboConfiguration
+        let signature = PinBarComboSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: last?.id.timeIntervalSince1970 ?? 0,
+            lastOpen: last?.open ?? 0,
+            lastHigh: last?.high ?? 0,
+            lastLow: last?.low ?? 0,
+            lastClose: last?.close ?? 0,
+            sp2lHash: sp2lResults.hashValue,
+            config: strategyConfig
+        )
+        return resolve(pinBarComboSlot, signature: signature) {
+            PinBarComboSetup.compute(
+                candles,
+                sp2lResults: sp2lResults,
+                configuration: strategyConfig
+            )
+        }
+    }
+
+    // ── MicroMap Strategy ────────────────────────────────────────────
+
+    private struct MicroMapSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let lastOpen: Double
+        let lastHigh: Double
+        let lastLow: Double
+        let lastClose: Double
+        let config: MicroMapSetup.Configuration
+    }
+    private let microMapSlot = Slot<MicroMapSig, [MicroMapSetup.Result]>([])
+
+    func microMapSetup(candles: [Candle], config: OscillatorConfig) -> [MicroMapSetup.Result] {
+        let last = candles.last
+        let strategyConfig = config.microMapConfiguration
+        let signature = MicroMapSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: last?.id.timeIntervalSince1970 ?? 0,
+            lastOpen: last?.open ?? 0,
+            lastHigh: last?.high ?? 0,
+            lastLow: last?.low ?? 0,
+            lastClose: last?.close ?? 0,
+            config: strategyConfig
+        )
+        return resolve(microMapSlot, signature: signature) {
+            MicroMapSetup.compute(candles, configuration: strategyConfig)
+        }
+    }
+
+    // ── Major Trend Reversal ────────────────────────────────────────
+
+    private struct MTRSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let lastOpen: Double
+        let lastHigh: Double
+        let lastLow: Double
+        let lastClose: Double
+        let config: MTRSetup.Configuration
+    }
+    private let mtrSlot = Slot<MTRSig, [MTRSetup.Result]>([])
+
+    func mtrSetup(candles: [Candle], config: OscillatorConfig) -> [MTRSetup.Result] {
+        let last = candles.last
+        let strategyConfig = config.mtrConfiguration
+        let signature = MTRSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: last?.id.timeIntervalSince1970 ?? 0,
+            lastOpen: last?.open ?? 0,
+            lastHigh: last?.high ?? 0,
+            lastLow: last?.low ?? 0,
+            lastClose: last?.close ?? 0,
+            config: strategyConfig
+        )
+        return resolve(mtrSlot, signature: signature) {
+            MTRSetup.compute(candles, configuration: strategyConfig)
+        }
+    }
+
     // ── Oscillator points (RSI / MACD / Stochastic) ───────────────────
     //
     // Each `OscillatorPanel` owns its own `ChartDerivedCache` instance

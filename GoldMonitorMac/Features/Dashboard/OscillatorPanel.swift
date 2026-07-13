@@ -40,6 +40,15 @@ struct OscillatorPanel: View {
                 latestReadout
             }
             Chart {
+                ForEach(
+                    ChartWindow.dayBoundaryPositions(candles: candles, domain: domain),
+                    id: \.self
+                ) { x in
+                    RuleMark(x: .value("Day boundary", x))
+                        .foregroundStyle(Theme.Color.textMuted.opacity(0.20))
+                        .lineStyle(StrokeStyle(lineWidth: 1))
+                }
+
                 marks(pts: pts)
                 referenceLines
             }

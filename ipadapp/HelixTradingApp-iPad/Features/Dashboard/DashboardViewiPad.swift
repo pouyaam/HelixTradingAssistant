@@ -1391,7 +1391,7 @@ struct IPadIndicatorsPopover: View {
                     .foregroundStyle(Theme.Color.textMuted)
                     .textCase(.uppercase)
                 
-                ForEach(IndicatorKind.allCases) { kind in
+                ForEach(IndicatorKind.allCases.filter { $0 != .mtrStrategy }) { kind in
                     let isOn = enabledIndicators.contains(kind)
                     let isHidden = isOn && hiddenIndicators.contains(kind)
                     
@@ -1528,7 +1528,9 @@ struct IPadLayersPopover: View {
                     .padding(.bottom, 4)
                 
                 // Indicators
-                let activeIndicators = IndicatorKind.allCases.filter { enabledIndicators.contains($0) }
+                let activeIndicators = IndicatorKind.allCases.filter {
+                    $0 != .mtrStrategy && enabledIndicators.contains($0)
+                }
                 if !activeIndicators.isEmpty {
                     Text("Indicators")
                         .font(.system(size: 11, weight: .bold))

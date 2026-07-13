@@ -180,6 +180,70 @@ struct ChartViewiPad: View {
         }
     }
 
+    private var sp2lResults: [SP2LSetup.Result] {
+        guard indicators.contains(.sp2lStrategy) else { return [] }
+        let all = derived.sp2lSetup(candles: candles, config: indicatorConfig)
+        guard !all.isEmpty,
+              let bounds = ChartWindow.visibleBounds(domain: effectiveXDomain, count: candles.count)
+        else { return [] }
+        let lastIndex = candles.count - 1
+        let margin = max(8, (bounds.hi - bounds.lo) / 4)
+        let low = bounds.lo - margin
+        let high = bounds.hi + margin
+        return all.suffix(5).filter { result in
+            guard sp2lResultFitsCurrentCandles(result) else { return false }
+            let end = result.resolveIndex ?? lastIndex
+            return end >= low && result.spikeStartIndex <= high
+        }
+    }
+
+    private func sp2lResultFitsCurrentCandles(_ result: SP2LSetup.Result) -> Bool {
+        let upper = candles.count - 1
+        guard upper >= 0 else { return false }
+        let required = [
+            result.levelStartIndex,
+            result.spikeStartIndex,
+            result.spikeEndIndex,
+            result.breakoutIndex,
+            result.followThroughIndex,
+            result.gapStartIndex,
+            result.gapEndIndex
+        ]
+        guard required.allSatisfy({ $0 >= 0 && $0 <= upper }) else { return false }
+        return [result.pullbackIndex, result.entryIndex, result.resolveIndex]
+            .compactMap { $0 }
+            .allSatisfy { $0 >= 0 && $0 <= upper }
+    }
+
+    private var microMapResults: [MicroMapSetup.Result] {
+        guard indicators.contains(.microMapStrategy) else { return [] }
+        let all = derived.microMapSetup(candles: candles, config: indicatorConfig)
+        guard !all.isEmpty,
+              let bounds = ChartWindow.visibleBounds(domain: effectiveXDomain, count: candles.count)
+        else { return [] }
+        let margin = max(8, (bounds.hi - bounds.lo) / 4)
+        return all.suffix(5).filter { result in
+            microMapResultFitsCurrentCandles(result) &&
+            result.lastRelevantIndex >= bounds.lo - margin &&
+            result.spikeStartIndex <= bounds.hi + margin
+        }
+    }
+
+    private func microMapResultFitsCurrentCandles(_ result: MicroMapSetup.Result) -> Bool {
+        let upper = candles.count - 1
+        guard upper >= 0 else { return false }
+        let indices = [
+            result.spikeStartIndex,
+            result.spikeEndIndex,
+            result.microStartIndex,
+            result.microEndIndex,
+            result.lastRelevantIndex
+        ] + result.attempts.flatMap {
+            [$0.anchorIndex, $0.triggerIndex, $0.stopIndex, $0.targetIndex].compactMap { $0 }
+        }
+        return indices.allSatisfy { $0 >= 0 && $0 <= upper }
+    }
+
     private var volumeProfileSessions: [VolumeProfile.SessionVP] {
         guard indicators.contains(.volumeProfile), !indicatorConfig.vpUseZigzag else { return [] }
         return derived.volumeProfile(
@@ -249,6 +313,8 @@ struct ChartViewiPad: View {
                 volumeProfileMarks
                 zigzagLineMarks
                 setupMarks
+                sp2lMarks
+                microMapMarks
                 srLevelMarks
                 fvgMarks
                 indicatorFvgMarks
@@ -1130,6 +1196,208 @@ struct ChartViewiPad: View {
         case .short: return Theme.Color.danger
         case nil:    return Theme.Color.warn
         }
+    }
+
+    // MARK: - SP2L marks
+
+    @ChartContentBuilder
+    private var sp2lMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(sp2lResults) { result in
+            let color = sp2lDirectionColor(result.direction)
+            let spikeStart = Double(result.spikeStartIndex)
+            let spikeEnd = Double(result.spikeEndIndex)
+            let planEnd = Double(result.resolveIndex ?? lastIndex)
+            let targets = result.takeProfits(count: indicatorConfig.sp2lTargetCount)
+
+            RuleMark(
+                xStart: .value("SP2L level start", Double(result.levelStartIndex)),
+                xEnd: .value("SP2L level end", Double(result.followThroughIndex)),
+                y: .value("SP2L broken level", result.brokenLevel)
+            )
+            .foregroundStyle(color.opacity(0.85))
+            .lineStyle(StrokeStyle(lineWidth: 1.4, dash: [5, 3]))
+
+            RectangleMark(
+                xStart: .value("SP2L spike start", spikeStart),
+                xEnd: .value("SP2L spike end", spikeEnd),
+                yStart: .value("SP2L spike low", result.spikeLow),
+                yEnd: .value("SP2L spike high", result.spikeHigh)
+            )
+            .foregroundStyle(color.opacity(0.10))
+
+            PointMark(x: .value("SP2L title x", spikeStart),
+                      y: .value("SP2L title y", result.spikeHigh))
+                .symbolSize(0)
+                .annotation(position: .top, alignment: .leading, spacing: 1) {
+                    setupTag(result.direction == .long ? "SP2L LONG" : "SP2L SHORT", color: color)
+                }
+
+            if let ema = result.emaValue {
+                RuleMark(
+                    xStart: .value("SP2L EMA start", spikeStart),
+                    xEnd: .value("SP2L EMA end", spikeEnd),
+                    y: .value("SP2L EMA", ema)
+                )
+                .foregroundStyle(Theme.Color.warn.opacity(0.75))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+            }
+
+            RuleMark(xStart: .value("SP2L entry start", spikeEnd),
+                     xEnd: .value("SP2L entry end", planEnd),
+                     y: .value("SP2L entry", result.entry))
+                .foregroundStyle(color.opacity(result.entryIndex == nil ? 0.55 : 0.9))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: result.entryIndex == nil ? [2, 4] : [5, 3]))
+            RuleMark(xStart: .value("SP2L SL start", spikeEnd),
+                     xEnd: .value("SP2L SL end", planEnd),
+                     y: .value("SP2L SL", result.stopLoss))
+                .foregroundStyle(Theme.Color.danger.opacity(0.9))
+                .lineStyle(StrokeStyle(lineWidth: 1.4))
+            ForEach(Array(targets.enumerated()), id: \.offset) { offset, target in
+                RuleMark(xStart: .value("SP2L TP\(offset + 1) start", spikeEnd),
+                         xEnd: .value("SP2L TP\(offset + 1) end", planEnd),
+                         y: .value("SP2L TP\(offset + 1)", target))
+                    .foregroundStyle(Theme.Color.success.opacity(0.9 - Double(offset) * 0.12))
+                    .lineStyle(StrokeStyle(lineWidth: 1.4, dash: offset == 0 ? [] : [5, 3]))
+            }
+
+            if result.stage == .limitPending {
+                PointMark(x: .value("SP2L pending label x", planEnd),
+                          y: .value("SP2L pending label y", result.entry))
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        setupTag("Limit pending", color: color)
+                    }
+            }
+            PointMark(x: .value("SP2L SL label x", planEnd),
+                      y: .value("SP2L SL label y", result.stopLoss))
+                .symbolSize(0)
+                .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                    setupTag("SL", color: Theme.Color.danger)
+                }
+            ForEach(Array(targets.enumerated()), id: \.offset) { offset, target in
+                PointMark(x: .value("SP2L TP\(offset + 1) label x", planEnd),
+                          y: .value("SP2L TP\(offset + 1) label y", target))
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        let ratio = indicatorConfig.sp2lRiskReward * Double(offset + 1)
+                        setupTag(
+                            "TP\(offset + 1) R\(String(format: "%.2g", ratio))",
+                            color: Theme.Color.success
+                        )
+                    }
+            }
+        }
+    }
+
+    private func sp2lDirectionColor(_ direction: SP2LSetup.Direction) -> Color {
+        direction == .long ? Theme.Color.success : Theme.Color.danger
+    }
+
+    // MARK: - MicroMap marks
+
+    @ChartContentBuilder
+    private var microMapMarks: some ChartContent {
+        let lastIndex = max(0, candles.count - 1)
+        ForEach(microMapResults) { result in
+            let color = result.direction == .long ? Theme.Color.success : Theme.Color.danger
+            RectangleMark(
+                xStart: .value("MicroMap spike start", Double(result.spikeStartIndex)),
+                xEnd: .value("MicroMap spike end", Double(result.spikeEndIndex)),
+                yStart: .value("MicroMap spike low", result.spikeLow),
+                yEnd: .value("MicroMap spike high", result.spikeHigh)
+            )
+            .foregroundStyle(color.opacity(0.09))
+
+            if let gap = result.confluence.pressureGap {
+                RectangleMark(
+                    xStart: .value("MicroMap pressure gap start", Double(gap.startIndex)),
+                    xEnd: .value("MicroMap pressure gap end", Double(gap.endIndex)),
+                    yStart: .value("MicroMap pressure gap low", gap.low),
+                    yEnd: .value("MicroMap pressure gap high", gap.high)
+                )
+                .foregroundStyle(Theme.Color.accentStart.opacity(0.20))
+            }
+
+            ForEach(Array(result.microStartIndex...result.microEndIndex), id: \.self) { index in
+                LineMark(
+                    x: .value("MicroMap channel bar", Double(index)),
+                    y: .value("MicroMap channel", result.direction == .long ? candles[index].high : candles[index].low),
+                    series: .value("MicroMap series", "micromap-\(result.id)")
+                )
+                .foregroundStyle(color.opacity(0.75))
+                .lineStyle(StrokeStyle(lineWidth: 1.4, dash: [3, 2]))
+            }
+
+            PointMark(x: .value("MicroMap title x", Double(result.spikeStartIndex)),
+                      y: .value("MicroMap title y", result.spikeHigh))
+                .symbolSize(0)
+                .annotation(position: .top, alignment: .leading, spacing: 1) {
+                    setupTag(microMapTitle(result), color: color)
+                }
+
+            ForEach(result.attempts) { attempt in
+                let start = Double(attempt.anchorIndex ?? result.microEndIndex)
+                let end = Double(attempt.targetIndex ?? attempt.stopIndex ?? result.endIndex ?? lastIndex)
+                let opacity: Double = attempt.status == .stopped ? 0.35 : (attempt.status == .active ? 0.95 : 0.65)
+                let dash: [CGFloat] = attempt.status == .active || attempt.status == .succeeded ? [] : [3, 3]
+
+                if let entry = attempt.entry,
+                   let stop = attempt.stopLoss,
+                   let target = attempt.takeProfit {
+                    RuleMark(xStart: .value("MicroMap entry start", start),
+                             xEnd: .value("MicroMap entry end", end),
+                             y: .value("MicroMap entry", entry))
+                        .foregroundStyle(color.opacity(opacity))
+                        .lineStyle(StrokeStyle(lineWidth: 1.4, dash: dash))
+                    RuleMark(xStart: .value("MicroMap stop start", start),
+                             xEnd: .value("MicroMap stop end", end),
+                             y: .value("MicroMap stop", stop))
+                        .foregroundStyle(Theme.Color.danger.opacity(opacity))
+                        .lineStyle(StrokeStyle(lineWidth: 1.1, dash: dash))
+                    RuleMark(xStart: .value("MicroMap target start", start),
+                             xEnd: .value("MicroMap target end", end),
+                             y: .value("MicroMap target", target))
+                        .foregroundStyle(Theme.Color.success.opacity(opacity))
+                        .lineStyle(StrokeStyle(lineWidth: 1.1, dash: dash))
+                    PointMark(x: .value("MicroMap label x", end),
+                              y: .value("MicroMap label y", entry))
+                        .symbolSize(0)
+                        .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                            setupTag("Entry \(attempt.number)", color: color.opacity(opacity))
+                        }
+                } else {
+                    RuleMark(xStart: .value("MicroMap pending start", start),
+                             xEnd: .value("MicroMap pending end", end),
+                             y: .value("MicroMap pending", attempt.triggerLevel))
+                        .foregroundStyle(color.opacity(0.55))
+                        .lineStyle(StrokeStyle(lineWidth: 1.1, dash: [3, 4]))
+                }
+            }
+
+            if result.stage == .invalidated, let end = result.endIndex {
+                PointMark(
+                    x: .value("MicroMap invalid x", Double(end)),
+                    y: .value("MicroMap invalid y", result.direction == .long ? candles[end].low : candles[end].high)
+                )
+                .symbolSize(55)
+                .foregroundStyle(Theme.Color.danger)
+                .annotation(position: result.direction == .long ? .bottom : .top, spacing: 2) {
+                    setupTag("INVALID x3", color: Theme.Color.danger)
+                }
+            }
+        }
+    }
+
+    private func microMapTitle(_ result: MicroMapSetup.Result) -> String {
+        let direction = result.direction == .long ? "LONG" : "SHORT"
+        let quality: String
+        switch result.confluence.quality {
+        case .standard: quality = "STANDARD"
+        case .confirmed: quality = "CONFIRMED"
+        case .strong: quality = "STRONG"
+        }
+        return "MICROMAP \(direction) · \(quality) \(result.confluence.score)/6"
     }
 
     private func setupTag(_ text: String, color: Color) -> some View {
@@ -2177,6 +2445,29 @@ struct ChartViewiPad: View {
         for r in nySetupResults {
             if r.orLow < lo { lo = r.orLow }
             if r.orHigh > hi { hi = r.orHigh }
+        }
+        for result in sp2lResults {
+            let values = [
+                result.brokenLevel,
+                result.spikeLow,
+                result.spikeHigh,
+                result.entry,
+                result.stopLoss
+            ] + result.takeProfits(count: indicatorConfig.sp2lTargetCount)
+            for value in values {
+                if value < lo { lo = value }
+                if value > hi { hi = value }
+            }
+        }
+        for result in microMapResults {
+            if result.spikeLow < lo { lo = result.spikeLow }
+            if result.spikeHigh > hi { hi = result.spikeHigh }
+            for attempt in result.attempts {
+                for value in [attempt.entry, attempt.stopLoss, attempt.takeProfit].compactMap({ $0 }) {
+                    if value < lo { lo = value }
+                    if value > hi { hi = value }
+                }
+            }
         }
         for session in volumeProfileSessions {
             for bucket in session.buckets {

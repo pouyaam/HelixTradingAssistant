@@ -100,6 +100,20 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     /// on 1m and 5m charts. The dashboard also turns the live day's plan
     /// into alerts + an activate-trade affordance.
     case nyOpenSetup
+    /// SP2L Strategy — Spike-2Leg continuation setup. Detects balance,
+    /// a breakout + follow-through pressure gap, then rests a limit order
+    /// at the first pullback level. Renders entry/SL/TP/add-on.
+    case sp2lStrategy
+    /// Pin Bar Combo — confirmation overlay for SP2L pullbacks and BTB
+    /// broken-level retests. Enters only after a directional rejection
+    /// candle and draws the tested level plus entry/SL/TP plan.
+    case pinBarCombo
+    /// MicroMap continuation strategy — strong spike, weak counter-trend
+    /// micro-channel, then up to three close-confirmed entry attempts.
+    case microMapStrategy
+    /// Major Trend Reversal — confirmed trend channel break, retest of the
+    /// old extreme, then a close-confirmed break of the intervening swing.
+    case mtrStrategy
     /// Fair Value Gap (FVG) detector — three-candle imbalance zones.
     /// Renders as translucent green/red rectangles extending rightward
     /// from the bar where the gap formed. Mitigated gaps (price closed
@@ -139,6 +153,10 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .steroidOrderBlock: return "Steroid OB"
         case .tradingSession: return "Trading Sessions"
         case .nyOpenSetup:    return "NY Open Setup"
+        case .sp2lStrategy:   return "SP2L Strategy"
+        case .pinBarCombo:    return "Pin Bar · SP2L + BTB"
+        case .microMapStrategy: return "MicroMap Strategy"
+        case .mtrStrategy:    return "MTR · Major Trend Reversal"
         case .fairValueGap:   return "Fair Value Gap"
         case .sonarlabOrderBlock: return "Sonarlab OB"
         case .changeOfCharacter: return "CHoCH Zones"
@@ -159,6 +177,10 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .steroidOrderBlock: return Color(red: 1.00, green: 0.40, blue: 0.20)
         case .tradingSession: return Color(red: 0.40, green: 0.55, blue: 0.70)
         case .nyOpenSetup: return Color(red: 0.95, green: 0.75, blue: 0.30)
+        case .sp2lStrategy: return Color(red: 0.25, green: 0.72, blue: 1.00)
+        case .pinBarCombo:  return Color(red: 1.00, green: 0.54, blue: 0.28)
+        case .microMapStrategy: return Color(red: 0.20, green: 0.82, blue: 0.58)
+        case .mtrStrategy: return Color(red: 0.66, green: 0.48, blue: 1.00)
         case .fairValueGap: return Color(red: 0.30, green: 0.80, blue: 0.75)
         case .sonarlabOrderBlock: return Color(red: 0.80, green: 0.45, blue: 0.90)
         case .changeOfCharacter: return Color(red: 0.95, green: 0.35, blue: 0.72)
@@ -193,7 +215,6 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                 .bool(key: "useWicks", label: "Use whole high/low range", default: false),
                 .bool(key: "showExhausted", label: "Show exhausted blocks", default: true),
                 .bool(key: "detectSteroids", label: "Filter by volume (Steroids)", default: false),
-                .bool(key: "notifyEvents", label: "Notify on appear / retest / exhaust", default: false),
             ]
         case .steroidOrderBlock:
             return [
@@ -203,7 +224,6 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                 .bool(key: "useWicks", label: "Use whole high/low range", default: false),
                 .bool(key: "showExhausted", label: "Show exhausted blocks", default: true),
                 .bool(key: "detectSteroids", label: "Filter by volume (Steroids)", default: true),
-                .bool(key: "notifyEvents", label: "Notify on appear / retest / exhaust", default: false),
             ]
         case .tradingSession:
             return [
@@ -219,6 +239,82 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
             return [
                 .double(key: "atrMult", label: "Breakout strength (× ATR)", default: 1.0, step: 0.1, range: 0...5),
                 .bool(key: "amOnly", label: "AM kill-zone only (09:35–11:00 ET)", default: true),
+            ]
+        case .sp2lStrategy:
+            return [
+                .double(key: "minSpikeBars", label: "Min spike candles", default: 2, step: 1, range: 2...8),
+                .double(key: "maxSpikeBars", label: "Max spike candles", default: 4, step: 1, range: 2...10),
+                .double(key: "rangeBars", label: "Balance candles", default: 4, step: 1, range: 2...12),
+                .double(key: "targetCount", label: "Take-profit targets", default: 1, step: 1, range: 1...3),
+                .double(key: "atrPeriod", label: "ATR period", default: 14, step: 1, range: 2...100),
+                .double(key: "minSpikeATR", label: "Min spike width (× ATR)", default: 1.0, step: 0.1, range: 0.1...5),
+                .double(key: "maxSpikeATR", label: "Max spike width (× ATR)", default: 3.0, step: 0.25, range: 0.5...10),
+                .double(key: "maxRangeATR", label: "Max balance width (× ATR)", default: 1.5, step: 0.1, range: 0.25...5),
+                .double(key: "minGapPct", label: "Min gap %", default: 0.0, step: 0.1, range: 0...5),
+                .double(key: "maxPressureGapBar", label: "Latest P-Gap candle", default: 3, step: 1, range: 3...6),
+                .double(key: "emaPeriod", label: "Equilibrium EMA", default: 60, step: 1, range: 10...200),
+                .bool(key: "useEMAContext", label: "Require EMA equilibrium context", default: true),
+                .double(key: "maxEMADistanceATR", label: "Max start distance from EMA (× ATR)", default: 1.0, step: 0.1, range: 0...5),
+                .double(key: "maxPullbackBars", label: "Limit order expiry (bars)", default: 6, step: 1, range: 1...30),
+                .double(key: "maxContinuationBars", label: "Continuation timeout (bars)", default: 10, step: 1, range: 1...50),
+                .double(key: "riskReward", label: "Risk reward", default: 1.0, step: 0.25, range: 0.25...5),
+            ]
+        case .pinBarCombo:
+            return [
+                .bool(key: "enableSP2L", label: "Confirm SP2L pullbacks", default: true),
+                .bool(key: "enableBTB", label: "Detect BTB retests", default: true),
+                .double(key: "atrPeriod", label: "ATR period", default: 14, step: 1, range: 2...100),
+                .double(key: "minWickBodyRatio", label: "Min rejection wick / body", default: 2.0, step: 0.25, range: 1...8),
+                .double(key: "minWickRangeRatio", label: "Min rejection wick / range", default: 0.55, step: 0.05, range: 0.3...0.9),
+                .double(key: "maxBodyRangeRatio", label: "Max body / range", default: 0.35, step: 0.05, range: 0.05...0.6),
+                .double(key: "minCloseLocation", label: "Min close near rejection side", default: 0.65, step: 0.05, range: 0.5...0.95),
+                .double(key: "oppositeWickDominance", label: "Rejection / opposite wick", default: 1.5, step: 0.25, range: 1...6),
+                .double(key: "touchToleranceATR", label: "Level touch tolerance (x ATR)", default: 0.10, step: 0.05, range: 0...1),
+                .double(key: "stopBufferATR", label: "Stop buffer (x ATR)", default: 0.05, step: 0.05, range: 0...1),
+                .double(key: "maxConfirmationBars", label: "Retest expiry (bars)", default: 8, step: 1, range: 1...30),
+                .double(key: "btbLookbackBars", label: "BTB level lookback", default: 12, step: 1, range: 3...50),
+                .double(key: "minBreakoutBodyATR", label: "Min BTB breakout body (x ATR)", default: 0.5, step: 0.1, range: 0...3),
+                .double(key: "riskReward", label: "Risk reward", default: 2.0, step: 0.25, range: 0.25...10),
+                .double(key: "maxContinuationBars", label: "Trade timeout (bars)", default: 20, step: 1, range: 1...100),
+            ]
+        case .microMapStrategy:
+            return [
+                .double(key: "atrPeriod", label: "ATR period", default: 14, step: 1, range: 2...100),
+                .double(key: "minSpikeBars", label: "Min spike candles", default: 2, step: 1, range: 2...8),
+                .double(key: "maxSpikeBars", label: "Max spike candles", default: 6, step: 1, range: 2...12),
+                .double(key: "minSpikeATR", label: "Min spike strength (x ATR)", default: 1.5, step: 0.1, range: 0.1...5),
+                .double(key: "minDirectionalRatio", label: "Min directional candles", default: 0.65, step: 0.05, range: 0.5...1),
+                .double(key: "minBodyRatio", label: "Min body / range", default: 0.60, step: 0.05, range: 0.1...1),
+                .double(key: "maxCloseFromExtreme", label: "Max close distance from extreme", default: 0.25, step: 0.05, range: 0...1),
+                .double(key: "minMicroBars", label: "Min micro-channel candles", default: 2, step: 1, range: 2...8),
+                .double(key: "maxMicroBars", label: "Max micro-channel candles", default: 8, step: 1, range: 2...20),
+                .double(key: "maxMicroRangeRatio", label: "Max pullback / spike candle range", default: 0.70, step: 0.05, range: 0.1...1.5),
+                .double(key: "maxRetracement", label: "Max spike retracement", default: 0.60, step: 0.05, range: 0.1...1),
+                .double(key: "structureToleranceATR", label: "Structure tolerance (x ATR)", default: 0.10, step: 0.05, range: 0...1),
+                .double(key: "maxReentryBars", label: "Re-entry expiry (bars)", default: 8, step: 1, range: 1...30),
+                .double(key: "riskReward", label: "Risk reward", default: 2.0, step: 0.25, range: 0.25...10),
+                .double(key: "confluenceBalanceBars", label: "Key-level lookback", default: 4, step: 1, range: 2...20),
+                .double(key: "confluenceEMAPeriod", label: "Trend EMA", default: 60, step: 1, range: 10...200),
+                .double(key: "minPressureGapPct", label: "Min pressure gap %", default: 0.0, step: 0.1, range: 0...5),
+                .double(key: "maxPressureGapBar", label: "Latest pressure-gap candle", default: 3, step: 1, range: 2...6),
+                .bool(key: "requirePressureGap", label: "Require SP2L pressure gap", default: false),
+                .bool(key: "requireKeyLevelBreak", label: "Require key-level breakout", default: false),
+                .double(key: "minConfluenceScore", label: "Minimum confluence score", default: 0, step: 1, range: 0...6),
+            ]
+        case .mtrStrategy:
+            return [
+                .double(key: "pivotDepth", label: "Pivot depth", default: 3, step: 1, range: 1...10),
+                .double(key: "atrPeriod", label: "ATR period", default: 14, step: 1, range: 2...100),
+                .double(key: "minTrendLegATR", label: "Min trend leg (x ATR)", default: 1.0, step: 0.1, range: 0...5),
+                .double(key: "breakBufferATR", label: "Break close buffer (x ATR)", default: 0.10, step: 0.05, range: 0...1),
+                .double(key: "retestToleranceATR", label: "Double top/bottom tolerance", default: 0.25, step: 0.05, range: 0...2),
+                .double(key: "maxFailedBreakATR", label: "Max failed-break overshoot", default: 0.75, step: 0.05, range: 0.1...3),
+                .double(key: "maxRetestBars", label: "Retest deadline (bars)", default: 20, step: 1, range: 2...100),
+                .double(key: "maxConfirmationBars", label: "Confirmation deadline (bars)", default: 20, step: 1, range: 2...100),
+                .double(key: "stopBufferATR", label: "Stop buffer (x ATR)", default: 0.10, step: 0.05, range: 0...2),
+                .double(key: "riskReward", label: "Risk reward", default: 2.0, step: 0.25, range: 0.25...10),
+                .double(key: "maxTradeBars", label: "Trade expiry (bars)", default: 50, step: 1, range: 5...250),
+                .double(key: "maxResults", label: "Stored results", default: 12, step: 1, range: 1...50),
             ]
         case .fairValueGap:
             return [
@@ -242,7 +338,6 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                 .bool(key: "showIFVG", label: "Show inverse FVG (iFVG)", default: false),
                 .bool(key: "requireFVG", label: "Require FVG confluence", default: false),
                 .bool(key: "showMitigated", label: "Show mitigated zones", default: false),
-                .bool(key: "notifyEvents", label: "Notify on CHoCH / retest / invalidation", default: false),
             ]
         case .volumeProfile:
             return [

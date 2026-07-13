@@ -453,6 +453,149 @@ struct ChartView: View {
     /// Cap on how many NY Open setups draw at once (the N most recent days).
     private static let maxSetupsOnChart = 3
 
+    /// SP2L Strategy results to draw. The detector returns recent
+    /// chronological setups; this trims to setups overlapping the current
+    /// chart window so old historical plays do not clutter the view.
+    private var sp2lResults: [SP2LSetup.Result] {
+        guard indicators.contains(.sp2lStrategy) else { return [] }
+        let all = derived.sp2lSetup(candles: candles, config: indicatorConfig)
+        guard !all.isEmpty,
+              let b = ChartWindow.visibleBounds(domain: effectiveXDomain, count: candles.count)
+        else { return [] }
+        let lastIndex = candles.count - 1
+        let margin = max(8, (b.hi - b.lo) / 4)
+        let lo = b.lo - margin
+        let hi = b.hi + margin
+        return all.suffix(Self.maxSP2LSetupsOnChart).filter { r in
+            guard sp2lResultFitsCurrentCandles(r) else { return false }
+            let end = r.resolveIndex ?? lastIndex
+            return end >= lo && r.spikeStartIndex <= hi
+        }
+    }
+    private static let maxSP2LSetupsOnChart = 5
+
+    private var pinBarComboResults: [PinBarComboSetup.Result] {
+        guard indicators.contains(.pinBarCombo) else { return [] }
+        let bases = derived.sp2lSetup(candles: candles, config: indicatorConfig)
+        let all = derived.pinBarComboSetup(
+            candles: candles,
+            sp2lResults: bases,
+            config: indicatorConfig
+        )
+        guard !all.isEmpty,
+              let bounds = ChartWindow.visibleBounds(domain: effectiveXDomain, count: candles.count)
+        else { return [] }
+        let margin = max(8, (bounds.hi - bounds.lo) / 4)
+        return all.suffix(Self.maxPinBarComboSetupsOnChart).filter { result in
+            pinBarComboResultFitsCurrentCandles(result)
+                && result.lastRelevantIndex >= bounds.lo - margin
+                && result.structureStartIndex <= bounds.hi + margin
+        }
+    }
+    private static let maxPinBarComboSetupsOnChart = 6
+
+    private func pinBarComboResultFitsCurrentCandles(_ result: PinBarComboSetup.Result) -> Bool {
+        let upper = candles.count - 1
+        guard upper >= 0 else { return false }
+        let indices = [
+            result.structureStartIndex,
+            result.breakoutIndex,
+            result.confirmationIndex
+        ] + [result.resolveIndex].compactMap { $0 }
+        return indices.allSatisfy { $0 >= 0 && $0 <= upper }
+    }
+
+    /// MicroMap results overlapping the visible chart window. The cache can
+    /// briefly expose a result from the prior replay window, so every index is
+    /// validated before marks index into the current candle array.
+    private var microMapResults: [MicroMapSetup.Result] {
+        guard indicators.contains(.microMapStrategy) else { return [] }
+        let all = derived.microMapSetup(candles: candles, config: indicatorConfig)
+        guard !all.isEmpty,
+              let bounds = ChartWindow.visibleBounds(domain: effectiveXDomain, count: candles.count)
+        else { return [] }
+        let margin = max(8, (bounds.hi - bounds.lo) / 4)
+        return all.suffix(Self.maxMicroMapSetupsOnChart).filter { result in
+            microMapResultFitsCurrentCandles(result) &&
+            result.lastRelevantIndex >= bounds.lo - margin &&
+            result.spikeStartIndex <= bounds.hi + margin
+        }
+    }
+    private static let maxMicroMapSetupsOnChart = 5
+
+    private func microMapResultFitsCurrentCandles(_ result: MicroMapSetup.Result) -> Bool {
+        let upper = candles.count - 1
+        guard upper >= 0 else { return false }
+        let required = [
+            result.spikeStartIndex,
+            result.spikeEndIndex,
+            result.microStartIndex,
+            result.microEndIndex,
+            result.lastRelevantIndex
+        ]
+        let attemptIndices = result.attempts.flatMap { attempt in
+            [attempt.anchorIndex, attempt.triggerIndex, attempt.stopIndex, attempt.targetIndex].compactMap { $0 }
+        }
+        return (required + attemptIndices).allSatisfy { $0 >= 0 && $0 <= upper }
+    }
+
+    /// Major Trend Reversal results overlapping the visible window. MTR
+    /// uses confirmed pivots, so validating every stored index also protects
+    /// replay when the revealed candle array shrinks.
+    private var mtrResults: [MTRSetup.Result] {
+        guard indicators.contains(.mtrStrategy) else { return [] }
+        let all = derived.mtrSetup(candles: candles, config: indicatorConfig)
+        guard !all.isEmpty,
+              let bounds = ChartWindow.visibleBounds(domain: effectiveXDomain, count: candles.count)
+        else { return [] }
+        let margin = max(8, (bounds.hi - bounds.lo) / 4)
+        return all.suffix(Self.maxMTRSetupsOnChart).filter { result in
+            mtrResultFitsCurrentCandles(result)
+                && result.lastRelevantIndex >= bounds.lo - margin
+                && result.channelStartIndex <= bounds.hi + margin
+        }
+    }
+    private static let maxMTRSetupsOnChart = 5
+
+    private func mtrResultFitsCurrentCandles(_ result: MTRSetup.Result) -> Bool {
+        let upper = candles.count - 1
+        guard upper >= 0 else { return false }
+        let required = [
+            result.channelStartIndex,
+            result.channelEndIndex,
+            result.trendExtremeIndex,
+            result.breakoutIndex,
+            result.retestIndex,
+            result.lastRelevantIndex
+        ] + [result.confirmationIndex, result.resolveIndex].compactMap { $0 }
+        return required.allSatisfy { $0 >= 0 && $0 <= upper }
+    }
+
+    /// `ChartDerivedCache` may briefly return the previous SP2L result
+    /// while a replay step recomputes in the background. Replay can shrink
+    /// `candles`, so validate every candle index before rendering marks
+    /// that index into the current array.
+    private func sp2lResultFitsCurrentCandles(_ r: SP2LSetup.Result) -> Bool {
+        let upper = candles.count - 1
+        guard upper >= 0 else { return false }
+        let required = [
+            r.levelStartIndex,
+            r.spikeStartIndex,
+            r.spikeEndIndex,
+            r.breakoutIndex,
+            r.followThroughIndex,
+            r.gapStartIndex,
+            r.gapEndIndex
+        ]
+        guard required.allSatisfy({ $0 >= 0 && $0 <= upper }) else { return false }
+        let optional = [
+            r.pullbackIndex,
+            r.entryIndex,
+            r.resolveIndex
+        ].compactMap { $0 }
+        return optional.allSatisfy { $0 >= 0 && $0 <= upper }
+    }
+
     private var chart: some View {
         // Compute the visible bar indices ONCE for the entire frame.
         // Previously `renderIndices` and `renderIndexSet` were separate
@@ -463,6 +606,10 @@ struct ChartView: View {
             let indexSet = Set(indices)
 
             Chart {
+            // Real calendar-day boundaries. The X axis is index-based, so
+            // regular grid lines do not naturally land on midnight.
+            dayBoundaryMarks
+
             // Last-price horizontal reference line. Drawn first so it sits
             // behind the data marks. The trailing annotation pins a price
             // tag to the right edge — TradingView-style.
@@ -518,6 +665,10 @@ struct ChartView: View {
             // NY Open Setup — opening-range box, breakout FVG, and the
             // entry/SL/TP plan. Behind the price action like the zones.
             setupMarks
+            sp2lMarks
+            pinBarComboMarks
+            microMapMarks
+            mtrMarks
 
             // S/R levels — horizontal rules at the prices the AI
             // analysis identified. Drawn behind the candles (before the
@@ -1194,6 +1345,18 @@ struct ChartView: View {
     // MARK: - Mark variants
 
     @ChartContentBuilder
+    private var dayBoundaryMarks: some ChartContent {
+        ForEach(
+            ChartWindow.dayBoundaryPositions(candles: candles, domain: effectiveXDomain),
+            id: \.self
+        ) { x in
+            RuleMark(x: .value("Day boundary", x))
+                .foregroundStyle(Theme.Color.textMuted.opacity(0.20))
+                .lineStyle(StrokeStyle(lineWidth: 1))
+        }
+    }
+
+    @ChartContentBuilder
     private func lineMarks(indices: [Int]) -> some ChartContent {
         // Evaluate `displayCandles` ONCE here. It's a computed property
         // that rebuilds (HA transform + live-price array copy) on every
@@ -1595,11 +1758,602 @@ struct ChartView: View {
         }
     }
 
+    /// SP2L overlay — shows balance-break pressure, the resting first-
+    /// pullback limit, SL and TP target.
+    @ChartContentBuilder
+    private var sp2lMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(sp2lResults) { r in
+            let dirColor = sp2lDirectionColor(r.direction)
+            let spikeStart = Double(r.spikeStartIndex)
+            let spikeEnd = Double(r.spikeEndIndex)
+            let planStart = Double(r.spikeEndIndex)
+            let planEnd = Double(r.resolveIndex ?? lastIndex)
+
+            RuleMark(
+                xStart: .value("SP2L level start", Double(r.levelStartIndex)),
+                xEnd: .value("SP2L level end", Double(r.followThroughIndex)),
+                y: .value("SP2L broken level", r.brokenLevel)
+            )
+            .foregroundStyle(dirColor.opacity(0.85))
+            .lineStyle(StrokeStyle(lineWidth: 1.4, dash: [5, 3]))
+
+            PointMark(
+                x: .value("SP2L level label x", Double(r.levelStartIndex)),
+                y: .value("SP2L level label y", r.brokenLevel)
+            )
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .leading, spacing: 0) {
+                setupTag("Broken level", color: dirColor)
+            }
+
+            RectangleMark(
+                xStart: .value("SP2L spike start", spikeStart),
+                xEnd: .value("SP2L spike end", spikeEnd),
+                yStart: .value("SP2L spike low", r.spikeLow),
+                yEnd: .value("SP2L spike high", r.spikeHigh)
+            )
+            .foregroundStyle(dirColor.opacity(0.10))
+
+            PointMark(
+                x: .value("SP2L label x", spikeStart),
+                y: .value("SP2L label y", r.spikeHigh)
+            )
+            .symbolSize(0)
+            .annotation(position: .top, alignment: .leading, spacing: 1) {
+                setupTag(r.direction == .long ? "SP2L LONG" : "SP2L SHORT", color: dirColor)
+            }
+
+            if let ema = r.emaValue {
+                RuleMark(
+                    xStart: .value("SP2L EMA start", spikeStart),
+                    xEnd: .value("SP2L EMA end", spikeEnd),
+                    y: .value("SP2L EMA context", ema)
+                )
+                .foregroundStyle(Theme.Color.warn.opacity(0.75))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+            }
+
+            if r.hasPlan {
+                let entry = r.entry
+                let sl = r.stopLoss
+                let targets = r.takeProfits(count: indicatorConfig.sp2lTargetCount)
+                let isFilled = r.entryIndex != nil
+                let entryOpacity = isFilled ? 0.9 : 0.55
+                let entryDash: [CGFloat] = isFilled ? [5, 3] : [2, 4]
+
+                RuleMark(
+                    xStart: .value("SP2L entry start", planStart),
+                    xEnd: .value("SP2L entry end", planEnd),
+                    y: .value("SP2L entry", entry)
+                )
+                .foregroundStyle(dirColor.opacity(entryOpacity))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: entryDash))
+
+                RuleMark(
+                    xStart: .value("SP2L SL start", planStart),
+                    xEnd: .value("SP2L SL end", planEnd),
+                    y: .value("SP2L SL", sl)
+                )
+                .foregroundStyle(Theme.Color.danger.opacity(0.9))
+                .lineStyle(StrokeStyle(lineWidth: 1.4))
+
+                ForEach(Array(targets.enumerated()), id: \.offset) { offset, target in
+                    RuleMark(
+                        xStart: .value("SP2L TP\(offset + 1) start", planStart),
+                        xEnd: .value("SP2L TP\(offset + 1) end", planEnd),
+                        y: .value("SP2L TP\(offset + 1)", target)
+                    )
+                    .foregroundStyle(Theme.Color.success.opacity(0.9 - Double(offset) * 0.12))
+                    .lineStyle(StrokeStyle(lineWidth: 1.4, dash: offset == 0 ? [] : [5, 3]))
+                }
+
+                if r.stage == .limitPending {
+                    PointMark(
+                        x: .value("SP2L pending label x", planEnd),
+                        y: .value("SP2L pending label y", entry)
+                    )
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        setupTag("Limit pending", color: dirColor)
+                    }
+                }
+                PointMark(
+                    x: .value("SP2L SL label x", planEnd),
+                    y: .value("SP2L SL label y", sl)
+                )
+                .symbolSize(0)
+                .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                    setupTag("SL", color: Theme.Color.danger)
+                }
+                ForEach(Array(targets.enumerated()), id: \.offset) { offset, target in
+                    PointMark(
+                        x: .value("SP2L TP\(offset + 1) label x", planEnd),
+                        y: .value("SP2L TP\(offset + 1) label y", target)
+                    )
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        let ratio = indicatorConfig.sp2lRiskReward * Double(offset + 1)
+                        setupTag(
+                            "TP\(offset + 1) R\(String(format: "%.2g", ratio))",
+                            color: Theme.Color.success
+                        )
+                    }
+                }
+
+            }
+        }
+    }
+
+    /// Pin-bar confirmation overlay for SP2L and BTB. The tested level is
+    /// kept visible from breakout through resolution, while the rejection
+    /// candle anchors the entry/SL/TP plan.
+    @ChartContentBuilder
+    private var pinBarComboMarks: some ChartContent {
+        let lastIndex = max(0, candles.count - 1)
+        ForEach(pinBarComboResults) { result in
+            let color = pinBarComboColor(result.direction)
+            let start = Double(result.breakoutIndex)
+            let confirmation = Double(result.confirmationIndex)
+            let end = Double(result.resolveIndex ?? lastIndex)
+
+            RuleMark(
+                xStart: .value("Pin Bar level start", start),
+                xEnd: .value("Pin Bar level end", end),
+                y: .value("Pin Bar tested level", result.level)
+            )
+            .foregroundStyle(IndicatorKind.pinBarCombo.color.opacity(0.75))
+            .lineStyle(StrokeStyle(lineWidth: 1.2, dash: [4, 3]))
+
+            RectangleMark(
+                xStart: .value("Pin Bar candle start", confirmation - 0.34),
+                xEnd: .value("Pin Bar candle end", confirmation + 0.34),
+                yStart: .value("Pin Bar low", result.pinBarLow),
+                yEnd: .value("Pin Bar high", result.pinBarHigh)
+            )
+            .foregroundStyle(color.opacity(0.16))
+
+            PointMark(
+                x: .value("Pin Bar confirmation x", confirmation),
+                y: .value(
+                    "Pin Bar confirmation y",
+                    result.direction == .long ? result.pinBarLow : result.pinBarHigh
+                )
+            )
+            .symbolSize(68)
+            .foregroundStyle(color)
+            .annotation(
+                position: result.direction == .long ? .bottom : .top,
+                alignment: .center,
+                spacing: 3
+            ) {
+                setupTag(
+                    result.kind == .sp2l ? "PIN · SP2L" : "PIN · BTB",
+                    color: color
+                )
+            }
+
+            RuleMark(
+                xStart: .value("Pin Bar entry start", confirmation),
+                xEnd: .value("Pin Bar entry end", end),
+                y: .value("Pin Bar entry", result.entry)
+            )
+            .foregroundStyle(color.opacity(0.95))
+            .lineStyle(StrokeStyle(lineWidth: 1.5))
+
+            RuleMark(
+                xStart: .value("Pin Bar SL start", confirmation),
+                xEnd: .value("Pin Bar SL end", end),
+                y: .value("Pin Bar SL", result.stopLoss)
+            )
+            .foregroundStyle(Theme.Color.danger.opacity(0.9))
+            .lineStyle(StrokeStyle(lineWidth: 1.2))
+
+            RuleMark(
+                xStart: .value("Pin Bar TP start", confirmation),
+                xEnd: .value("Pin Bar TP end", end),
+                y: .value("Pin Bar TP", result.takeProfit)
+            )
+            .foregroundStyle(Theme.Color.success.opacity(0.9))
+            .lineStyle(StrokeStyle(lineWidth: 1.2))
+
+            PointMark(
+                x: .value("Pin Bar entry label x", end),
+                y: .value("Pin Bar entry label y", result.entry)
+            )
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                setupTag(pinBarComboStatusLabel(result), color: color)
+            }
+
+            PointMark(
+                x: .value("Pin Bar SL label x", end),
+                y: .value("Pin Bar SL label y", result.stopLoss)
+            )
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                setupTag("SL", color: Theme.Color.danger)
+            }
+
+            PointMark(
+                x: .value("Pin Bar TP label x", end),
+                y: .value("Pin Bar TP label y", result.takeProfit)
+            )
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                setupTag(
+                    "TP R\(String(format: "%.2g", indicatorConfig.pinBarRiskReward))",
+                    color: Theme.Color.success
+                )
+            }
+        }
+    }
+
+    /// MicroMap overlay: spike context, micro-channel structure and the
+    /// lifecycle of each close-confirmed attempt.
+    @ChartContentBuilder
+    private var microMapMarks: some ChartContent {
+        let lastIndex = max(0, candles.count - 1)
+        ForEach(microMapResults) { result in
+            let color = microMapDirectionColor(result.direction)
+            RectangleMark(
+                xStart: .value("MicroMap spike start", Double(result.spikeStartIndex)),
+                xEnd: .value("MicroMap spike end", Double(result.spikeEndIndex)),
+                yStart: .value("MicroMap spike low", result.spikeLow),
+                yEnd: .value("MicroMap spike high", result.spikeHigh)
+            )
+            .foregroundStyle(color.opacity(0.09))
+
+            if let gap = result.confluence.pressureGap {
+                RectangleMark(
+                    xStart: .value("MicroMap pressure gap start", Double(gap.startIndex)),
+                    xEnd: .value("MicroMap pressure gap end", Double(gap.endIndex)),
+                    yStart: .value("MicroMap pressure gap low", gap.low),
+                    yEnd: .value("MicroMap pressure gap high", gap.high)
+                )
+                .foregroundStyle(Theme.Color.accentStart.opacity(0.20))
+            }
+
+            ForEach(Array(result.microStartIndex...result.microEndIndex), id: \.self) { index in
+                LineMark(
+                    x: .value("MicroMap channel bar", Double(index)),
+                    y: .value(
+                        "MicroMap channel structure",
+                        result.direction == .long ? candles[index].high : candles[index].low
+                    ),
+                    series: .value("MicroMap channel", "micromap-\(result.id)")
+                )
+                .foregroundStyle(color.opacity(0.75))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [3, 2]))
+            }
+
+            PointMark(
+                x: .value("MicroMap title x", Double(result.spikeStartIndex)),
+                y: .value("MicroMap title y", result.spikeHigh)
+            )
+            .symbolSize(0)
+            .annotation(position: .top, alignment: .leading, spacing: 1) {
+                setupTag(
+                    microMapTitle(result),
+                    color: color
+                )
+            }
+
+            ForEach(result.attempts) { attempt in
+                let planStart = Double(attempt.anchorIndex ?? result.microEndIndex)
+                let planEnd = Double(
+                    attempt.targetIndex
+                        ?? attempt.stopIndex
+                        ?? result.endIndex
+                        ?? lastIndex
+                )
+                let opacity = microMapAttemptOpacity(attempt.status)
+                let dash = microMapAttemptDash(attempt.status)
+
+                if let entry = attempt.entry,
+                   let stop = attempt.stopLoss,
+                   let target = attempt.takeProfit {
+                    RuleMark(
+                        xStart: .value("MicroMap entry start", planStart),
+                        xEnd: .value("MicroMap entry end", planEnd),
+                        y: .value("MicroMap entry", entry)
+                    )
+                    .foregroundStyle(color.opacity(opacity))
+                    .lineStyle(StrokeStyle(lineWidth: attempt.status == .active ? 1.8 : 1.2, dash: dash))
+
+                    RuleMark(
+                        xStart: .value("MicroMap stop start", planStart),
+                        xEnd: .value("MicroMap stop end", planEnd),
+                        y: .value("MicroMap stop", stop)
+                    )
+                    .foregroundStyle(Theme.Color.danger.opacity(opacity))
+                    .lineStyle(StrokeStyle(lineWidth: 1.2, dash: dash))
+
+                    RuleMark(
+                        xStart: .value("MicroMap target start", planStart),
+                        xEnd: .value("MicroMap target end", planEnd),
+                        y: .value("MicroMap target", target)
+                    )
+                    .foregroundStyle(Theme.Color.success.opacity(opacity))
+                    .lineStyle(StrokeStyle(lineWidth: 1.2, dash: dash))
+
+                    PointMark(
+                        x: .value("MicroMap entry label x", planEnd),
+                        y: .value("MicroMap entry label y", entry)
+                    )
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        setupTag("Entry \(attempt.number)", color: color.opacity(opacity))
+                    }
+                } else {
+                    RuleMark(
+                        xStart: .value("MicroMap waiting start", planStart),
+                        xEnd: .value("MicroMap waiting end", planEnd),
+                        y: .value("MicroMap waiting trigger", attempt.triggerLevel)
+                    )
+                    .foregroundStyle(color.opacity(0.55))
+                    .lineStyle(StrokeStyle(lineWidth: 1.2, dash: [3, 4]))
+
+                    PointMark(
+                        x: .value("MicroMap pending label x", planEnd),
+                        y: .value("MicroMap pending label y", attempt.triggerLevel)
+                    )
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        setupTag("Entry \(attempt.number) pending", color: color.opacity(0.7))
+                    }
+                }
+
+                if let trigger = attempt.triggerIndex, let entry = attempt.entry {
+                    PointMark(
+                        x: .value("MicroMap fill x", Double(trigger)),
+                        y: .value("MicroMap fill y", entry)
+                    )
+                    .symbolSize(46)
+                    .foregroundStyle(color.opacity(opacity))
+                }
+            }
+
+            if result.stage == .invalidated, let end = result.endIndex {
+                PointMark(
+                    x: .value("MicroMap invalid x", Double(end)),
+                    y: .value(
+                        "MicroMap invalid y",
+                        result.direction == .long ? candles[end].low : candles[end].high
+                    )
+                )
+                .symbolSize(60)
+                .foregroundStyle(Theme.Color.danger)
+                .annotation(
+                    position: result.direction == .long ? .bottom : .top,
+                    alignment: .center,
+                    spacing: 2
+                ) {
+                    setupTag("INVALID x3", color: Theme.Color.danger)
+                }
+            }
+        }
+    }
+
+    /// Major Trend Reversal overlay: prior channel, old extreme, second
+    /// test, neckline confirmation and the resulting trade plan.
+    @ChartContentBuilder
+    private var mtrMarks: some ChartContent {
+        let lastIndex = max(0, candles.count - 1)
+        ForEach(mtrResults) { result in
+            let color = mtrDirectionColor(result.direction)
+            let isForming = result.stage == .forming
+            let opacity = isForming ? 0.55 : (result.stage == .expired ? 0.30 : 0.90)
+            let channelDelta = result.channelEndIndex - result.channelStartIndex
+            let slope = channelDelta == 0 ? 0 :
+                (result.channelEndPrice - result.channelStartPrice) / Double(channelDelta)
+            let projectedMain = result.channelStartPrice
+                + slope * Double(result.breakoutIndex - result.channelStartIndex)
+            let parallelOffset = result.parallelStartPrice - result.channelStartPrice
+            let projectedParallel = projectedMain + parallelOffset
+            let planEnd = Double(result.resolveIndex ?? lastIndex)
+
+            ForEach([0, 1], id: \.self) { endpoint in
+                LineMark(
+                    x: .value(
+                        "MTR channel x",
+                        endpoint == 0 ? Double(result.channelStartIndex) : Double(result.breakoutIndex)
+                    ),
+                    y: .value(
+                        "MTR channel y",
+                        endpoint == 0 ? result.channelStartPrice : projectedMain
+                    ),
+                    series: .value("MTR channel series", "mtr-main-\(result.id)")
+                )
+                .foregroundStyle(IndicatorKind.mtrStrategy.color.opacity(opacity))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+
+                LineMark(
+                    x: .value(
+                        "MTR parallel x",
+                        endpoint == 0 ? Double(result.channelStartIndex) : Double(result.breakoutIndex)
+                    ),
+                    y: .value(
+                        "MTR parallel y",
+                        endpoint == 0 ? result.parallelStartPrice : projectedParallel
+                    ),
+                    series: .value("MTR parallel series", "mtr-parallel-\(result.id)")
+                )
+                .foregroundStyle(IndicatorKind.mtrStrategy.color.opacity(opacity * 0.65))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+            }
+
+            RuleMark(
+                xStart: .value("MTR old extreme start", Double(result.trendExtremeIndex)),
+                xEnd: .value("MTR old extreme end", Double(result.retestIndex)),
+                y: .value("MTR old extreme", result.trendExtremePrice)
+            )
+            .foregroundStyle(color.opacity(opacity * 0.65))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+
+            RuleMark(
+                xStart: .value("MTR neckline start", Double(result.breakoutIndex)),
+                xEnd: .value("MTR neckline end", planEnd),
+                y: .value("MTR neckline", result.neckline)
+            )
+            .foregroundStyle(color.opacity(opacity))
+            .lineStyle(StrokeStyle(lineWidth: 1.4, dash: [5, 3]))
+
+            PointMark(
+                x: .value("MTR retest x", Double(result.retestIndex)),
+                y: .value("MTR retest y", result.retestPrice)
+            )
+            .symbolSize(isForming ? 54 : 72)
+            .foregroundStyle(color.opacity(opacity))
+            .annotation(
+                position: result.direction == .long ? .bottom : .top,
+                alignment: .center,
+                spacing: 3
+            ) {
+                setupTag("MTR · \(result.variant.label)", color: color.opacity(opacity))
+            }
+
+            if let confirmation = result.confirmationIndex {
+                PointMark(
+                    x: .value("MTR confirmation x", Double(confirmation)),
+                    y: .value("MTR confirmation y", candles[confirmation].close)
+                )
+                .symbolSize(82)
+                .foregroundStyle(color)
+                .annotation(
+                    position: result.direction == .long ? .top : .bottom,
+                    alignment: .center,
+                    spacing: 3
+                ) {
+                    setupTag(
+                        result.direction == .long ? "MTR LONG confirmed" : "MTR SHORT confirmed",
+                        color: color
+                    )
+                }
+            }
+
+            if let entry = result.entry,
+               let stop = result.stopLoss,
+               let target = result.takeProfit,
+               let confirmation = result.confirmationIndex {
+                let planStart = Double(confirmation)
+                RuleMark(
+                    xStart: .value("MTR entry start", planStart),
+                    xEnd: .value("MTR entry end", planEnd),
+                    y: .value("MTR entry", entry)
+                )
+                .foregroundStyle(color.opacity(opacity))
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+
+                RuleMark(
+                    xStart: .value("MTR stop start", planStart),
+                    xEnd: .value("MTR stop end", planEnd),
+                    y: .value("MTR stop", stop)
+                )
+                .foregroundStyle(Theme.Color.danger.opacity(opacity))
+                .lineStyle(StrokeStyle(lineWidth: 1.3))
+
+                RuleMark(
+                    xStart: .value("MTR target start", planStart),
+                    xEnd: .value("MTR target end", planEnd),
+                    y: .value("MTR target", target)
+                )
+                .foregroundStyle(Theme.Color.success.opacity(opacity))
+                .lineStyle(StrokeStyle(lineWidth: 1.3))
+
+                PointMark(x: .value("MTR status x", planEnd), y: .value("MTR status y", entry))
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        setupTag(mtrStatusLabel(result), color: color.opacity(opacity))
+                    }
+                PointMark(x: .value("MTR SL x", planEnd), y: .value("MTR SL y", stop))
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        setupTag("SL", color: Theme.Color.danger.opacity(opacity))
+                    }
+                PointMark(x: .value("MTR TP x", planEnd), y: .value("MTR TP y", target))
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        setupTag(
+                            "TP R\(String(format: "%.2g", indicatorConfig.mtrRiskReward))",
+                            color: Theme.Color.success.opacity(opacity)
+                        )
+                    }
+            }
+        }
+    }
+
+    private func mtrDirectionColor(_ direction: MTRSetup.Direction) -> Color {
+        direction == .long ? Theme.Color.success : Theme.Color.danger
+    }
+
+    private func mtrStatusLabel(_ result: MTRSetup.Result) -> String {
+        switch result.stage {
+        case .forming: return "MTR forming"
+        case .confirmed: return result.direction == .long ? "LONG active" : "SHORT active"
+        case .hitTP: return "Target hit"
+        case .hitSL: return "Stopped"
+        case .expired: return "Expired"
+        }
+    }
+
+    private func microMapDirectionColor(_ direction: MicroMapSetup.Direction) -> Color {
+        direction == .long ? Theme.Color.success : Theme.Color.danger
+    }
+
+    private func microMapTitle(_ result: MicroMapSetup.Result) -> String {
+        let direction = result.direction == .long ? "LONG" : "SHORT"
+        let quality: String
+        switch result.confluence.quality {
+        case .standard: quality = "STANDARD"
+        case .confirmed: quality = "CONFIRMED"
+        case .strong: quality = "STRONG"
+        }
+        return "MICROMAP \(direction) · \(quality) \(result.confluence.score)/6"
+    }
+
+    private func microMapAttemptOpacity(_ status: MicroMapSetup.AttemptStatus) -> Double {
+        switch status {
+        case .waiting: return 0.55
+        case .active: return 0.95
+        case .stopped: return 0.35
+        case .succeeded: return 0.85
+        }
+    }
+
+    private func microMapAttemptDash(_ status: MicroMapSetup.AttemptStatus) -> [CGFloat] {
+        switch status {
+        case .waiting: return [3, 4]
+        case .active, .succeeded: return []
+        case .stopped: return [2, 3]
+        }
+    }
+
     private func setupDirectionColor(_ dir: NYOpenSetup.Direction?) -> Color {
         switch dir {
         case .long:  return Theme.Color.success
         case .short: return Theme.Color.danger
         case nil:    return Theme.Color.warn
+        }
+    }
+
+    private func sp2lDirectionColor(_ dir: SP2LSetup.Direction) -> Color {
+        switch dir {
+        case .long:  return Theme.Color.success
+        case .short: return Theme.Color.danger
+        }
+    }
+
+    private func pinBarComboColor(_ direction: PinBarComboSetup.Direction) -> Color {
+        direction == .long ? Theme.Color.success : Theme.Color.danger
+    }
+
+    private func pinBarComboStatusLabel(_ result: PinBarComboSetup.Result) -> String {
+        switch result.status {
+        case .active: return result.direction == .long ? "LONG active" : "SHORT active"
+        case .hitTP: return "Target hit"
+        case .hitSL: return "Stopped"
+        case .expired: return "Time exit"
         }
     }
 
@@ -3113,6 +3867,75 @@ struct ChartView: View {
             params["keyValue"]      = .double(config.utKeyValue)
             params["atrPeriod"]     = .double(Double(config.utATRPeriod))
             params["useHeikinAshi"] = .bool(config.utUseHeikinAshi)
+        case .sp2lStrategy:
+            params["minSpikeBars"]        = .double(Double(config.sp2lMinSpikeBars))
+            params["maxSpikeBars"]        = .double(Double(config.sp2lMaxSpikeBars))
+            params["rangeBars"]           = .double(Double(config.sp2lRangeBars))
+            params["atrPeriod"]           = .double(Double(config.sp2lATRPeriod))
+            params["minSpikeATR"]         = .double(config.sp2lMinSpikeATR)
+            params["maxSpikeATR"]         = .double(config.sp2lMaxSpikeATR)
+            params["maxRangeATR"]         = .double(config.sp2lMaxRangeATR)
+            params["minGapPct"]           = .double(config.sp2lMinGapPct)
+            params["maxPressureGapBar"]   = .double(Double(config.sp2lMaxPressureGapBar))
+            params["emaPeriod"]           = .double(Double(config.sp2lEMAPeriod))
+            params["useEMAContext"]       = .bool(config.sp2lUseEMAContext)
+            params["maxEMADistanceATR"]   = .double(config.sp2lMaxEMADistanceATR)
+            params["maxPullbackBars"]     = .double(Double(config.sp2lMaxPullbackBars))
+            params["maxContinuationBars"] = .double(Double(config.sp2lMaxContinuationBars))
+            params["riskReward"]          = .double(config.sp2lRiskReward)
+            params["targetCount"]         = .double(Double(config.sp2lTargetCount))
+        case .pinBarCombo:
+            params["enableSP2L"]            = .bool(config.pinBarEnableSP2L)
+            params["enableBTB"]             = .bool(config.pinBarEnableBTB)
+            params["atrPeriod"]             = .double(Double(config.pinBarATRPeriod))
+            params["minWickBodyRatio"]      = .double(config.pinBarMinWickBodyRatio)
+            params["minWickRangeRatio"]     = .double(config.pinBarMinWickRangeRatio)
+            params["maxBodyRangeRatio"]     = .double(config.pinBarMaxBodyRangeRatio)
+            params["minCloseLocation"]      = .double(config.pinBarMinCloseLocation)
+            params["oppositeWickDominance"] = .double(config.pinBarOppositeWickDominance)
+            params["touchToleranceATR"]     = .double(config.pinBarTouchToleranceATR)
+            params["stopBufferATR"]         = .double(config.pinBarStopBufferATR)
+            params["maxConfirmationBars"]   = .double(Double(config.pinBarMaxConfirmationBars))
+            params["btbLookbackBars"]       = .double(Double(config.pinBarBTBLookbackBars))
+            params["minBreakoutBodyATR"]    = .double(config.pinBarMinBreakoutBodyATR)
+            params["riskReward"]            = .double(config.pinBarRiskReward)
+            params["maxContinuationBars"]   = .double(Double(config.pinBarMaxContinuationBars))
+        case .microMapStrategy:
+            params["atrPeriod"]             = .double(Double(config.microMapATRPeriod))
+            params["minSpikeBars"]          = .double(Double(config.microMapMinSpikeBars))
+            params["maxSpikeBars"]          = .double(Double(config.microMapMaxSpikeBars))
+            params["minSpikeATR"]           = .double(config.microMapMinSpikeATR)
+            params["minDirectionalRatio"]  = .double(config.microMapMinDirectionalRatio)
+            params["minBodyRatio"]          = .double(config.microMapMinBodyRatio)
+            params["maxCloseFromExtreme"]  = .double(config.microMapMaxCloseFromExtreme)
+            params["minMicroBars"]          = .double(Double(config.microMapMinMicroBars))
+            params["maxMicroBars"]          = .double(Double(config.microMapMaxMicroBars))
+            params["maxMicroRangeRatio"]   = .double(config.microMapMaxMicroRangeRatio)
+            params["maxRetracement"]        = .double(config.microMapMaxRetracement)
+            params["structureToleranceATR"] = .double(config.microMapStructureToleranceATR)
+            params["maxReentryBars"]        = .double(Double(config.microMapMaxReentryBars))
+            params["riskReward"]             = .double(config.microMapRiskReward)
+            params["confluenceBalanceBars"] = .double(Double(config.microMapConfluenceBalanceBars))
+            params["confluenceEMAPeriod"]   = .double(Double(config.microMapConfluenceEMAPeriod))
+            params["minPressureGapPct"]     = .double(config.microMapMinPressureGapPct)
+            params["maxPressureGapBar"]     = .double(Double(config.microMapMaxPressureGapBar))
+            params["requirePressureGap"]    = .bool(config.microMapRequirePressureGap)
+            params["requireKeyLevelBreak"] = .bool(config.microMapRequireKeyLevelBreak)
+            params["minConfluenceScore"]   = .double(Double(config.microMapMinConfluenceScore))
+            params["notifyEvents"]           = .bool(config.microMapNotifyEvents)
+        case .mtrStrategy:
+            params["pivotDepth"]          = .double(Double(config.mtrPivotDepth))
+            params["atrPeriod"]           = .double(Double(config.mtrATRPeriod))
+            params["minTrendLegATR"]      = .double(config.mtrMinTrendLegATR)
+            params["breakBufferATR"]      = .double(config.mtrBreakBufferATR)
+            params["retestToleranceATR"]  = .double(config.mtrRetestToleranceATR)
+            params["maxFailedBreakATR"]   = .double(config.mtrMaxFailedBreakATR)
+            params["maxRetestBars"]       = .double(Double(config.mtrMaxRetestBars))
+            params["maxConfirmationBars"] = .double(Double(config.mtrMaxConfirmationBars))
+            params["stopBufferATR"]       = .double(config.mtrStopBufferATR)
+            params["riskReward"]          = .double(config.mtrRiskReward)
+            params["maxTradeBars"]        = .double(Double(config.mtrMaxTradeBars))
+            params["maxResults"]          = .double(Double(config.mtrMaxResults))
         default:
             break
         }
@@ -3546,6 +4369,66 @@ struct ChartView: View {
             if r.orLow < lo { lo = r.orLow }
             if r.orHigh > hi { hi = r.orHigh }
         }
+        for r in sp2lResults {
+            for v in [
+                r.brokenLevel,
+                r.spikeLow,
+                r.spikeHigh,
+                r.entry,
+                r.stopLoss,
+            ] + r.takeProfits(count: indicatorConfig.sp2lTargetCount) {
+                if v < lo { lo = v }
+                if v > hi { hi = v }
+            }
+        }
+        for result in pinBarComboResults {
+            for value in [
+                result.level,
+                result.pinBarLow,
+                result.pinBarHigh,
+                result.entry,
+                result.stopLoss,
+                result.takeProfit
+            ] {
+                if value < lo { lo = value }
+                if value > hi { hi = value }
+            }
+        }
+        for result in microMapResults {
+            if result.spikeLow < lo { lo = result.spikeLow }
+            if result.spikeHigh > hi { hi = result.spikeHigh }
+            for attempt in result.attempts {
+                for value in [attempt.entry, attempt.stopLoss, attempt.takeProfit].compactMap({ $0 }) {
+                    if value < lo { lo = value }
+                    if value > hi { hi = value }
+                }
+            }
+        }
+        for result in mtrResults {
+            let channelBars = result.channelEndIndex - result.channelStartIndex
+            let channelSlope = channelBars == 0 ? 0 :
+                (result.channelEndPrice - result.channelStartPrice) / Double(channelBars)
+            let projectedMain = result.channelStartPrice
+                + channelSlope * Double(result.breakoutIndex - result.channelStartIndex)
+            let projectedParallel = projectedMain
+                + (result.parallelStartPrice - result.channelStartPrice)
+            var values = [
+                result.channelStartPrice,
+                result.channelEndPrice,
+                result.parallelStartPrice,
+                result.parallelEndPrice,
+                projectedMain,
+                projectedParallel,
+                result.trendExtremePrice,
+                result.retestPrice,
+                result.neckline
+            ]
+            values += [result.entry, result.stopLoss, result.takeProfit].compactMap { $0 }
+            for value in values {
+                if value < lo { lo = value }
+                if value > hi { hi = value }
+            }
+        }
         for session in volumeProfileSessions {
             for bucket in session.buckets {
                 if bucket.priceLevel < lo { lo = bucket.priceLevel }
@@ -3667,4 +4550,3 @@ struct ChartView: View {
         return f
     }()
 }
-

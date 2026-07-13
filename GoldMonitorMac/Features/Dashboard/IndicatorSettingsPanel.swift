@@ -34,14 +34,15 @@ struct IndicatorSettingsPanel: View {
                 .stroke(Theme.Color.border, lineWidth: 1)
         )
         .offset(floatOffset)
-        .gesture(
-            DragGesture()
-                .onChanged { floatOffset = CGSize(
-                    width: floatOrigin.width + $0.translation.width,
-                    height: floatOrigin.height + $0.translation.height
-                )}
-                .onEnded { _ in floatOrigin = floatOffset }
-        )
+    }
+
+    private var panelDragGesture: some Gesture {
+        DragGesture()
+            .onChanged { floatOffset = CGSize(
+                width: floatOrigin.width + $0.translation.width,
+                height: floatOrigin.height + $0.translation.height
+            )}
+            .onEnded { _ in floatOrigin = floatOffset }
     }
 
     private var header: some View {
@@ -60,6 +61,8 @@ struct IndicatorSettingsPanel: View {
             }
             .buttonStyle(.plain)
         }
+        .contentShape(Rectangle())
+        .gesture(panelDragGesture)
     }
 
     @ViewBuilder

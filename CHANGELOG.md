@@ -4,6 +4,41 @@ All notable changes to Helix Trading App are documented here.
 
 ---
 
+## [Unreleased] — 2026-07-13
+
+**Close-confirmed price-action strategies, chart overlays, and reliable layer-driven notifications.**
+
+### New Price-Action Strategies
+
+- **SP2L Strategy** — detects a two-to-four-bar spike, balance, breakout, pressure-gap follow-through, and the first pullback limit entry. Draws the structure, entry, stop, configurable targets, add-on level, and lifecycle state on the chart.
+- **Pin Bar Combo** — adds close-confirmed rejection entries for both SP2L pullbacks and BTB (break-and-retest) structures. Includes configurable wick/body quality, ATR touch and stop buffers, confirmation expiry, risk/reward, and trade timeout.
+- **MicroMap Strategy** — detects a strong directional spike followed by a weak counter-trend micro-channel, up to three close-confirmed entry attempts, configurable confluence scoring, invalidation, and trade resolution.
+- **Major Trend Reversal** — detects an established pivot channel, close-confirmed channel break, second test of the old extreme, and neckline confirmation. Supports higher-low/double-bottom/failed-lower-low bullish variants and mirrored bearish variants, with entry, stop, target, expiry, and stop-first handling for ambiguous candles.
+
+### Chart and Settings
+
+- Added full overlays for all four strategies, including structure lines, setup labels, confirmation points, entry/stop/target plans, and resolved or expired states.
+- Added persistent per-instance parameters to the indicator settings model, with backward-compatible optional decoding for existing saved configurations.
+- Added derived-data cache slots and visible-window filtering so strategy computation is reused across chart redraws and only recent relevant setups render.
+- Added layers-menu integration and vertical-domain expansion for every price in a visible trade plan.
+- Kept Major Trend Reversal hidden from the iPad indicator picker for now while preserving iPad/iPhone build compatibility; shared SP2L, Pin Bar, BTB, and MicroMap overlays remain available on the touch chart.
+
+### Notifications
+
+- The chart layer eye is now the per-indicator notification switch; the global Strategy Signals setting remains the master switch.
+- Added closed-candle notifications for SP2L formation, SP2L + Pin Bar confirmation, BTB + Pin Bar confirmation, MicroMap formation/entries/invalidation, and confirmed Major Trend Reversals.
+- Visible Change of Character, Order Block, and Steroid Order Block layers now follow the same global and eye-based notification policy.
+- Indicator activation, visibility changes, symbol/timeframe changes, and parameter edits seed a fresh baseline so historical setups do not generate alerts.
+- Added stable event deduplication, persisted Inbox records, foreground macOS banners, notification-permission diagnostics, and a permission status row in Settings.
+
+### Tests and Reliability
+
+- Added macOS unit-test coverage for bullish and bearish detections, rejection cases, expiry, exact entry/stop/target calculations, stop-first ambiguous candles, and backward-compatible settings decoding.
+- Added dedicated test suites for SP2L, Pin Bar Combo/BTB, MicroMap, and Major Trend Reversal.
+- Verified the complete macOS test suite and the iPad/iPhone simulator build after merging the latest upstream main branch.
+
+---
+
 ## [v1.4 build 7] — 2026-07-12
 
 **Adaptive iPhone + iPad redesign, and automatic Faraz re-login.**
