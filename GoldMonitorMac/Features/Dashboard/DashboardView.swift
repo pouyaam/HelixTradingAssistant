@@ -35,6 +35,10 @@ struct DashboardView: View {
 
     @State private var candles: [Candle] = []
     @State private var isLoading: Bool = false
+    /// Higher-timeframe CHoCH zones re-anchored to dates, for the "show HTF
+    /// zones on my LTF chart" overlay. Loaded from a separate HTF candle
+    /// read; recomputed on pair / timeframe change and CHoCH settings edits.
+    @State private var htfChochZones: [ChangeOfCharacter.DatedZone] = []
     /// User-pinned X-axis window, in *bar indices* (Double for fractional
     /// smoothness during pan/zoom). nil ⇒ chart auto-fits to the full
     /// series. Index-based so consecutive candles never get separated by
@@ -739,12 +743,15 @@ struct DashboardView: View {
         let inst = IndicatorInstance(kind: kind)
         indicatorInstances.append(inst)
         saveIndicators()
+        if kind == .changeOfCharacter { Task { await reloadHTFChoch() } }
     }
 
     /// Remove an indicator instance by id.
     private func removeIndicator(id: UUID) {
+        let removed = indicatorInstances.first { $0.id == id }
         indicatorInstances.removeAll { $0.id == id }
         saveIndicators()
+        if removed?.kind == .changeOfCharacter { Task { await reloadHTFChoch() } }
     }
 
     /// Update an indicator instance in-place.
@@ -753,6 +760,7 @@ struct DashboardView: View {
         indicatorInstances[idx] = inst
         saveIndicators()
         syncIndicatorParamsToConfig(inst)
+        if inst.kind == .changeOfCharacter { Task { await reloadHTFChoch() } }
     }
 
     /// Toggle hide/show for an indicator instance.
@@ -760,6 +768,7 @@ struct DashboardView: View {
         guard let idx = indicatorInstances.firstIndex(where: { $0.id == id }) else { return }
         indicatorInstances[idx].hidden.toggle()
         saveIndicators()
+        if indicatorInstances[idx].kind == .changeOfCharacter { Task { await reloadHTFChoch() } }
     }
 
     private func addOscillator(_ kind: OscillatorKind) {
@@ -922,6 +931,9 @@ struct DashboardView: View {
             if let v = p["requireFVG"]    { oscillatorConfig.chochRequireFVG = v.boolValue }
             if let v = p["showMitigated"] { oscillatorConfig.chochShowMitigated = v.boolValue }
             if let v = p["notifyEvents"]  { oscillatorConfig.chochNotifyEvents = v.boolValue }
+            if let v = p["htfEnabled"]    { oscillatorConfig.chochHTFEnabled = v.boolValue }
+            if let v = p["htfTimeframe"]  { oscillatorConfig.chochHTFTimeframe = v.stringValue }
+            if let v = p["htfCount"]      { oscillatorConfig.chochHTFCount = Int(v.doubleValue) }
         case .volumeProfile:
             if let v = p["bucketCount"]  { oscillatorConfig.vpBucketCount = Int(v.doubleValue) }
             if let v = p["valueAreaPct"] { oscillatorConfig.vpValueAreaPct = v.doubleValue }
@@ -1639,6 +1651,7 @@ struct DashboardView: View {
                     indicators: Set(visibleIndicatorInstances.map(\.kind)),
                     indicatorConfig: oscillatorConfig,
                     indicatorInstances: visibleIndicatorInstances,
+                    htfChochZones: htfChochZones,
                     srLevels: srVisible ? srLevels : .init(support: [], resistance: []),
                     fvgZones: fvgVisible ? fvgZones : [],
                     supplyDemandZones: supplyDemandVisible ? supplyDemandZones : [],
@@ -3370,6 +3383,45 @@ struct DashboardView: View {
             alertStore.evaluateRSI(r, pricePeek: livePeek, for: pairID)
         }
         notifyOrderBlockEvents(result, pairID: pairID)
+        await reloadHTFChoch()
+    }
+
+    /// Load the higher-timeframe CHoCH zones for the multi-timeframe
+    /// overlay. Reads the configured HTF candles for the current pair,
+    /// computes the last N zones, and re-anchors them to dates so ChartView
+    /// can project them onto the currently-displayed (lower) timeframe.
+    /// A no-op (clears the overlay) unless the CHoCH indicator is visible,
+    /// the HTF option is on, and the chosen HTF is strictly coarser than
+    /// the timeframe in view.
+    private func reloadHTFChoch() async {
+        let cfg = oscillatorConfig
+        let active = visibleIndicatorInstances.contains { $0.kind == .changeOfCharacter }
+        guard active, cfg.chochHTFEnabled,
+              let db = app.database,
+              let pairID = app.selectedPairID,
+              let htf = Timeframe(rawValue: cfg.chochHTFTimeframe),
+              htf.seconds > timeframe.seconds
+        else {
+            if !htfChochZones.isEmpty { htfChochZones = [] }
+            return
+        }
+
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        let respectsWeekend = pair?.category != .crypto
+        let until = replay.cursor ?? Date()
+        let htfCandles = await OHLCCandleLoader.loadAsync(
+            repo: db.ohlcRepo, pairID: pairID, tf: htf,
+            since: Date.distantPast, until: until,
+            dropClosedDays: respectsWeekend
+        )
+        htfChochZones = ChangeOfCharacter.datedZones(
+            htfCandles,
+            swingLength: cfg.chochSwingLength,
+            minSwingPct: cfg.chochMinSwingPct,
+            requireFVG: cfg.chochRequireFVG,
+            showMitigated: cfg.chochShowMitigated,
+            maxZones: max(1, cfg.chochHTFCount)
+        )
     }
 
     /// Cheap live-tick path. The full `reloadCandles()` now re-reads the
