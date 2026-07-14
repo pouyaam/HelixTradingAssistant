@@ -189,6 +189,11 @@ struct ChartView: View {
     /// is applied against a stable reference (mirrors how
     /// `magnifyStartDomain` anchors the X pinch).
     @State private var yScaleStartDomain: ClosedRange<Double>?
+    /// Time-axis horizontal-scale gesture: the X window captured at the
+    /// start of a drag on the bottom time axis, held fixed so the scale
+    /// factor applies against a stable reference (mirrors
+    /// `yScaleStartDomain` for the price axis).
+    @State private var xScaleStartDomain: ClosedRange<Double>?
 
     /// In-progress drawing endpoints — captured on drag start, updated
     /// each frame, cleared on drag end. Lets the chart render a live
@@ -253,6 +258,11 @@ struct ChartView: View {
                 // it stays interactive, and on the right so it doesn't
                 // steal pan/hover from the main canvas.
                 .overlay(alignment: .trailing) { priceAxisScaleStrip }
+                // TradingView-style time-axis drag strip: a transparent
+                // strip over the bottom axis gutter that scales the X
+                // (time) axis horizontally. Inset on the trailing edge so
+                // it doesn't overlap the price-axis column at the corner.
+                .overlay(alignment: .bottom) { timeAxisScaleStrip }
                 .overlay(alignment: .topTrailing) { Group { if showHoverTooltip { hoverTooltip } } }
                 // No global .animation() modifiers here. Previously:
                 //   .animation(.easeOut(0.15), value: hovered)
@@ -4262,6 +4272,61 @@ struct ChartView: View {
                 yDomain = (center - newHalf) ... (center + newHalf)
             }
             .onEnded { _ in yScaleStartDomain = nil }
+    }
+
+    /// Transparent gesture strip over the bottom time-axis gutter.
+    /// Dragging it horizontally scales the X axis (TradingView's time-
+    /// scale drag): drag LEFT to zoom out (compress candles), RIGHT to
+    /// zoom in (stretch them). Double-click clears the manual window and
+    /// hands the axis back to the default view. Trailing padding leaves
+    /// the price-axis column's corner alone. Height roughly matches the
+    /// axis-label gutter so it doesn't eat the chart canvas's pan area.
+    private var timeAxisScaleStrip: some View {
+        GeometryReader { geo in
+            Rectangle()
+                .fill(Color.clear)
+                .contentShape(Rectangle())
+                .gesture(timeScaleDrag(plotWidth: geo.size.width))
+                // Double-click the axis → back to the default window,
+                // matching the price axis's double-click-to-auto-fit.
+                .onTapGesture(count: 2) { xDomain = nil }
+                // Resize cursor on hover so the strip reads as draggable.
+                .onHover { inside in
+                    if inside { NSCursor.resizeLeftRight.push() }
+                    else      { NSCursor.pop() }
+                }
+        }
+        .frame(height: 28)
+        // Keep clear of the trailing price-axis scale column so a corner
+        // drag doesn't fight between the two gestures.
+        .padding(.trailing, 48)
+    }
+
+    /// Horizontal drag → X-axis scale. Anchors on the bar window captured
+    /// at drag start (`xScaleStartDomain`) and keeps its centre fixed, so
+    /// candles grow/shrink around the middle of the view. The factor is
+    /// exponential in drag distance so the feel is consistent whether
+    /// zoomed in or out (mirrors `priceScaleDrag`).
+    private func timeScaleDrag(plotWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { value in
+                if xScaleStartDomain == nil {
+                    xScaleStartDomain = effectiveXDomain
+                    hovered = nil
+                }
+                guard let start = xScaleStartDomain, plotWidth > 0 else { return }
+                let center = (start.lowerBound + start.upperBound) / 2
+                let halfSpan = (start.upperBound - start.lowerBound) / 2
+                guard halfSpan > 0 else { return }
+                // Drag left (−width) ⇒ factor > 1 ⇒ wider time window ⇒
+                // smaller candles. Drag right ⇒ factor < 1 ⇒ zoom in.
+                // Clamp so a frantic drag can't collapse or explode it.
+                let raw = exp(Double(-value.translation.width) / Double(plotWidth) * 1.6)
+                let factor = min(max(raw, 0.1), 10)
+                let newHalf = halfSpan * factor
+                xDomain = (center - newHalf) ... (center + newHalf)
+            }
+            .onEnded { _ in xScaleStartDomain = nil }
     }
 
     // MARK: - Volume Profile
