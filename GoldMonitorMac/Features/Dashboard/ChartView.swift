@@ -53,6 +53,13 @@ struct ChartView: View {
     /// params (e.g. two SMAs at different periods).
     var indicatorInstances: [IndicatorInstance] = []
 
+    /// Higher-timeframe CHoCH zones projected onto this (lower) timeframe.
+    /// Computed by DashboardView from the configured HTF candles and
+    /// re-anchored to dates; ChartView maps each date to its nearest local
+    /// bar via `barIndex(forDate:)`. Reference-only context — drawn muted
+    /// and tagged "·HTF" to read as secondary to the live LTF zones.
+    var htfChochZones: [ChangeOfCharacter.DatedZone] = []
+
     /// Support / resistance levels the user added from an AI analysis.
     /// Empty by default; populated when the user clicks "Add to chart"
     /// on a Support & Resistance Claude run. Drawn as horizontal rules
@@ -680,6 +687,7 @@ struct ChartView: View {
             orderBlockMarks
             steroidOrderBlockMarks
             sonarlabOBMarks
+            htfChochMarks
             chochMarks
             scenarioMarks
             tradeMarks
@@ -2773,6 +2781,88 @@ struct ChartView: View {
         }
     }
 
+    /// Higher-timeframe CHoCH overlays. Same OB / FVG / iFVG / level /
+    /// label vocabulary as `chochMark`, but each element's X positions are
+    /// mapped from wall-clock dates onto this timeframe's bar-index axis
+    /// (`barIndex(forDate:)`), and everything is drawn muted + dashed with
+    /// a "·HTF" tag so it reads as secondary reference structure rather
+    /// than a live signal on the timeframe in view.
+    @ChartContentBuilder
+    private var htfChochMarks: some ChartContent {
+        let xEnd = Double(max(0, candles.count - 1))
+        ForEach(htfChochZones) { zone in
+            htfChochMark(for: zone, xEnd: xEnd)
+        }
+    }
+
+    @ChartContentBuilder
+    private func htfChochMark(for zone: ChangeOfCharacter.DatedZone, xEnd: Double) -> some ChartContent {
+        let baseColor: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
+        let accentColor = IndicatorKind.changeOfCharacter.color
+        let fvgColor = Color(red: 0.30, green: 0.80, blue: 0.75)
+        // HTF zones are context, not the live signal — halve every fill so
+        // they sit visibly behind the current-timeframe CHoCH zones.
+        let dim = (zone.status == .fresh ? 1.0 : 0.6) * 0.5
+        let obX = barIndex(forDate: zone.obDate)
+        let chochX = barIndex(forDate: zone.chochDate)
+
+        // Order block layer.
+        if indicatorConfig.chochShowOB, let obX {
+            chochZoneRect(
+                id: "\(zone.id)-HTFOB", xStart: obX, xEnd: xEnd,
+                low: zone.obLow, high: zone.obHigh, color: baseColor,
+                fill: 0.12 * dim, dashed: true, tag: "OB·HTF"
+            )
+        }
+        // Displacement FVG layer.
+        if indicatorConfig.chochShowFVG,
+           let fl = zone.fvgLow, let fh = zone.fvgHigh,
+           let fd = zone.fvgDate, let fx = barIndex(forDate: fd) {
+            chochZoneRect(
+                id: "\(zone.id)-HTFFVG", xStart: fx, xEnd: xEnd,
+                low: fl, high: fh, color: fvgColor, fill: 0.16 * dim, dashed: true, tag: "FVG·HTF"
+            )
+        }
+        // Inverse FVG layer.
+        if indicatorConfig.chochShowIFVG,
+           let il = zone.ifvgLow, let ih = zone.ifvgHigh,
+           let idt = zone.ifvgDate, let ix = barIndex(forDate: idt) {
+            chochZoneRect(
+                id: "\(zone.id)-HTFIFVG", xStart: ix, xEnd: xEnd,
+                low: il, high: ih, color: accentColor, fill: 0.10 * dim, dashed: true, tag: "iFVG·HTF"
+            )
+        }
+
+        // Broken-structure level — dashed rule from the OB across to the break.
+        if let obX, let chochX {
+            RuleMark(
+                xStart: .value("HTF CHoCH lvl start", obX),
+                xEnd:   .value("HTF CHoCH lvl end",   chochX),
+                y:      .value("HTF CHoCH lvl",       zone.brokenLevel)
+            )
+            .foregroundStyle(accentColor.opacity(0.5))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+        }
+
+        // Break marker + label at the CHoCH bar.
+        if let chochX {
+            let tagText = zone.isBullish ? "CHoCH↑ HTF" : "CHoCH↓ HTF"
+            PointMark(
+                x: .value("HTF CHoCH label x", chochX),
+                y: .value("HTF CHoCH label y", zone.brokenLevel)
+            )
+            .symbolSize(0)
+            .annotation(position: zone.isBullish ? .top : .bottom, alignment: .center, spacing: 2) {
+                Text(tagText)
+                    .font(.system(size: 7, weight: .heavy))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(accentColor.opacity(0.85)))
+            }
+        }
+    }
+
     /// Volume Profile — either zigzag-based (last trend, right side) or
     /// session-based (per-day histograms), depending on `vpUseZigzag`.
     @ChartContentBuilder
@@ -4358,6 +4448,10 @@ struct ChartView: View {
             if zone.high > hi { hi = zone.high }
         }
         for zone in chochZones {
+            if zone.low < lo { lo = zone.low }
+            if zone.high > hi { hi = zone.high }
+        }
+        for zone in htfChochZones {
             if zone.low < lo { lo = zone.low }
             if zone.high > hi { hi = zone.high }
         }
