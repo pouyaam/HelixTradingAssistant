@@ -51,6 +51,10 @@ struct ChartPaneView: View {
     /// drawing picker and the pane's gesture handler share the same
     /// state. (Grid fullscreen drawing fix.)
     @Binding var fullscreenDrawingTool: DrawingTool
+    /// Fired on any click inside the pane — the parent (ChartGridView)
+    /// uses it to make this pane the sidebar's symbol-change target
+    /// (`MultiChartLayoutStore.focusedPaneID`) while `syncSymbol` is off.
+    var onFocus: () -> Void = {}
     let onUpdate: (ChartPane) -> Void
 
     @State private var candles: [Candle] = []
@@ -87,6 +91,10 @@ struct ChartPaneView: View {
 
     var body: some View {
         content
+            // Focus-on-click: simultaneous so it never steals the event
+            // from the chart's own pan/draw gestures or header buttons —
+            // any interaction anywhere in the pane marks it focused.
+            .simultaneousGesture(TapGesture().onEnded { onFocus() })
             .task(id: "\(pane.pairID)|\(pane.timeframe.rawValue)") {
                 guard isVisible else { return }
                 await load()
