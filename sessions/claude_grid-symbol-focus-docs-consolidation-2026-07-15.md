@@ -61,6 +61,20 @@ README, old CLAUDE/AGENTS) into a single rewritten `AGENTS.md`, made
   build` → BUILD SUCCEEDED (from repo root).
 - Not manually exercised in the running UI.
 
+## Follow-up in same session: mouse-wheel zoom in grid panes
+User: wheel zoom did nothing (trackpad pinch OK). Cause: the
+`scrollZoom` modifier (ScrollZoomCatcher.swift — window-level AppKit
+scroll monitor; SwiftUI gestures never see `scrollWheel:`) was only
+attached to the primary single chart (DashboardView:~1728), never to
+grid panes; panes only had ChartView's built-in pinch gesture.
+- ChartPaneView.swift: attached `.scrollZoom(xDomain:totalCandles:)` to
+  the macOS ChartView (before `.clipped()`, mirroring DashboardView).
+  Each pane installs its own monitor; the cursor-in-frame check routes
+  the event to the right pane, others pass it through.
+- ScrollZoomCatcher.swift: line-mode hardening — if `deltaY == 0`
+  (some mice/drivers), fall back to `scrollingDeltaY`.
+- Build passes. Not manually wheel-tested (needs physical mouse).
+
 ## Unfinished / Next Steps
 - Manual check of the fix: split to 2 columns / 2 rows / 2×2, click a
   pane (focus ring should appear when syncSymbol is off), pick a symbol

@@ -209,6 +209,14 @@ struct ChartPaneView: View {
                     // this chart's drawn inputs — the core grid-lag fix.
                     // See `ChartView`'s Equatable note.
                     .equatable()
+                    // Mouse-wheel / two-finger trackpad scroll zooms this
+                    // pane, anchored on the cursor's X position — same
+                    // modifier the primary single chart uses (the pinch
+                    // gesture lives inside ChartView; wheel events need
+                    // this AppKit monitor). Attached before `.clipped()`
+                    // below so the modifier's GeometryReader sees the
+                    // chart's actual frame in global coords.
+                    .scrollZoom(xDomain: $xDomain, totalCandles: candles.count)
                     #endif
                 }
                 chartContent
