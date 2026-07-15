@@ -15,10 +15,16 @@ struct VolumeBarsView: View {
     /// X axis so calendar gaps (weekends) never open spaces between bars.
     let xDomain: ClosedRange<Double>?
 
-    /// True when at least one candle has measurable volume. Used by the
-    /// dashboard to decide whether to render this view at all.
+    /// True when at least one candle has measurable volume. Memoized
+    /// to avoid O(n) scan on every body evaluation. Invalidated when
+    /// candle count changes (new data arrives).
+    @State private var _hasVolumeCache: (count: Int, result: Bool)?
     var hasVolume: Bool {
-        candles.contains { ($0.volume ?? 0) > 0 }
+        let n = candles.count
+        if let c = _hasVolumeCache, c.count == n { return c.result }
+        let v = candles.contains { ($0.volume ?? 0) > 0 }
+        _hasVolumeCache = (n, v)
+        return v
     }
 
     var body: some View {
@@ -89,5 +95,18 @@ struct VolumeBarsView: View {
         default:
             return v.formatted(.number.precision(.fractionLength(0)))
         }
+    }
+}
+
+/// See `ChartView`'s `Equatable` note — same rationale, scoped to the
+/// volume strip. Wrapped in `.equatable()` at the call sites so an
+/// unrelated parent re-render (a live tick that only moved the price
+/// capsule, a sibling pane updating) doesn't re-lay-out this Chart when
+/// its own inputs are unchanged.
+extension VolumeBarsView: Equatable {
+    static func == (l: VolumeBarsView, r: VolumeBarsView) -> Bool {
+        Candle.seriesEqual(l.candles, r.candles)
+            && l.accent == r.accent
+            && l.xDomain == r.xDomain
     }
 }

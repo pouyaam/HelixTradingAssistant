@@ -1710,6 +1710,11 @@ struct DashboardView: View {
                         Task { await reloadCandles() }
                     }
                 )
+                // Absorb parent re-renders (live ticks, unrelated yahoo
+                // @Published churn) that didn't move any drawn input, so
+                // the single chart stops re-laying-out ~1×/sec for nothing.
+                // See `ChartView`'s Equatable note.
+                .equatable()
                 // Chart expands to consume any vertical space the
                 // siblings below (volume / oscillators / stats) don't
                 // claim — `minHeight` guards against the chart being
@@ -1910,6 +1915,7 @@ struct DashboardView: View {
                 candles: candles,
                 xDomain: xDomain
             )
+            .equatable()
             .padding(.trailing, Theme.Spacing.sm)
         }
     }
@@ -3044,6 +3050,7 @@ struct DashboardView: View {
         let bars = VolumeBarsView(candles: candles, accent: pair.color, xDomain: xDomain)
         if showVolume && bars.hasVolume {
             bars
+                .equatable()
                 .frame(height: 70)
                 .padding(.trailing, Theme.Spacing.sm)
                 .clipped()
@@ -3453,6 +3460,11 @@ struct DashboardView: View {
         var merged = candles
         while let last = merged.last, last.bucketStart >= cutoff { merged.removeLast() }
         merged.append(contentsOf: recent)
+        // Skip the whole downstream cascade (chart redraw, volume recompute,
+        // RSI / Order Block alert re-evaluation) when a tick re-read the
+        // same trailing bar and nothing changed. See the pane's
+        // `refreshTrailing` for the same guard.
+        guard merged != candles else { return }
         candles = merged
         recomputeTotalVolume()
         followLatestIfPinned(priorCount: priorCount, newCount: merged.count)

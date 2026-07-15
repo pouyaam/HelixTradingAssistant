@@ -4451,191 +4451,42 @@ struct ChartView: View {
         }
         if visibleCandles.isEmpty { lo = 0; hi = 1 }
 
-        // Pull in any indicator values that exceed the candle range so
-        // SMA/EMA/Bollinger lines never get clipped off-screen. Restrict
-        // to the visible index window to match the rendered marks.
-        if !indicatorInstances.isEmpty, let b = bounds {
-            for entry in derived.indicators(instances: indicatorInstances, candles: candles) {
-                for p in entry.points where p.index >= b.lo && p.index <= b.hi {
-                    if p.value < lo { lo = p.value }
-                    if p.value > hi { hi = p.value }
-                }
-            }
-        }
-        // UT Bot trailing stop can sit well outside the candle range,
-        // especially right after a flip. Only fold it into the domain
-        // when the user has the visual stop line enabled — otherwise
-        // we'd be reserving Y space for an invisible mark.
-        if indicatorConfig.utShowTrailingStop,
-           indicators.contains(.utBot),
-           let b = bounds,
-           let stops = utBotOutput?.trailingStop
-        {
-            for i in b.lo ... b.hi where i < stops.count {
-                guard let v = stops[i] else { continue }
-                if v < lo { lo = v }
-                if v > hi { hi = v }
-            }
-        }
-        
-        // Zero-allocation inline scans for all overlay extremes.
-        // This avoids dozen+ allocations of temporary arrays on every pan/zoom frame.
-        for level in srLevels.support {
-            if level < lo { lo = level }
-            if level > hi { hi = level }
-        }
-        for level in srLevels.resistance {
-            if level < lo { lo = level }
-            if level > hi { hi = level }
-        }
-        for zone in fvgZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in supplyDemandZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in indicatorFvgZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in orderBlockZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in steroidOrderBlockZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in sonarlabOBZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in chochZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in htfChochZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for run in sessionRuns {
-            if run.low < lo { lo = run.low }
-            if run.high > hi { hi = run.high }
-        }
-        for r in nySetupResults {
-            if r.orLow < lo { lo = r.orLow }
-            if r.orHigh > hi { hi = r.orHigh }
-        }
-        for r in sp2lResults {
-            for v in [
-                r.brokenLevel,
-                r.spikeLow,
-                r.spikeHigh,
-                r.entry,
-                r.stopLoss,
-            ] + r.takeProfits(count: indicatorConfig.sp2lTargetCount) {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
-            }
-        }
-        for result in pinBarComboResults {
-            for value in [
-                result.level,
-                result.pinBarLow,
-                result.pinBarHigh,
-                result.entry,
-                result.stopLoss,
-                result.takeProfit
-            ] {
-                if value < lo { lo = value }
-                if value > hi { hi = value }
-            }
-        }
-        for result in microMapResults {
-            if result.spikeLow < lo { lo = result.spikeLow }
-            if result.spikeHigh > hi { hi = result.spikeHigh }
-            for attempt in result.attempts {
-                for value in [attempt.entry, attempt.stopLoss, attempt.takeProfit].compactMap({ $0 }) {
-                    if value < lo { lo = value }
-                    if value > hi { hi = value }
-                }
-            }
-        }
-        for result in mtrResults {
-            let channelBars = result.channelEndIndex - result.channelStartIndex
-            let channelSlope = channelBars == 0 ? 0 :
-                (result.channelEndPrice - result.channelStartPrice) / Double(channelBars)
-            let projectedMain = result.channelStartPrice
-                + channelSlope * Double(result.breakoutIndex - result.channelStartIndex)
-            let projectedParallel = projectedMain
-                + (result.parallelStartPrice - result.channelStartPrice)
-            var values = [
-                result.channelStartPrice,
-                result.channelEndPrice,
-                result.parallelStartPrice,
-                result.parallelEndPrice,
-                projectedMain,
-                projectedParallel,
-                result.trendExtremePrice,
-                result.retestPrice,
-                result.neckline
-            ]
-            values += [result.entry, result.stopLoss, result.takeProfit].compactMap { $0 }
-            for value in values {
-                if value < lo { lo = value }
-                if value > hi { hi = value }
-            }
-        }
-        for session in volumeProfileSessions {
-            for bucket in session.buckets {
-                if bucket.priceLevel < lo { lo = bucket.priceLevel }
-                if bucket.priceLevel > hi { hi = bucket.priceLevel }
-            }
-        }
-        if let vp = zigzagTrendVP {
-            for bucket in vp.buckets {
-                if bucket.priceLevel < lo { lo = bucket.priceLevel }
-                if bucket.priceLevel > hi { hi = bucket.priceLevel }
-            }
-        }
-        for pivot in zigzagPivots {
-            if pivot.price < lo { lo = pivot.price }
-            if pivot.price > hi { hi = pivot.price }
-        }
-        if let scenario = taScenario {
-            for v in [scenario.takeProfit, scenario.stopLoss] + [scenario.entry].compactMap({ $0 }) {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
-            }
-        }
-        if let alt = taAltScenario {
-            for v in [alt.takeProfit, alt.stopLoss] + [alt.entry].compactMap({ $0 }) {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
-            }
-        }
-        for d in drawings where d.visible {
-            if d.start.price < lo { lo = d.start.price }
-            if d.start.price > hi { hi = d.start.price }
-            if let e = d.end {
-                if e.price < lo { lo = e.price }
-                if e.price > hi { hi = e.price }
-            }
-        }
-        for t in trades {
-            for v in [t.entry, t.takeProfit, t.stopLoss, t.fillPrice ?? t.entry] {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
-            }
-        }
-        for je in journalEntries {
-            for v in [je.entry, je.takeProfit, je.stopLoss].compactMap({ $0 }) {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
-            }
-        }
+        // Overlay + indicator extremes — cached in ChartDerivedCache.
+        // The expensive scan (all indicator points + all overlay zone
+        // arrays) only runs when the overlay data actually changes
+        // (new AI result, trade edit, drawing add). During pan/zoom
+        // this hits the cache synchronously — no loop, no allocations.
+        let overlay = derived.overlayExtremes(.init(
+            candles: candles,
+            indicatorInstances: indicatorInstances,
+            indicatorConfig: indicatorConfig,
+            indicators: indicators,
+            srLevels: srLevels,
+            fvgZones: fvgZones,
+            supplyDemandZones: supplyDemandZones,
+            indicatorFvgZones: indicatorFvgZones,
+            orderBlockZones: orderBlockZones,
+            steroidOrderBlockZones: steroidOrderBlockZones,
+            sonarlabOBZones: sonarlabOBZones,
+            chochZones: chochZones,
+            htfChochZones: htfChochZones,
+            sessionRuns: sessionRuns,
+            nySetupResults: nySetupResults,
+            sp2lResults: sp2lResults,
+            pinBarComboResults: pinBarComboResults,
+            microMapResults: microMapResults,
+            mtrResults: mtrResults,
+            volumeProfileSessions: volumeProfileSessions,
+            zigzagTrendVP: zigzagTrendVP,
+            zigzagPivots: zigzagPivots,
+            taScenario: taScenario,
+            taAltScenario: taAltScenario,
+            drawings: drawings,
+            trades: trades,
+            journalEntries: journalEntries
+        ))
+        if overlay.lo < lo { lo = overlay.lo }
+        if overlay.hi > hi { hi = overlay.hi }
 
         guard visibleCandles.isEmpty == false else { return 0...1 }
         let span = hi - lo
@@ -4708,4 +4559,57 @@ struct ChartView: View {
         f.dateFormat = "MMM d · HH:mm"
         return f
     }()
+}
+
+// MARK: - Equatable (re-render isolation)
+
+/// `ChartView` is expensive (Apple Charts re-lays out its whole mark tree
+/// on every body evaluation), and it's re-evaluated far more often than
+/// its *drawn* inputs actually change: every `YahooScheduler`
+/// `objectWillChange` (≈1 Hz, plus every unrelated `@Published` field —
+/// `isFetching`, `backfilling`, other pairs' prices…) invalidates the
+/// owning `DashboardView` / `ChartPaneView`, which cascades a re-eval down
+/// into this chart even when nothing here moved. In grid mode that cost is
+/// paid N× (one price chart per pane, plus volume + oscillator sub-charts),
+/// which is the dominant source of split-screen lag.
+///
+/// Conforming to `Equatable` and wrapping the call sites in `.equatable()`
+/// lets SwiftUI skip re-invoking `body` (and thus the Charts layout pass)
+/// whenever none of the render-affecting inputs changed. Closures
+/// (`onCommitDrawing`, …) and internal `@State` (hover, in-flight drawing)
+/// are deliberately excluded: closures don't affect what's drawn (and are
+/// re-captured whenever `==` returns false anyway), and self-`@State`
+/// changes bypass this gate entirely — hover crosshair and live drawing
+/// previews still redraw normally.
+///
+/// The candle series is compared via `Candle.seriesEqual` (O(1)) rather
+/// than a full element-wise `==`, so this stays cheap even on the hot
+/// pan/zoom path (which changes `xDomain` and legitimately forces a
+/// redraw) with years of history loaded.
+extension ChartView: Equatable {
+    static func == (l: ChartView, r: ChartView) -> Bool {
+        Candle.seriesEqual(l.candles, r.candles)
+            && l.chartType == r.chartType
+            && l.accent == r.accent
+            && l.xDomain == r.xDomain
+            && l.yDomain == r.yDomain
+            && l.indicators == r.indicators
+            && l.indicatorConfig == r.indicatorConfig
+            && l.indicatorInstances == r.indicatorInstances
+            && l.htfChochZones == r.htfChochZones
+            && l.srLevels == r.srLevels
+            && l.fvgZones == r.fvgZones
+            && l.supplyDemandZones == r.supplyDemandZones
+            && l.taScenario == r.taScenario
+            && l.taAltScenario == r.taAltScenario
+            && l.drawings == r.drawings
+            && l.activeTool == r.activeTool
+            && l.selectedDrawingID == r.selectedDrawingID
+            && l.trades == r.trades
+            && l.journalEntries == r.journalEntries
+            && l.livePrice == r.livePrice
+            && l.replayActive == r.replayActive
+            && l.isPickingReplayAnchor == r.isPickingReplayAnchor
+            && l.showHoverTooltip == r.showHoverTooltip
+    }
 }
