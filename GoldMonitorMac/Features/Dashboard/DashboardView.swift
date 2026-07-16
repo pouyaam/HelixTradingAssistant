@@ -7,12 +7,17 @@ struct DashboardView: View {
     @EnvironmentObject private var app: AppState
     @EnvironmentObject private var yahoo: YahooScheduler
     @EnvironmentObject private var notificationInbox: NotificationInbox
+    @EnvironmentObject private var news: NewsStore
 
     // Persisted session state — every selection the user makes here gets
     // restored on relaunch.
     @AppStorage("dashboard.timeframe")  private var timeframe: Timeframe = .h1
     @AppStorage("dashboard.chartType")  private var userChartType: ChartType = .candle
     @AppStorage("dashboard.showVolume") private var showVolume: Bool = true
+    /// News-flag layer on the chart's time axis. On by default; toggled
+    /// from the Layers popover. Shared key with the grid panes so the
+    /// toggle governs every chart at once.
+    @AppStorage("dashboard.showNews")   private var showNews: Bool = true
     @AppStorage("notifications.strategySignals.enabled")
     private var strategyNotificationsEnabled: Bool = true
     /// Multi-instance indicator/oscillator storage — JSON-encoded arrays
@@ -1259,15 +1264,23 @@ struct DashboardView: View {
             guard let fsID,
                   let pane = multiChart.panes.first(where: { $0.id == fsID })
             else { return }
-            timeframe = pane.timeframe
-            userChartType = pane.chartType
-            indicatorInstances = pane.indicatorInstances
-            oscillatorInstances = pane.oscillatorInstances
-            showVolume = pane.showVolume
+            // Defer — 5 @AppStorage/@State mutations in one event.
+            // Each fires objectWillChange separately, causing cascading
+            // re-renders. Deferring coalesces them after the current
+            // view update cycle.
+            DispatchQueue.main.async {
+                self.timeframe = pane.timeframe
+                self.userChartType = pane.chartType
+                self.indicatorInstances = pane.indicatorInstances
+                self.oscillatorInstances = pane.oscillatorInstances
+                self.showVolume = pane.showVolume
+            }
         }
         // Cache totalVolume so the O(n) candle iteration only runs
         // when candles change, not on every pan/zoom frame.
-        .onChange(of: candles.count) { _ in recomputeTotalVolume() }
+        // Merged with refreshNYSetupScenario below — both fire on
+        // the same candles.count change.
+        // (see consolidated handler at candles.count below)
         // Infinite scroll: when the user pans within a few bars of the
         // oldest stored candle, pull an older page from Twelve Data
         // (Yahoo caps 1m/5m at ~8d/~60d) and splice it onto the front.
@@ -1275,6 +1288,7 @@ struct DashboardView: View {
         // `xDomain` by the same amount to keep the view visually still.
         .onChange(of: xDomain) { newValue in
             guard let dom = newValue, dom.lowerBound < 8 else { return }
+            guard !_loadingOlderFlag.isLoading else { return }
             guard let pairID = app.selectedPairID,
                   let cur = app.pairs.first(where: { $0.id == pairID }),
                   cur.usesLiveStream,            // only Twelve Data pairs have a REST history feed
@@ -1282,15 +1296,17 @@ struct DashboardView: View {
             else { return }
             let srcTF = sourceTimeframeTag(for: timeframe)
             guard srcTF == "1m" || srcTF == "5m" else { return }
+            _loadingOlderFlag.isLoading = true
             Task {
                 let added = await yahoo.loadOlderHistory(pairID: pairID, sourceTF: srcTF)
-                guard added > 0 else { return }
+                guard added > 0 else { _loadingOlderFlag.isLoading = false; return }
                 let prior = candles.count
                 await reloadCandles()
                 let shift = Double(candles.count - prior)
                 if shift > 0, let pinned = xDomain {
                     xDomain = (pinned.lowerBound + shift) ... (pinned.upperBound + shift)
                 }
+                _loadingOlderFlag.isLoading = false
             }
         }
         .sheet(isPresented: $showAlertSheet) {
@@ -1313,7 +1329,11 @@ struct DashboardView: View {
             // Persist on dismiss so the user's choice survives a relaunch
             // even if they close via clicking the backdrop / hitting Esc.
             oscillatorConfig.save()
-            settingsFocusSection = nil
+            // Defer to next run loop — this closure fires during the
+            // sheet dismissal animation, which is still within a view
+            // update cycle. Synchronous @State mutation here triggers
+            // "Modifying state during view update" warnings.
+            DispatchQueue.main.async { settingsFocusSection = nil }
         } content: {
             IndicatorSettingsSheet(config: $oscillatorConfig,
                                    focusSection: settingsFocusSection)
@@ -1380,33 +1400,54 @@ struct DashboardView: View {
         // intrabar last-bar updates (same count) don't re-detect — the
         // already-registered alerts fire on price touch via the tick
         // evaluator above.
-        .onChange(of: candles.count) { _ in refreshNYSetupScenario() }
+        // Consolidated: recomputeTotalVolume + refreshNYSetupScenario
+        // both fire on the same candles.count change. Deferred so the
+        // @State mutations land after the current view update cycle.
+        .onChange(of: candles.count) { _ in
+            DispatchQueue.main.async {
+                self.recomputeTotalVolume()
+                self.refreshNYSetupScenario()
+            }
+        }
         .onChange(of: candles.last?.id) { _ in
-            refreshMicroMapNotifications(seedOnly: false)
-            refreshSP2LNotifications(seedOnly: false)
-            refreshPinBarNotifications(seedOnly: false)
-            refreshMTRNotifications(seedOnly: false)
+            // Deferred — 4 refreshers each mutate @State properties.
+            // Running them after the current view update avoids the
+            // "Modifying state during view update" cascade.
+            DispatchQueue.main.async {
+                self.refreshMicroMapNotifications(seedOnly: false)
+                self.refreshSP2LNotifications(seedOnly: false)
+                self.refreshPinBarNotifications(seedOnly: false)
+                self.refreshMTRNotifications(seedOnly: false)
+            }
         }
         .onChange(of: indicatorInstances) { _ in
-            refreshNYSetupScenario()
-            refreshMicroMapNotifications(seedOnly: true)
-            refreshSP2LNotifications(seedOnly: true)
-            refreshPinBarNotifications(seedOnly: true)
-            refreshMTRNotifications(seedOnly: true)
+            DispatchQueue.main.async {
+                self.refreshNYSetupScenario()
+                self.refreshMicroMapNotifications(seedOnly: true)
+                self.refreshSP2LNotifications(seedOnly: true)
+                self.refreshPinBarNotifications(seedOnly: true)
+                self.refreshMTRNotifications(seedOnly: true)
+            }
         }
         .onChange(of: oscillatorConfig) { _ in
-            refreshNYSetupScenario()
-            syncConfigToOscillatorInstances()
-            refreshMicroMapNotifications(seedOnly: true)
-            refreshSP2LNotifications(seedOnly: true)
-            refreshPinBarNotifications(seedOnly: true)
-            refreshMTRNotifications(seedOnly: true)
+            // syncConfigToOscillatorInstances mutates oscillatorInstances
+            // (@State), so defer the entire block.
+            DispatchQueue.main.async {
+                self.refreshNYSetupScenario()
+                self.syncConfigToOscillatorInstances()
+                self.refreshMicroMapNotifications(seedOnly: true)
+                self.refreshSP2LNotifications(seedOnly: true)
+                self.refreshPinBarNotifications(seedOnly: true)
+                self.refreshMTRNotifications(seedOnly: true)
+            }
         }
         .onChange(of: strategyNotificationsEnabled) { enabled in
-            refreshMicroMapNotifications(seedOnly: enabled)
-            refreshSP2LNotifications(seedOnly: enabled)
-            refreshPinBarNotifications(seedOnly: enabled)
-            refreshMTRNotifications(seedOnly: enabled)
+            DispatchQueue.main.async {
+                self.refreshMicroMapNotifications(seedOnly: enabled)
+                self.refreshSP2LNotifications(seedOnly: enabled)
+                self.refreshPinBarNotifications(seedOnly: enabled)
+                self.refreshMTRNotifications(seedOnly: enabled)
+            }
         }
         // Activation sheet — driven by `pendingActivation` so the
         // analysis sheet can dismiss first and this one presents on
@@ -1708,7 +1749,13 @@ struct DashboardView: View {
                         replay.setAnchor(candles[idx].bucketStart)
                         xDomain = nil   // refit to the revealed window
                         Task { await reloadCandles() }
-                    }
+                    },
+                    // Economic-calendar flags on the bottom axis
+                    // (TradingView-style). Mirrors the News tab's
+                    // currency/impact filters; hidden when the News
+                    // layer is toggled off.
+                    newsEvents: showNews ? news.chartEvents : [],
+                    newsTimeZone: news.effectiveTimeZone
                 )
                 // Absorb parent re-renders (live ticks, unrelated yahoo
                 // @Published churn) that didn't move any drawn input, so
@@ -2218,6 +2265,7 @@ struct DashboardView: View {
     private var activeLayerCount: Int {
         var n = 0
         if showVolume { n += 1 }
+        if showNews && !news.chartEvents.isEmpty { n += 1 }
         n += enabledIndicatorKinds.count
         n += enabledOscillators.count
         if !srLevels.isEmpty { n += 1 }
@@ -2258,6 +2306,20 @@ struct DashboardView: View {
                     onToggle: { showVolume.toggle() },
                     onDelete: nil      // no trash — built-in option
                 )
+
+                // News — economic-calendar flags on the time axis.
+                // A chart-wide toggle like Volume; no trash (the feed
+                // is shared, not user-added). Shows the visible-event
+                // count so the user knows how many flags are on screen.
+                if !news.chartEvents.isEmpty {
+                    layerRow(
+                        title: "News · \(news.chartEvents.count)",
+                        swatch: Theme.Color.danger,
+                        visible: showNews,
+                        onToggle: { showNews.toggle() },
+                        onDelete: nil
+                    )
+                }
 
                 // Indicator overlays (SMA/EMA/Bollinger/UT Bot).
                 ForEach(IndicatorKind.allCases) { kind in
@@ -3030,6 +3092,11 @@ struct DashboardView: View {
     /// `candles` actually changes, not on every pan/zoom frame.
     /// (Pan/zoom performance fix.)
     @State private var cachedTotalVolume: Double? = nil
+    /// Class-box flag to prevent xDomain onChange re-entrancy when
+    /// infinite-scroll prepends bars and shifts the domain. Not
+    /// `@State` — avoids "Modifying state during view update".
+    private final class LoadingOlderFlag { var isLoading = false }
+    private let _loadingOlderFlag = LoadingOlderFlag()
     private func recomputeTotalVolume() {
         let vols = candles.compactMap { $0.volume }
         guard !vols.isEmpty else { cachedTotalVolume = nil; return }
@@ -3380,6 +3447,12 @@ struct DashboardView: View {
             dropClosedDays: respectsWeekend
         )
         let priorCount = candles.count
+        // Skip state mutation when data is unchanged — avoids
+        // "Modifying state during view update" and unnecessary redraws.
+        guard result != self.candles else {
+            isLoading = false
+            return
+        }
         self.candles = result
         recomputeTotalVolume()
         self.isLoading = false

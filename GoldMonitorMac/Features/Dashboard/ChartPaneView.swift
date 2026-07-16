@@ -14,6 +14,13 @@ import Combine
 struct ChartPaneView: View {
     @EnvironmentObject private var app: AppState
     @EnvironmentObject private var yahoo: YahooScheduler
+    /// Shared economic-calendar feed — the grid panes plot the same
+    /// news flags as the primary chart (see `NewsChartLayer`).
+    @EnvironmentObject private var news: NewsStore
+
+    /// News-flag layer toggle — the same `dashboard.showNews` key the
+    /// primary chart uses, so hiding news there hides it in every pane.
+    @AppStorage("dashboard.showNews") private var showNews: Bool = true
 
     let pane: ChartPane
     /// Indicator-parameter config (RSI period, UT Bot key value, etc.)
@@ -174,7 +181,9 @@ struct ChartPaneView: View {
                         onSelectDrawing: { id in
                             selectedDrawingID = id
                         },
-                        livePrice: yahoo.latestPrices[pane.pairID]
+                        livePrice: yahoo.latestPrices[pane.pairID],
+                        newsEvents: showNews ? news.chartEvents : [],
+                        newsTimeZone: news.effectiveTimeZone
                     )
                     #else
                     ChartView(
@@ -201,7 +210,9 @@ struct ChartPaneView: View {
                             selectedDrawingID = id
                         },
                         livePrice: yahoo.latestPrices[pane.pairID],
-                        showHoverTooltip: isFullscreen
+                        showHoverTooltip: isFullscreen,
+                        newsEvents: showNews ? news.chartEvents : [],
+                        newsTimeZone: news.effectiveTimeZone
                     )
                     // Skip re-laying-out the price chart when a parent
                     // re-render (a live tick, a sibling pane, an unrelated

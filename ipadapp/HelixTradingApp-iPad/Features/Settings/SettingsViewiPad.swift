@@ -53,13 +53,19 @@ struct SettingsViewiPad: View {
         }
         .background(Theme.Color.canvas)
         .onAppear {
-            if opencodeServerURL.isEmpty {
-                opencodeServerURL = "http://ntsn.teleincognito.com:4096"
+            // Defer state seeding to the next run loop so SwiftUI
+            // finishes the current view update before we mutate
+            // multiple @State/@AppStorage properties. Avoids the
+            // "Modifying state during view update" cascade.
+            DispatchQueue.main.async {
+                if opencodeServerURL.isEmpty {
+                    opencodeServerURL = "http://ntsn.teleincognito.com:4096"
+                }
+                if opencodeServerPassword.isEmpty {
+                    opencodeServerPassword = KeychainHelper.get(.opencodeServerPass) ?? ""
+                }
+                seedDataFromConfig()
             }
-            if opencodeServerPassword.isEmpty {
-                opencodeServerPassword = KeychainHelper.get(.opencodeServerPass) ?? ""
-            }
-            seedDataFromConfig()
         }
         .onDisappear {
             saveOpenCodeSettings()

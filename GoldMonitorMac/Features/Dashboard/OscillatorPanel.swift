@@ -238,7 +238,12 @@ struct OscillatorPanel: View {
         let computedCount: Int
         let points: [IndicatorPoint]
     }
-    @State private var vpCache: VisiblePointsCache?
+    /// Class box to avoid "Modifying state during view update" —
+    /// `visiblePoints` is a computed property called from `body`.
+    private final class VisiblePointsCacheBox {
+        var cached: VisiblePointsCache?
+    }
+    private let _vpCacheBox = VisiblePointsCacheBox()
 
     /// computedPoints restricted to the bar indices actually rendered
     /// this frame — keeps mark count bounded on deep history, matching
@@ -254,7 +259,7 @@ struct OscillatorPanel: View {
             computedCount: computed.count,
             points: []
         )
-        if let cached = vpCache,
+        if let cached = _vpCacheBox.cached,
            cached.domainLo == cacheKey.domainLo,
            cached.domainHi == cacheKey.domainHi,
            cached.candleCount == cacheKey.candleCount,
@@ -263,7 +268,7 @@ struct OscillatorPanel: View {
         }
         let set = Set(ChartWindow.renderIndices(domain: domain, count: candles.count))
         let result = computed.filter { set.contains($0.index) }
-        vpCache = VisiblePointsCache(
+        _vpCacheBox.cached = VisiblePointsCache(
             domainLo: cacheKey.domainLo,
             domainHi: cacheKey.domainHi,
             candleCount: cacheKey.candleCount,

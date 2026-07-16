@@ -18,12 +18,21 @@ struct VolumeBarsView: View {
     /// True when at least one candle has measurable volume. Memoized
     /// to avoid O(n) scan on every body evaluation. Invalidated when
     /// candle count changes (new data arrives).
-    @State private var _hasVolumeCache: (count: Int, result: Bool)?
+    ///
+    /// Uses a class box instead of `@State` to avoid "Modifying state
+    /// during view update" warnings — this computed property is called
+    /// from `body` and the parent's gating check.
+    private final class VolumeCache {
+        var lastCount: Int = -1
+        var result: Bool = false
+    }
+    private let _cacheBox = VolumeCache()
     var hasVolume: Bool {
         let n = candles.count
-        if let c = _hasVolumeCache, c.count == n { return c.result }
+        if _cacheBox.lastCount == n { return _cacheBox.result }
         let v = candles.contains { ($0.volume ?? 0) > 0 }
-        _hasVolumeCache = (n, v)
+        _cacheBox.lastCount = n
+        _cacheBox.result = v
         return v
     }
 

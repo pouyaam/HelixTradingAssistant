@@ -166,7 +166,26 @@ struct ChartView: View {
     /// candle's date and sets the cursor.
     var onPickReplayAnchor: ((Int) -> Void)? = nil
 
+    /// ForexFactory economic-calendar events to plot as impact-coloured
+    /// flags on the bottom time axis (TradingView-style). Already
+    /// currency/impact-filtered upstream by `NewsStore.chartEvents`; the
+    /// chart maps each event's `eventAt` to a bar via `barIndex(forDate:)`
+    /// and only draws those inside the visible window. Empty ⇒ the news
+    /// layer is off (toggled from the Layers popover).
+    var newsEvents: [ForexFactoryEvent] = []
+
+    /// Display zone for the news popup's timestamp —
+    /// `NewsStore.effectiveTimeZone`. Threaded so the flag detail card
+    /// shows the same time the News tab does.
+    var newsTimeZone: TimeZone = .current
+
     @State private var hovered: HoverState?
+
+    /// The news event whose flag the user clicked, if any — drives the
+    /// floating detail popover. Anchor is the flag's point in the chart
+    /// overlay's coordinate space so the card can pin above it.
+    @State private var selectedNews: ForexFactoryEvent?
+    @State private var newsPopupAnchor: CGPoint = .zero
     /// Memoizes the data-derived arrays (HA candles, indicators, UT Bot,
     /// Order Blocks, …) so pan/zoom — which only changes `xDomain` —
     /// doesn't recompute them over the full history every frame, and
@@ -795,47 +814,116 @@ struct ChartView: View {
             // need the plot frame size to translate point-distance into
             // time-distance, which lives on the chart proxy.
             GeometryReader { geo in
-                Rectangle()
-                    .fill(Color.clear)
-                    .contentShape(Rectangle())
-                    .onContinuousHover { phase in
-                        switch phase {
-                        case .active(let location):
-                            // Translate to the chart's plot frame coords,
-                            // ask the proxy for the X-axis value (a bar
-                            // index as Double), round to the nearest
-                            // whole bar, and clamp into the array.
-                            let origin = geo[proxy.plotAreaFrame].origin
-                            let x = location.x - origin.x
-                            let y = location.y - origin.y
-                            guard let xValue: Double = proxy.value(atX: x) else { return }
-                            let idx = max(0, min(candles.count - 1, Int(xValue.rounded())))
-                            // Project the cursor's Y back into price
-                            // space. nil ⇒ cursor is outside the plot
-                            // area's Y range; fall back to the candle
-                            // close so the crosshair always has a
-                            // sensible reading.
-                            let yPrice: Double = proxy.value(atY: y) ?? candles[idx].close
-                            hovered = HoverState(
-                                candle: candles[idx],
-                                index: idx,
-                                cursor: location,
-                                cursorPrice: yPrice
-                            )
-                        case .ended:
-                            hovered = nil
+                let plotFrame = geo[proxy.plotAreaFrame]
+                ZStack(alignment: .topLeading) {
+                    Rectangle()
+                        .fill(Color.clear)
+                        .contentShape(Rectangle())
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                // Translate to the chart's plot frame coords,
+                                // ask the proxy for the X-axis value (a bar
+                                // index as Double), round to the nearest
+                                // whole bar, and clamp into the array.
+                                let origin = plotFrame.origin
+                                let x = location.x - origin.x
+                                let y = location.y - origin.y
+                                guard let xValue: Double = proxy.value(atX: x) else { return }
+                                let idx = max(0, min(candles.count - 1, Int(xValue.rounded())))
+                                // Project the cursor's Y back into price
+                                // space. nil ⇒ cursor is outside the plot
+                                // area's Y range; fall back to the candle
+                                // close so the crosshair always has a
+                                // sensible reading.
+                                let yPrice: Double = proxy.value(atY: y) ?? candles[idx].close
+                                hovered = HoverState(
+                                    candle: candles[idx],
+                                    index: idx,
+                                    cursor: location,
+                                    cursorPrice: yPrice
+                                )
+                            case .ended:
+                                hovered = nil
+                            }
                         }
+                        .gesture(dragGesture(
+                            plotWidth: plotFrame.size.width,
+                            plotHeight: plotFrame.size.height,
+                            plotOrigin: plotFrame.origin,
+                            proxy: proxy
+                        ))
+                        .simultaneousGesture(magnificationGesture())
+
+                    // News flags pinned to the bottom time axis. Drawn as
+                    // overlay views (not ChartContent) so they share the
+                    // proxy's coordinate space with the click hit-test and
+                    // the popover, and never fight the plot clip. Taps are
+                    // handled by the gesture rectangle above, so the flags
+                    // themselves take no hits.
+                    newsFlagsLayer(proxy: proxy, plotFrame: plotFrame)
+                        .allowsHitTesting(false)
+
+                    // Detail popover for the clicked flag.
+                    if let ev = selectedNews {
+                        newsPopupLayer(event: ev, plotFrame: plotFrame)
                     }
-                    .gesture(dragGesture(
-                        plotWidth: geo[proxy.plotAreaFrame].size.width,
-                        plotHeight: geo[proxy.plotAreaFrame].size.height,
-                        plotOrigin: geo[proxy.plotAreaFrame].origin,
-                        proxy: proxy
-                    ))
-                    .simultaneousGesture(magnificationGesture())
+                }
             }
         }
         }
+    }
+
+    // MARK: - News layer (flags + popover)
+
+    @ViewBuilder
+    private func newsFlagsLayer(proxy: ChartProxy, plotFrame: CGRect) -> some View {
+        ForEach(visibleNewsMarkers) { m in
+            if let px = proxy.position(forX: m.barIndex) {
+                NewsFlagView(color: m.color)
+                    .position(x: plotFrame.origin.x + px, y: plotFrame.maxY - 9)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func newsPopupLayer(event: ForexFactoryEvent, plotFrame: CGRect) -> some View {
+        let cardWidth: CGFloat = 240
+        let halfW = cardWidth / 2 + 6
+        let clampedX = min(max(newsPopupAnchor.x, plotFrame.minX + halfW),
+                           plotFrame.maxX - halfW)
+        // Sit the card above the flag; clamp so it never rides off the
+        // top of the plot on a very short chart.
+        let clampedY = max(plotFrame.minY + 70, newsPopupAnchor.y - 84)
+        NewsMarkerPopover(event: event, timeZone: newsTimeZone) {
+            selectedNews = nil
+        }
+        .position(x: clampedX, y: clampedY)
+    }
+
+    /// Was a plain click on a bottom-axis news flag? Returns the event
+    /// and the flag's anchor point (in overlay coordinates) so the
+    /// popover can pin above it. Only the bottom ~26px band is live so
+    /// clicks on price action never trip a flag.
+    private func newsHitTest(
+        at location: CGPoint,
+        plotOrigin: CGPoint,
+        plotHeight: CGFloat,
+        proxy: ChartProxy
+    ) -> (event: ForexFactoryEvent, anchor: CGPoint)? {
+        guard location.y >= plotOrigin.y + plotHeight - 26 else { return nil }
+        var best: (dist: CGFloat, event: ForexFactoryEvent, anchor: CGPoint)?
+        for m in visibleNewsMarkers {
+            guard let px = proxy.position(forX: m.barIndex) else { continue }
+            let sx = plotOrigin.x + px
+            let d = abs(location.x - sx)
+            guard d <= 14 else { continue }
+            if best == nil || d < best!.dist {
+                best = (d, m.event, CGPoint(x: sx, y: plotOrigin.y + plotHeight - 9))
+            }
+        }
+        guard let b = best else { return nil }
+        return (b.event, b.anchor)
     }
 
     // MARK: - Pan / draw
@@ -931,6 +1019,28 @@ struct ChartView: View {
                     dragStartYDomain = nil
                     panLockedY = false
                     return
+                }
+
+                // News flag click — a plain click on a bottom-axis flag
+                // opens its detail popover and takes priority over
+                // pan/deselect. Only in cursor mode; drawing tools own
+                // their clicks. A click that misses every flag dismisses
+                // an open popover.
+                if activeTool == .none, !hadMovement {
+                    if let hit = newsHitTest(
+                        at: value.location,
+                        plotOrigin: plotOrigin,
+                        plotHeight: plotHeight,
+                        proxy: proxy
+                    ) {
+                        selectedNews = hit.event
+                        newsPopupAnchor = hit.anchor
+                        dragStartDomain = nil
+                        dragStartYDomain = nil
+                        panLockedY = false
+                        return
+                    }
+                    if selectedNews != nil { selectedNews = nil }
                 }
 
                 if activeTool != .none {
@@ -1358,6 +1468,34 @@ struct ChartView: View {
     /// replay keep working unchanged.
     private var renderIndices: [Int] {
         ChartWindow.renderIndices(domain: effectiveXDomain, count: candles.count)
+    }
+
+    /// News events resolved to bar indices and clipped to the visible
+    /// window. Only events whose `eventAt` falls inside the loaded
+    /// candle range get a bar; those outside the current pan/zoom
+    /// domain are dropped so we don't draw off-screen flags. Recomputed
+    /// per frame but cheap (binary search per event, and the list is
+    /// already impact/currency-filtered).
+    private var visibleNewsMarkers: [NewsChartMarker] {
+        guard !newsEvents.isEmpty, candles.count > 1 else { return [] }
+        let firstTs = candles.first!.bucketStart.timeIntervalSince1970
+        // Extend the tail by one bar so an event on the latest bar still
+        // qualifies (bucketStart is the bar's opening time).
+        let barSpan = candles.count > 1
+            ? candles[candles.count - 1].bucketStart.timeIntervalSince(candles[candles.count - 2].bucketStart)
+            : 60
+        let lastTs = candles.last!.bucketStart.timeIntervalSince1970 + max(barSpan, 1)
+        let domain = effectiveXDomain
+        var markers: [NewsChartMarker] = []
+        for ev in newsEvents {
+            guard let at = ev.eventAt else { continue }
+            let ts = at.timeIntervalSince1970
+            guard ts >= firstTs, ts <= lastTs else { continue }
+            guard let bx = barIndex(forDate: at) else { continue }
+            guard bx >= domain.lowerBound - 1, bx <= domain.upperBound + 1 else { continue }
+            markers.append(NewsChartMarker(id: ev.id, barIndex: bx, event: ev))
+        }
+        return markers
     }
 
     // MARK: - Mark variants
@@ -4611,5 +4749,19 @@ extension ChartView: Equatable {
             && l.replayActive == r.replayActive
             && l.isPickingReplayAnchor == r.isPickingReplayAnchor
             && l.showHoverTooltip == r.showHoverTooltip
+            && Self.newsEqual(l.newsEvents, r.newsEvents)
+            && l.newsTimeZone == r.newsTimeZone
+    }
+
+    /// Cheap news-list comparison for the Equatable perf gate: same
+    /// ids in the same order, and the same `actual` values (so a
+    /// freshly-scraped actual re-renders the open popover). Avoids a
+    /// full `ForexFactoryEvent` compare on every 1 Hz tick.
+    private static func newsEqual(_ a: [ForexFactoryEvent], _ b: [ForexFactoryEvent]) -> Bool {
+        guard a.count == b.count else { return false }
+        for i in a.indices where a[i].id != b[i].id || a[i].actual != b[i].actual {
+            return false
+        }
+        return true
     }
 }

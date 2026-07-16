@@ -63,6 +63,11 @@ GRDB, and the local `claude` / `codex` / `opencode` CLIs.
 - **Strategy Scanner** — continuous Swing/Scalp confluence scans across
   pairs with entry/SL/TP/R:R and one-shot notifications.
 - **News / Economic calendar** — ForexFactory feed, impact-filtered.
+  Also overlaid **on the chart's time axis** (TradingView-style): small
+  impact-coloured flags (high=red, med=orange, low=yellow, none=grey)
+  pinned to the bottom axis at each event's time, click/tap → detail
+  popover. Renders on Mac + iPad in every layout (single + grids). See
+  `NewsChartLayer.swift`.
 - **First-run wizard** — collects keys / endpoints / CLI paths; re-runnable
   from Settings. In-app updater checks GitHub releases and downloads DMGs.
 
@@ -220,6 +225,26 @@ values into `yDomain` → **wire it into `layersPopoverContent`** so the
 user can hide it. Hidden state: per-instance `hidden` flags for
 indicators/oscillators; boolean `@State` (`srVisible` etc.) for AI overlays.
 
+### News chart layer (time-axis flags)
+
+The economic-calendar flags are the one overlay that is **not** ChartContent
+marks — they live in the `chartOverlay`'s `GeometryReader` as SwiftUI views
+positioned via `proxy.position(forX:)`, so flags, click hit-testing, and the
+detail popover all share one coordinate system and never fight the plot clip.
+Shared pieces (`ImpactLevel.chartColor`, `NewsFlagView`, `NewsMarkerPopover`,
+`NewsChartMarker`) live in `NewsChartLayer.swift` and compile into both
+targets. `ChartView` / `ChartViewiPad` each take `newsEvents:` +
+`newsTimeZone:`, expose `visibleNewsMarkers` (events whose `eventAt` maps —
+via `barIndex(forDate:)` — into the loaded candle range *and* the visible
+domain), and hit-test the bottom ~26–30px band in the drag/tap `onEnded`.
+Data comes from `NewsStore.chartEvents` (currency+impact filters, no date
+filter); `newsEvents` is in both charts' `Equatable` `==` (compared cheaply
+by id + `actual`). The layer is gated by the shared
+`@AppStorage("dashboard.showNews")` toggle (Layers popover, on by default),
+and `NewsStore` uses `retain/releaseAutoRefresh` refcounting so the News tab
+closing doesn't starve the chart's feed (both app entry points also fire one
+`news.refresh()` at boot).
+
 ### Multi-chart grid
 
 `ChartGridView` renders a **fixed 2×2 grid** every time; unused slots
@@ -318,9 +343,16 @@ at runtime). iOS 16+; `TARGETED_DEVICE_FAMILY = "1,2"`.
   shipped in v1.4b7. Remaining: Phase 4 (AI + secondary screens adaptive
   Form/List passes), Phase 5 (iPhone polish — safe area, haptics,
   orientation), Phase 6 (QA on both simulators, chart perf check).
-  Major Trend Reversal is hidden from the iPad indicator picker for now.
-  The Mac chart's `Equatable` perf treatment has not been mirrored to
-  `ChartViewiPad` yet; HTF CHoCH is macOS-only so far.
+  All Mac indicator overlays now render on `ChartViewiPad` too —
+  Pin Bar Combo and Major Trend Reversal were the last two missing and
+  are now drawn + exposed in the iPad picker/legend.
+  The Mac chart's `Equatable` perf treatment is now mirrored to
+  `ChartViewiPad` (`extension ChartViewiPad: Equatable` + `.equatable()`
+  at the `ChartPlotiPad` call site) — this stops the whole Charts mark
+  tree from re-laying-out on every 1 Hz live tick, the main driver of the
+  "High" energy impact on device. HTF CHoCH now renders on iPad too
+  (computed in `ChartPlotiPad.reloadHTFChoch`, drawn by
+  `ChartViewiPad.htfChochMarks`).
 
 ---
 
@@ -395,8 +427,10 @@ leave the model to rank, narrate, and judge edge cases. All items open:
 
 ### Other known follow-ups
 
-- Mirror the `Equatable` chart-view perf treatment to iOS `ChartViewiPad`.
-- Wire HTF CHoCH zones into the iPad chart.
+- Track down the iPad "Modifying state during view update" warning flood
+  (a pre-existing SwiftUI re-render loop; not from the CHoCH/indicator or
+  Equatable work — those update state async/off-body). Best caught with a
+  symbolic breakpoint on the runtime warning to get the offending view.
 - iPad redesign Phases 4–6 (see iPad section).
 - Volume Profile indicator is still marked WIP.
 

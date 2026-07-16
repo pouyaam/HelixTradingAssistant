@@ -12,6 +12,11 @@ struct ChartViewiPad: View {
     let indicators: Set<IndicatorKind>
     let indicatorConfig: OscillatorConfig
 
+    /// Higher-timeframe CHoCH zones (dated so they re-anchor onto the
+    /// current, lower timeframe via `barIndex(forDate:)`). Computed
+    /// upstream in `ChartPlotiPad`; empty unless the CHoCH HTF option is on.
+    var htfChochZones: [ChangeOfCharacter.DatedZone] = []
+
     var srLevels: PromptBuilder.SRLevels = .init(support: [], resistance: [])
     var fvgZones: [PromptBuilder.FVGZone] = []
     var supplyDemandZones: [PromptBuilder.SupplyDemandZone] = []
@@ -28,7 +33,21 @@ struct ChartViewiPad: View {
     var livePrice: Double? = nil
     var replayActive: Bool = false
 
+    /// ForexFactory economic-calendar events plotted as impact-coloured
+    /// flags on the bottom time axis (see `NewsChartLayer`). Already
+    /// currency/impact-filtered by `NewsStore.chartEvents`; the chart
+    /// maps each `eventAt` to a bar and draws only the visible ones.
+    var newsEvents: [ForexFactoryEvent] = []
+    /// Display zone for the news popup timestamp (`NewsStore.effectiveTimeZone`).
+    var newsTimeZone: TimeZone = .current
+
     @State private var hovered: HoverState?
+
+    /// The news event whose flag was tapped, if any — drives the
+    /// floating detail popover. Anchor is the flag point in the overlay
+    /// coordinate space.
+    @State private var selectedNews: ForexFactoryEvent?
+    @State private var newsPopupAnchor: CGPoint = .zero
     @StateObject private var derived = ChartDerivedCache()
     @State private var dragStartDomain: ClosedRange<Double>?
     @State private var dragStartYDomain: ClosedRange<Double>?
@@ -244,6 +263,64 @@ struct ChartViewiPad: View {
         return indices.allSatisfy { $0 >= 0 && $0 <= upper }
     }
 
+    private var pinBarComboResults: [PinBarComboSetup.Result] {
+        guard indicators.contains(.pinBarCombo) else { return [] }
+        let bases = derived.sp2lSetup(candles: candles, config: indicatorConfig)
+        let all = derived.pinBarComboSetup(
+            candles: candles,
+            sp2lResults: bases,
+            config: indicatorConfig
+        )
+        guard !all.isEmpty,
+              let bounds = ChartWindow.visibleBounds(domain: effectiveXDomain, count: candles.count)
+        else { return [] }
+        let margin = max(8, (bounds.hi - bounds.lo) / 4)
+        return all.suffix(6).filter { result in
+            pinBarComboResultFitsCurrentCandles(result)
+                && result.lastRelevantIndex >= bounds.lo - margin
+                && result.structureStartIndex <= bounds.hi + margin
+        }
+    }
+
+    private func pinBarComboResultFitsCurrentCandles(_ result: PinBarComboSetup.Result) -> Bool {
+        let upper = candles.count - 1
+        guard upper >= 0 else { return false }
+        let indices = [
+            result.structureStartIndex,
+            result.breakoutIndex,
+            result.confirmationIndex
+        ] + [result.resolveIndex].compactMap { $0 }
+        return indices.allSatisfy { $0 >= 0 && $0 <= upper }
+    }
+
+    private var mtrResults: [MTRSetup.Result] {
+        guard indicators.contains(.mtrStrategy) else { return [] }
+        let all = derived.mtrSetup(candles: candles, config: indicatorConfig)
+        guard !all.isEmpty,
+              let bounds = ChartWindow.visibleBounds(domain: effectiveXDomain, count: candles.count)
+        else { return [] }
+        let margin = max(8, (bounds.hi - bounds.lo) / 4)
+        return all.suffix(5).filter { result in
+            mtrResultFitsCurrentCandles(result)
+                && result.lastRelevantIndex >= bounds.lo - margin
+                && result.channelStartIndex <= bounds.hi + margin
+        }
+    }
+
+    private func mtrResultFitsCurrentCandles(_ result: MTRSetup.Result) -> Bool {
+        let upper = candles.count - 1
+        guard upper >= 0 else { return false }
+        let required = [
+            result.channelStartIndex,
+            result.channelEndIndex,
+            result.trendExtremeIndex,
+            result.breakoutIndex,
+            result.retestIndex,
+            result.lastRelevantIndex
+        ] + [result.confirmationIndex, result.resolveIndex].compactMap { $0 }
+        return required.allSatisfy { $0 >= 0 && $0 <= upper }
+    }
+
     private var volumeProfileSessions: [VolumeProfile.SessionVP] {
         guard indicators.contains(.volumeProfile), !indicatorConfig.vpUseZigzag else { return [] }
         return derived.volumeProfile(
@@ -314,7 +391,9 @@ struct ChartViewiPad: View {
                 zigzagLineMarks
                 setupMarks
                 sp2lMarks
+                pinBarComboMarks
                 microMapMarks
+                mtrMarks
                 srLevelMarks
                 fvgMarks
                 indicatorFvgMarks
@@ -323,6 +402,7 @@ struct ChartViewiPad: View {
                 steroidOrderBlockMarks
                 sonarlabOBMarks
                 chochMarks
+                htfChochMarks
                 scenarioMarks
                 tradeMarks
                 journalMarks
@@ -392,45 +472,122 @@ struct ChartViewiPad: View {
             .chartOverlay { proxy in
                 GeometryReader { geo in
                     let plotFrame = geo[proxy.plotAreaFrame]
-                    Rectangle()
-                        .fill(Color.clear)
-                        .contentShape(Rectangle())
-                        .onContinuousHover { phase in
-                            switch phase {
-                            case .active(let location):
-                                let x = location.x - plotFrame.origin.x
-                                let y = location.y - plotFrame.origin.y
-                                guard plotFrame.size.width > 0,
-                                      x >= 0, x <= plotFrame.size.width,
-                                      y >= 0, y <= plotFrame.size.height,
-                                      let xValue: Double = proxy.value(atX: x)
-                                else { return }
-                                let idx = max(0, min(candles.count - 1, Int(xValue.rounded())))
-                                let yPrice: Double = proxy.value(atY: y) ?? candles[idx].close
-                                hovered = HoverState(
-                                    candle: candles[idx],
-                                    index: idx,
-                                    cursor: location,
-                                    cursorPrice: yPrice
-                                )
-                            case .ended:
-                                hovered = nil
+                    ZStack(alignment: .topLeading) {
+                        Rectangle()
+                            .fill(Color.clear)
+                            .contentShape(Rectangle())
+                            .onContinuousHover { phase in
+                                switch phase {
+                                case .active(let location):
+                                    let x = location.x - plotFrame.origin.x
+                                    let y = location.y - plotFrame.origin.y
+                                    guard plotFrame.size.width > 0,
+                                          x >= 0, x <= plotFrame.size.width,
+                                          y >= 0, y <= plotFrame.size.height,
+                                          let xValue: Double = proxy.value(atX: x)
+                                    else { return }
+                                    let idx = max(0, min(candles.count - 1, Int(xValue.rounded())))
+                                    let yPrice: Double = proxy.value(atY: y) ?? candles[idx].close
+                                    hovered = HoverState(
+                                        candle: candles[idx],
+                                        index: idx,
+                                        cursor: location,
+                                        cursorPrice: yPrice
+                                    )
+                                case .ended:
+                                    hovered = nil
+                                }
                             }
+                            .simultaneousGesture(ipadDragGesture(
+                                plotWidth: plotFrame.size.width,
+                                plotHeight: plotFrame.size.height,
+                                plotOrigin: plotFrame.origin,
+                                proxy: proxy
+                            ))
+                            .simultaneousGesture(magnificationGesture())
+                            .onTapGesture(count: 2) {
+                                xDomain = nil
+                                yDomain = nil
+                            }
+                            // Single-tap on a bottom-axis news flag opens
+                            // its detail popover; a tap that misses every
+                            // flag dismisses an open one. Runs alongside
+                            // the double-tap-to-reset above.
+                            .simultaneousGesture(
+                                SpatialTapGesture(count: 1).onEnded { value in
+                                    if let hit = newsHitTest(
+                                        at: value.location,
+                                        plotOrigin: plotFrame.origin,
+                                        plotHeight: plotFrame.size.height,
+                                        proxy: proxy
+                                    ) {
+                                        selectedNews = hit.event
+                                        newsPopupAnchor = hit.anchor
+                                    } else if selectedNews != nil {
+                                        selectedNews = nil
+                                    }
+                                }
+                            )
+
+                        newsFlagsLayer(proxy: proxy, plotFrame: plotFrame)
+                            .allowsHitTesting(false)
+
+                        if let ev = selectedNews {
+                            newsPopupLayer(event: ev, plotFrame: plotFrame)
                         }
-                        .simultaneousGesture(ipadDragGesture(
-                            plotWidth: plotFrame.size.width,
-                            plotHeight: plotFrame.size.height,
-                            plotOrigin: plotFrame.origin,
-                            proxy: proxy
-                        ))
-                        .simultaneousGesture(magnificationGesture())
-                        .onTapGesture(count: 2) {
-                            xDomain = nil
-                            yDomain = nil
-                        }
+                    }
                 }
             }
         }
+    }
+
+    // MARK: - News layer (flags + popover)
+
+    @ViewBuilder
+    private func newsFlagsLayer(proxy: ChartProxy, plotFrame: CGRect) -> some View {
+        ForEach(visibleNewsMarkers) { m in
+            if let px = proxy.position(forX: m.barIndex) {
+                NewsFlagView(color: m.color)
+                    .position(x: plotFrame.origin.x + px, y: plotFrame.maxY - 9)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func newsPopupLayer(event: ForexFactoryEvent, plotFrame: CGRect) -> some View {
+        let cardWidth: CGFloat = 240
+        let halfW = cardWidth / 2 + 6
+        let clampedX = min(max(newsPopupAnchor.x, plotFrame.minX + halfW),
+                           plotFrame.maxX - halfW)
+        let clampedY = max(plotFrame.minY + 70, newsPopupAnchor.y - 84)
+        NewsMarkerPopover(event: event, timeZone: newsTimeZone) {
+            selectedNews = nil
+        }
+        .position(x: clampedX, y: clampedY)
+    }
+
+    /// Was a tap on a bottom-axis news flag? Returns the event + the
+    /// flag's anchor (overlay coordinates). Only the bottom ~30px band
+    /// is live (touch targets are bigger than the mouse's 26px).
+    private func newsHitTest(
+        at location: CGPoint,
+        plotOrigin: CGPoint,
+        plotHeight: CGFloat,
+        proxy: ChartProxy
+    ) -> (event: ForexFactoryEvent, anchor: CGPoint)? {
+        guard location.y >= plotOrigin.y + plotHeight - 30 else { return nil }
+        var best: (dist: CGFloat, event: ForexFactoryEvent, anchor: CGPoint)?
+        for m in visibleNewsMarkers {
+            guard let px = proxy.position(forX: m.barIndex) else { continue }
+            let sx = plotOrigin.x + px
+            let d = abs(location.x - sx)
+            guard d <= 18 else { continue }
+            if best == nil || d < best!.dist {
+                best = (d, m.event, CGPoint(x: sx, y: plotOrigin.y + plotHeight - 9))
+            }
+        }
+        guard let b = best else { return nil }
+        return (b.event, b.anchor)
     }
 
     // MARK: - iPad drag (pan + draw)
@@ -640,6 +797,27 @@ struct ChartViewiPad: View {
 
     private var renderIndices: [Int] {
         ChartWindow.renderIndices(domain: effectiveXDomain, count: candles.count)
+    }
+
+    /// News events resolved to bar indices and clipped to the visible
+    /// window (see `ChartView.visibleNewsMarkers` for the rationale).
+    private var visibleNewsMarkers: [NewsChartMarker] {
+        guard !newsEvents.isEmpty, candles.count > 1 else { return [] }
+        let firstTs = candles.first!.bucketStart.timeIntervalSince1970
+        let barSpan = candles[candles.count - 1].bucketStart
+            .timeIntervalSince(candles[candles.count - 2].bucketStart)
+        let lastTs = candles.last!.bucketStart.timeIntervalSince1970 + max(barSpan, 1)
+        let domain = effectiveXDomain
+        var markers: [NewsChartMarker] = []
+        for ev in newsEvents {
+            guard let at = ev.eventAt else { continue }
+            let ts = at.timeIntervalSince1970
+            guard ts >= firstTs, ts <= lastTs else { continue }
+            guard let bx = barIndex(forDate: at) else { continue }
+            guard bx >= domain.lowerBound - 1, bx <= domain.upperBound + 1 else { continue }
+            markers.append(NewsChartMarker(id: ev.id, barIndex: bx, event: ev))
+        }
+        return markers
     }
 
     // MARK: - Line marks
@@ -1400,6 +1578,281 @@ struct ChartViewiPad: View {
         return "MICROMAP \(direction) · \(quality) \(result.confluence.score)/6"
     }
 
+    // MARK: - Pin Bar Combo marks
+
+    @ChartContentBuilder
+    private var pinBarComboMarks: some ChartContent {
+        let lastIndex = max(0, candles.count - 1)
+        ForEach(pinBarComboResults) { result in
+            let color = pinBarComboColor(result.direction)
+            let confirmation = Double(result.confirmationIndex)
+            let start = Double(result.breakoutIndex)
+            let end = Double(result.resolveIndex ?? lastIndex)
+
+            RuleMark(
+                xStart: .value("Pin Bar level start", start),
+                xEnd: .value("Pin Bar level end", end),
+                y: .value("Pin Bar tested level", result.level)
+            )
+            .foregroundStyle(IndicatorKind.pinBarCombo.color.opacity(0.75))
+            .lineStyle(StrokeStyle(lineWidth: 1.2, dash: [4, 3]))
+
+            RectangleMark(
+                xStart: .value("Pin Bar candle start", confirmation - 0.34),
+                xEnd: .value("Pin Bar candle end", confirmation + 0.34),
+                yStart: .value("Pin Bar low", result.pinBarLow),
+                yEnd: .value("Pin Bar high", result.pinBarHigh)
+            )
+            .foregroundStyle(color.opacity(0.16))
+
+            PointMark(
+                x: .value("Pin Bar confirmation x", confirmation),
+                y: .value(
+                    "Pin Bar confirmation y",
+                    result.direction == .long ? result.pinBarLow : result.pinBarHigh
+                )
+            )
+            .symbolSize(68)
+            .foregroundStyle(color)
+            .annotation(
+                position: result.direction == .long ? .bottom : .top,
+                alignment: .center,
+                spacing: 3
+            ) {
+                setupTag(result.kind == .sp2l ? "PIN · SP2L" : "PIN · BTB", color: color)
+            }
+
+            RuleMark(
+                xStart: .value("Pin Bar entry start", confirmation),
+                xEnd: .value("Pin Bar entry end", end),
+                y: .value("Pin Bar entry", result.entry)
+            )
+            .foregroundStyle(color.opacity(0.95))
+            .lineStyle(StrokeStyle(lineWidth: 1.5))
+
+            RuleMark(
+                xStart: .value("Pin Bar SL start", confirmation),
+                xEnd: .value("Pin Bar SL end", end),
+                y: .value("Pin Bar SL", result.stopLoss)
+            )
+            .foregroundStyle(Theme.Color.danger.opacity(0.9))
+            .lineStyle(StrokeStyle(lineWidth: 1.2))
+
+            RuleMark(
+                xStart: .value("Pin Bar TP start", confirmation),
+                xEnd: .value("Pin Bar TP end", end),
+                y: .value("Pin Bar TP", result.takeProfit)
+            )
+            .foregroundStyle(Theme.Color.success.opacity(0.9))
+            .lineStyle(StrokeStyle(lineWidth: 1.2))
+
+            PointMark(
+                x: .value("Pin Bar entry label x", end),
+                y: .value("Pin Bar entry label y", result.entry)
+            )
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                setupTag(pinBarComboStatusLabel(result), color: color)
+            }
+
+            PointMark(
+                x: .value("Pin Bar SL label x", end),
+                y: .value("Pin Bar SL label y", result.stopLoss)
+            )
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                setupTag("SL", color: Theme.Color.danger)
+            }
+
+            PointMark(
+                x: .value("Pin Bar TP label x", end),
+                y: .value("Pin Bar TP label y", result.takeProfit)
+            )
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                setupTag(
+                    "TP R\(String(format: "%.2g", indicatorConfig.pinBarRiskReward))",
+                    color: Theme.Color.success
+                )
+            }
+        }
+    }
+
+    private func pinBarComboColor(_ direction: PinBarComboSetup.Direction) -> Color {
+        direction == .long ? Theme.Color.success : Theme.Color.danger
+    }
+
+    private func pinBarComboStatusLabel(_ result: PinBarComboSetup.Result) -> String {
+        switch result.status {
+        case .active: return result.direction == .long ? "LONG active" : "SHORT active"
+        case .hitTP: return "Target hit"
+        case .hitSL: return "Stopped"
+        case .expired: return "Time exit"
+        }
+    }
+
+    // MARK: - Major Trend Reversal marks
+
+    @ChartContentBuilder
+    private var mtrMarks: some ChartContent {
+        let lastIndex = max(0, candles.count - 1)
+        ForEach(mtrResults) { result in
+            let color = mtrDirectionColor(result.direction)
+            let isForming = result.stage == .forming
+            let opacity = isForming ? 0.55 : (result.stage == .expired ? 0.30 : 0.90)
+            let channelDelta = result.channelEndIndex - result.channelStartIndex
+            let slope = channelDelta == 0 ? 0 :
+                (result.channelEndPrice - result.channelStartPrice) / Double(channelDelta)
+            let projectedMain = result.channelStartPrice
+                + slope * Double(result.breakoutIndex - result.channelStartIndex)
+            let parallelOffset = result.parallelStartPrice - result.channelStartPrice
+            let projectedParallel = projectedMain + parallelOffset
+            let planEnd = Double(result.resolveIndex ?? lastIndex)
+
+            ForEach([0, 1], id: \.self) { endpoint in
+                LineMark(
+                    x: .value(
+                        "MTR channel x",
+                        endpoint == 0 ? Double(result.channelStartIndex) : Double(result.breakoutIndex)
+                    ),
+                    y: .value(
+                        "MTR channel y",
+                        endpoint == 0 ? result.channelStartPrice : projectedMain
+                    ),
+                    series: .value("MTR channel series", "mtr-main-\(result.id)")
+                )
+                .foregroundStyle(IndicatorKind.mtrStrategy.color.opacity(opacity))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+
+                LineMark(
+                    x: .value(
+                        "MTR parallel x",
+                        endpoint == 0 ? Double(result.channelStartIndex) : Double(result.breakoutIndex)
+                    ),
+                    y: .value(
+                        "MTR parallel y",
+                        endpoint == 0 ? result.parallelStartPrice : projectedParallel
+                    ),
+                    series: .value("MTR parallel series", "mtr-parallel-\(result.id)")
+                )
+                .foregroundStyle(IndicatorKind.mtrStrategy.color.opacity(opacity * 0.65))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+            }
+
+            RuleMark(
+                xStart: .value("MTR old extreme start", Double(result.trendExtremeIndex)),
+                xEnd: .value("MTR old extreme end", Double(result.retestIndex)),
+                y: .value("MTR old extreme", result.trendExtremePrice)
+            )
+            .foregroundStyle(color.opacity(opacity * 0.65))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+
+            RuleMark(
+                xStart: .value("MTR neckline start", Double(result.breakoutIndex)),
+                xEnd: .value("MTR neckline end", planEnd),
+                y: .value("MTR neckline", result.neckline)
+            )
+            .foregroundStyle(color.opacity(opacity))
+            .lineStyle(StrokeStyle(lineWidth: 1.4, dash: [5, 3]))
+
+            PointMark(
+                x: .value("MTR retest x", Double(result.retestIndex)),
+                y: .value("MTR retest y", result.retestPrice)
+            )
+            .symbolSize(isForming ? 54 : 72)
+            .foregroundStyle(color.opacity(opacity))
+            .annotation(
+                position: result.direction == .long ? .bottom : .top,
+                alignment: .center,
+                spacing: 3
+            ) {
+                setupTag("MTR · \(result.variant.label)", color: color.opacity(opacity))
+            }
+
+            if let confirmation = result.confirmationIndex {
+                PointMark(
+                    x: .value("MTR confirmation x", Double(confirmation)),
+                    y: .value("MTR confirmation y", candles[confirmation].close)
+                )
+                .symbolSize(82)
+                .foregroundStyle(color)
+                .annotation(
+                    position: result.direction == .long ? .top : .bottom,
+                    alignment: .center,
+                    spacing: 3
+                ) {
+                    setupTag(
+                        result.direction == .long ? "MTR LONG confirmed" : "MTR SHORT confirmed",
+                        color: color
+                    )
+                }
+            }
+
+            if let entry = result.entry,
+               let stop = result.stopLoss,
+               let target = result.takeProfit,
+               let confirmation = result.confirmationIndex {
+                let planStart = Double(confirmation)
+                RuleMark(
+                    xStart: .value("MTR entry start", planStart),
+                    xEnd: .value("MTR entry end", planEnd),
+                    y: .value("MTR entry", entry)
+                )
+                .foregroundStyle(color.opacity(opacity))
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+
+                RuleMark(
+                    xStart: .value("MTR stop start", planStart),
+                    xEnd: .value("MTR stop end", planEnd),
+                    y: .value("MTR stop", stop)
+                )
+                .foregroundStyle(Theme.Color.danger.opacity(opacity))
+                .lineStyle(StrokeStyle(lineWidth: 1.3))
+
+                RuleMark(
+                    xStart: .value("MTR target start", planStart),
+                    xEnd: .value("MTR target end", planEnd),
+                    y: .value("MTR target", target)
+                )
+                .foregroundStyle(Theme.Color.success.opacity(opacity))
+                .lineStyle(StrokeStyle(lineWidth: 1.3))
+
+                PointMark(x: .value("MTR status x", planEnd), y: .value("MTR status y", entry))
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        setupTag(mtrStatusLabel(result), color: color.opacity(opacity))
+                    }
+                PointMark(x: .value("MTR SL x", planEnd), y: .value("MTR SL y", stop))
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        setupTag("SL", color: Theme.Color.danger.opacity(opacity))
+                    }
+                PointMark(x: .value("MTR TP x", planEnd), y: .value("MTR TP y", target))
+                    .symbolSize(0)
+                    .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                        setupTag(
+                            "TP R\(String(format: "%.2g", indicatorConfig.mtrRiskReward))",
+                            color: Theme.Color.success.opacity(opacity)
+                        )
+                    }
+            }
+        }
+    }
+
+    private func mtrDirectionColor(_ direction: MTRSetup.Direction) -> Color {
+        direction == .long ? Theme.Color.success : Theme.Color.danger
+    }
+
+    private func mtrStatusLabel(_ result: MTRSetup.Result) -> String {
+        switch result.stage {
+        case .forming: return "MTR forming"
+        case .confirmed: return result.direction == .long ? "LONG active" : "SHORT active"
+        case .hitTP: return "Target hit"
+        case .hitSL: return "Stopped"
+        case .expired: return "Expired"
+        }
+    }
+
     private func setupTag(_ text: String, color: Color) -> some View {
         Text(text)
             .font(.system(size: 8, weight: .heavy))
@@ -1692,6 +2145,84 @@ struct ChartViewiPad: View {
                 .padding(.horizontal, 4)
                 .padding(.vertical, 1)
                 .background(Capsule().fill(accentColor))
+        }
+    }
+
+    // MARK: - Higher-timeframe CHoCH marks
+
+    @ChartContentBuilder
+    private var htfChochMarks: some ChartContent {
+        let xEnd = Double(max(0, candles.count - 1))
+        ForEach(htfChochZones) { zone in
+            htfChochMark(for: zone, xEnd: xEnd)
+        }
+    }
+
+    @ChartContentBuilder
+    private func htfChochMark(for zone: ChangeOfCharacter.DatedZone, xEnd: Double) -> some ChartContent {
+        let baseColor: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
+        let accentColor = IndicatorKind.changeOfCharacter.color
+        let fvgColor = Color(red: 0.30, green: 0.80, blue: 0.75)
+        // HTF zones are context, not the live signal — halve every fill so
+        // they sit visibly behind the current-timeframe CHoCH zones.
+        let dim = (zone.status == .fresh ? 1.0 : 0.6) * 0.5
+        let obX = barIndex(forDate: zone.obDate)
+        let chochX = barIndex(forDate: zone.chochDate)
+
+        // Order block layer.
+        if indicatorConfig.chochShowOB, let obX {
+            chochZoneRect(
+                id: "\(zone.id)-HTFOB", xStart: obX, xEnd: xEnd,
+                low: zone.obLow, high: zone.obHigh, color: baseColor,
+                fill: 0.12 * dim, dashed: true, tag: "OB·HTF"
+            )
+        }
+        // Displacement FVG layer.
+        if indicatorConfig.chochShowFVG,
+           let fl = zone.fvgLow, let fh = zone.fvgHigh,
+           let fd = zone.fvgDate, let fx = barIndex(forDate: fd) {
+            chochZoneRect(
+                id: "\(zone.id)-HTFFVG", xStart: fx, xEnd: xEnd,
+                low: fl, high: fh, color: fvgColor, fill: 0.16 * dim, dashed: true, tag: "FVG·HTF"
+            )
+        }
+        // Inverse FVG layer.
+        if indicatorConfig.chochShowIFVG,
+           let il = zone.ifvgLow, let ih = zone.ifvgHigh,
+           let idt = zone.ifvgDate, let ix = barIndex(forDate: idt) {
+            chochZoneRect(
+                id: "\(zone.id)-HTFIFVG", xStart: ix, xEnd: xEnd,
+                low: il, high: ih, color: accentColor, fill: 0.10 * dim, dashed: true, tag: "iFVG·HTF"
+            )
+        }
+
+        // Broken-structure level — dashed rule from the OB across to the break.
+        if let obX, let chochX {
+            RuleMark(
+                xStart: .value("HTF CHoCH lvl start", obX),
+                xEnd:   .value("HTF CHoCH lvl end",   chochX),
+                y:      .value("HTF CHoCH lvl",       zone.brokenLevel)
+            )
+            .foregroundStyle(accentColor.opacity(0.5))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+        }
+
+        // Break marker + label at the CHoCH bar.
+        if let chochX {
+            let tagText = zone.isBullish ? "CHoCH↑ HTF" : "CHoCH↓ HTF"
+            PointMark(
+                x: .value("HTF CHoCH label x", chochX),
+                y: .value("HTF CHoCH label y", zone.brokenLevel)
+            )
+            .symbolSize(0)
+            .annotation(position: zone.isBullish ? .top : .bottom, alignment: .center, spacing: 2) {
+                Text(tagText)
+                    .font(.system(size: 7, weight: .heavy))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(accentColor.opacity(0.85)))
+            }
         }
     }
 
@@ -2438,6 +2969,10 @@ struct ChartViewiPad: View {
             if zone.low < lo { lo = zone.low }
             if zone.high > hi { hi = zone.high }
         }
+        for zone in htfChochZones {
+            if zone.obLow < lo { lo = zone.obLow }
+            if zone.obHigh > hi { hi = zone.obHigh }
+        }
         for run in sessionRuns {
             if run.low < lo { lo = run.low }
             if run.high > hi { hi = run.high }
@@ -2467,6 +3002,31 @@ struct ChartViewiPad: View {
                     if value < lo { lo = value }
                     if value > hi { hi = value }
                 }
+            }
+        }
+        for result in pinBarComboResults {
+            let values = [
+                result.level,
+                result.pinBarLow,
+                result.pinBarHigh,
+                result.entry,
+                result.stopLoss,
+                result.takeProfit
+            ]
+            for value in values {
+                if value < lo { lo = value }
+                if value > hi { hi = value }
+            }
+        }
+        for result in mtrResults {
+            let values = [
+                result.trendExtremePrice,
+                result.retestPrice,
+                result.neckline
+            ] + [result.entry, result.stopLoss, result.takeProfit].compactMap { $0 }
+            for value in values {
+                if value < lo { lo = value }
+                if value > hi { hi = value }
             }
         }
         for session in volumeProfileSessions {
@@ -2641,4 +3201,62 @@ struct ChartViewiPad: View {
         f.dateFormat = "MMM d · HH:mm"
         return f
     }()
+}
+
+// MARK: - Equatable (re-render isolation)
+
+/// Mirrors the macOS `ChartView` perf treatment. The iPad chart is just as
+/// expensive (Apple Charts re-lays out its whole mark tree on every body
+/// evaluation) and is re-evaluated far more often than its *drawn* inputs
+/// change: every `YahooScheduler` `objectWillChange` (~1 Hz live ticks,
+/// plus every unrelated `@Published` field) invalidates the owning
+/// `ChartPlotiPad` and cascades a full re-eval — the Charts layout pass —
+/// down into here even when nothing moved. That constant relayout was the
+/// dominant driver of the "High" energy impact on device.
+///
+/// Conforming to `Equatable` + wrapping the call site in `.equatable()`
+/// lets SwiftUI skip re-invoking `body` when no render-affecting input
+/// changed. Closures (`onCommitDrawing`, …) and internal `@State` (hover,
+/// in-flight drawing, crosshair) are deliberately excluded: closures don't
+/// affect what's drawn, and self-`@State` changes bypass this gate anyway
+/// (crosshair + live drawing previews still redraw normally). The candle
+/// series compares via `Candle.seriesEqual` (O(1)) so the hot pan/zoom
+/// path — which changes `xDomain` and legitimately forces a redraw — stays
+/// cheap on years of history.
+extension ChartViewiPad: Equatable {
+    static func == (l: ChartViewiPad, r: ChartViewiPad) -> Bool {
+        Candle.seriesEqual(l.candles, r.candles)
+            && l.chartType == r.chartType
+            && l.accent == r.accent
+            && l.xDomain == r.xDomain
+            && l.yDomain == r.yDomain
+            && l.indicators == r.indicators
+            && l.indicatorConfig == r.indicatorConfig
+            && l.htfChochZones == r.htfChochZones
+            && l.srLevels == r.srLevels
+            && l.fvgZones == r.fvgZones
+            && l.supplyDemandZones == r.supplyDemandZones
+            && l.taScenario == r.taScenario
+            && l.taAltScenario == r.taAltScenario
+            && l.drawings == r.drawings
+            && l.activeTool == r.activeTool
+            && l.selectedDrawingID == r.selectedDrawingID
+            && l.trades == r.trades
+            && l.journalEntries == r.journalEntries
+            && l.livePrice == r.livePrice
+            && l.replayActive == r.replayActive
+            && Self.newsEqual(l.newsEvents, r.newsEvents)
+            && l.newsTimeZone == r.newsTimeZone
+    }
+
+    /// Same cheap news-list compare as the Mac chart: ids in order +
+    /// `actual` values, so live actuals refresh the popover without a
+    /// full event compare on every tick.
+    private static func newsEqual(_ a: [ForexFactoryEvent], _ b: [ForexFactoryEvent]) -> Bool {
+        guard a.count == b.count else { return false }
+        for i in a.indices where a[i].id != b[i].id || a[i].actual != b[i].actual {
+            return false
+        }
+        return true
+    }
 }
