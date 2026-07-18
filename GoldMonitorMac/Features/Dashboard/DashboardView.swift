@@ -3221,32 +3221,16 @@ struct DashboardView: View {
     private func resetChart() {
         let n = candles.count
         guard n > 0 else { xDomain = nil; yDomain = nil; return }
-        let defaultBars: Double = 150
-        let upper = Double(n - 1) + 0.5
-        let lower = max(-0.5, upper - defaultBars)
-        // Compute an explicit Y fit for the reset window directly from the
-        // candle array. Setting a concrete non-nil value ensures Apple Charts
-        // registers a definite domain change and redraws the Y axis —
-        // transitioning from a pinned value through nil back to a computed
-        // value via the effectiveYDomain chain is unreliable on macOS 13.
-        let loIdx = max(0, Int(lower.rounded(.down)))
-        let hiIdx = min(n - 1, Int(upper.rounded(.up)))
-        let slice = candles[loIdx...hiIdx]
-        if let lo = slice.map(\.low).min(), let hi = slice.map(\.high).max() {
-            let span = max(hi - lo, hi * 0.001, 1.0)
-            let pad  = span * 0.05
-            yDomain = (lo - pad) ... (hi + pad)
-        } else {
-            yDomain = nil
-        }
+        let domain = ChartWindow.defaultDomain(count: n, visible: 150)
+        // Pin the price scale to the *candles* in the reset window and keep
+        // it there. Reverting to nil would hand the Y axis back to the
+        // overlay-inclusive auto-fit, which re-frames a far-away indicator /
+        // target line and squashes the price action — the exact thing Reset
+        // is meant to undo. An explicit non-nil value also guarantees Apple
+        // Charts registers a definite domain change and redraws on macOS 13.
+        yDomain = ChartWindow.candleYDomain(candles: candles, domain: domain)
         withAnimation(.easeInOut(duration: 0.3)) {
-            xDomain = lower ... upper
-        }
-        // Re-enable continuous Y auto-fit after the animation finishes, so
-        // the user can pan left and have the Y scale follow automatically.
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            yDomain = nil
+            xDomain = domain
         }
     }
 

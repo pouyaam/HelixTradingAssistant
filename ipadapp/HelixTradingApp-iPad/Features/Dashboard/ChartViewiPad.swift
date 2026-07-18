@@ -355,7 +355,10 @@ struct ChartViewiPad: View {
     private var chart: some View {
         Group {
             let indices = renderIndices
-            let indexSet = Set(indices)
+            // Range bounds for visible-index checks — avoids allocating
+            // a Set<Int> on every frame (60-120×/sec during pan/zoom).
+            let visLo = indices.first ?? 0
+            let visHi = indices.last ?? 0
 
             Chart {
                 if let last = displayCandles.last {
@@ -414,8 +417,8 @@ struct ChartViewiPad: View {
                 case .candle, .heikinAshi:   candleMarks(indices: indices)
                 }
 
-                indicatorMarks(visible: indexSet)
-                utBotMarks(indices: indices, visible: indexSet)
+                indicatorMarks(visLo: visLo, visHi: visHi)
+                utBotMarks(indices: indices, visLo: visLo, visHi: visHi)
 
                 if let h = hovered, h.index < displayCandles.count {
                     let dc = displayCandles[h.index]
@@ -506,8 +509,7 @@ struct ChartViewiPad: View {
                             ))
                             .simultaneousGesture(magnificationGesture())
                             .onTapGesture(count: 2) {
-                                xDomain = nil
-                                yDomain = nil
+                                resetChart()
                             }
                             // Single-tap on a bottom-axis news flag opens
                             // its detail popover; a tap that misses every
@@ -793,6 +795,17 @@ struct ChartViewiPad: View {
     private var effectiveXDomain: ClosedRange<Double> {
         if let d = xDomain { return d }
         return ChartWindow.defaultDomain(count: candles.count)
+    }
+
+    /// Reset to the default recent-bars window with the price scale
+    /// framed to the *candles* (not indicators/overlays), matching the
+    /// Mac chart's Reset. Pins an explicit Y so the double-tap doesn't
+    /// hand the axis back to the overlay-inclusive auto-fit.
+    private func resetChart() {
+        guard candles.count > 0 else { xDomain = nil; yDomain = nil; return }
+        let domain = ChartWindow.defaultDomain(count: candles.count)
+        yDomain = ChartWindow.candleYDomain(candles: candles, domain: domain)
+        xDomain = domain
     }
 
     private var renderIndices: [Int] {
@@ -2617,11 +2630,11 @@ struct ChartViewiPad: View {
     // MARK: - Indicator marks
 
     @ChartContentBuilder
-    private func indicatorMarks(visible: Set<Int>) -> some ChartContent {
+    private func indicatorMarks(visLo: Int, visHi: Int) -> some ChartContent {
         let instances = indicators.map { Self.makeIndicatorInstance(kind: $0, config: indicatorConfig) }
         let computed = derived.indicators(instances: instances, candles: candles)
         ForEach(computed, id: \.instance.id) { entry in
-            ForEach(entry.points.filter { visible.contains($0.index) }) { p in
+            ForEach(entry.points.filter { $0.index >= visLo && $0.index <= visHi }) { p in
                 LineMark(
                     x: .value("Bar", Double(p.index)),
                     y: .value("Indicator", p.value),
@@ -2678,7 +2691,7 @@ struct ChartViewiPad: View {
     // MARK: - UT Bot marks
 
     @ChartContentBuilder
-    private func utBotMarks(indices: [Int], visible: Set<Int>) -> some ChartContent {
+    private func utBotMarks(indices: [Int], visLo: Int, visHi: Int) -> some ChartContent {
         if let out = utBotOutput {
             if indicatorConfig.utShowTrailingStop {
                 ForEach(indices, id: \.self) { i in
@@ -2695,7 +2708,7 @@ struct ChartViewiPad: View {
                 }
             }
             let cs = displayCandles
-            ForEach(out.signals.filter { visible.contains($0.index) }) { sig in
+            ForEach(out.signals.filter { $0.index >= visLo && $0.index <= visHi }) { sig in
                 let c = cs[sig.index]
                 PointMark(
                     x: .value("Bar", Double(sig.index)),
@@ -2923,160 +2936,45 @@ struct ChartViewiPad: View {
             }
         }
 
-        // Overlay Y extremes — computed inline to avoid 11+ temporary
-        // heap-array allocations per pan/zoom frame. The overlay data
-        // (S/R levels, FVG zones, order blocks, drawings, trades, etc.)
-        // doesn't change during a gesture — only the visible xDomain
-        // does — so this scan is O(overlay points) per frame, typically
-        // a few hundred comparisons, which is cheaper than the old
-        // approach of .map-ing each source into a temporary array,
-        // concatenating them, and passing to a cached resolve that
-        // would short-circuit anyway.
-
-        for level in srLevels.support {
-            if level < lo { lo = level }
-            if level > hi { hi = level }
-        }
-        for level in srLevels.resistance {
-            if level < lo { lo = level }
-            if level > hi { hi = level }
-        }
-        for zone in fvgZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in supplyDemandZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in indicatorFvgZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in orderBlockZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in steroidOrderBlockZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in sonarlabOBZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in chochZones {
-            if zone.low < lo { lo = zone.low }
-            if zone.high > hi { hi = zone.high }
-        }
-        for zone in htfChochZones {
-            if zone.obLow < lo { lo = zone.obLow }
-            if zone.obHigh > hi { hi = zone.obHigh }
-        }
-        for run in sessionRuns {
-            if run.low < lo { lo = run.low }
-            if run.high > hi { hi = run.high }
-        }
-        for r in nySetupResults {
-            if r.orLow < lo { lo = r.orLow }
-            if r.orHigh > hi { hi = r.orHigh }
-        }
-        for result in sp2lResults {
-            let values = [
-                result.brokenLevel,
-                result.spikeLow,
-                result.spikeHigh,
-                result.entry,
-                result.stopLoss
-            ] + result.takeProfits(count: indicatorConfig.sp2lTargetCount)
-            for value in values {
-                if value < lo { lo = value }
-                if value > hi { hi = value }
-            }
-        }
-        for result in microMapResults {
-            if result.spikeLow < lo { lo = result.spikeLow }
-            if result.spikeHigh > hi { hi = result.spikeHigh }
-            for attempt in result.attempts {
-                for value in [attempt.entry, attempt.stopLoss, attempt.takeProfit].compactMap({ $0 }) {
-                    if value < lo { lo = value }
-                    if value > hi { hi = value }
-                }
-            }
-        }
-        for result in pinBarComboResults {
-            let values = [
-                result.level,
-                result.pinBarLow,
-                result.pinBarHigh,
-                result.entry,
-                result.stopLoss,
-                result.takeProfit
-            ]
-            for value in values {
-                if value < lo { lo = value }
-                if value > hi { hi = value }
-            }
-        }
-        for result in mtrResults {
-            let values = [
-                result.trendExtremePrice,
-                result.retestPrice,
-                result.neckline
-            ] + [result.entry, result.stopLoss, result.takeProfit].compactMap { $0 }
-            for value in values {
-                if value < lo { lo = value }
-                if value > hi { hi = value }
-            }
-        }
-        for session in volumeProfileSessions {
-            for bucket in session.buckets {
-                if bucket.priceLevel < lo { lo = bucket.priceLevel }
-                if bucket.priceLevel > hi { hi = bucket.priceLevel }
-            }
-        }
-        if let vp = zigzagTrendVP {
-            for bucket in vp.buckets {
-                if bucket.priceLevel < lo { lo = bucket.priceLevel }
-                if bucket.priceLevel > hi { hi = bucket.priceLevel }
-            }
-        }
-        for pivot in zigzagPivots {
-            if pivot.price < lo { lo = pivot.price }
-            if pivot.price > hi { hi = pivot.price }
-        }
-        if let scenario = taScenario {
-            for v in [scenario.takeProfit, scenario.stopLoss] + [scenario.entry].compactMap({ $0 }) {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
-            }
-        }
-        if let alt = taAltScenario {
-            for v in [alt.takeProfit, alt.stopLoss] + [alt.entry].compactMap({ $0 }) {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
-            }
-        }
-        for d in drawings where d.visible {
-            if d.start.price < lo { lo = d.start.price }
-            if d.start.price > hi { hi = d.start.price }
-            if let e = d.end {
-                if e.price < lo { lo = e.price }
-                if e.price > hi { hi = e.price }
-            }
-        }
-        for t in trades {
-            for v in [t.entry, t.takeProfit, t.stopLoss, t.fillPrice ?? t.entry] {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
-            }
-        }
-        for je in journalEntries {
-            for v in [je.entry, je.takeProfit, je.stopLoss].compactMap({ $0 }) {
-                if v < lo { lo = v }
-                if v > hi { hi = v }
-            }
-        }
+        // Overlay Y extremes — cached via ChartDerivedCache. The
+        // overlay data (S/R levels, FVG zones, order blocks, drawings,
+        // trades, etc.) rarely changes during pan/zoom, so the
+        // signature check yields a synchronous cache hit on every
+        // gesture frame. Only the candle-window scan above is uncached
+        // (it depends on the visible xDomain).
+        let instances = indicators.map { Self.makeIndicatorInstance(kind: $0, config: indicatorConfig) }
+        let overlayData = ChartDerivedCache.OverlayData(
+            candles: candles,
+            indicatorInstances: instances,
+            indicatorConfig: indicatorConfig,
+            indicators: indicators,
+            srLevels: srLevels,
+            fvgZones: fvgZones,
+            supplyDemandZones: supplyDemandZones,
+            indicatorFvgZones: indicatorFvgZones,
+            orderBlockZones: orderBlockZones,
+            steroidOrderBlockZones: steroidOrderBlockZones,
+            sonarlabOBZones: sonarlabOBZones,
+            chochZones: chochZones,
+            htfChochZones: htfChochZones,
+            sessionRuns: sessionRuns,
+            nySetupResults: nySetupResults,
+            sp2lResults: sp2lResults,
+            pinBarComboResults: pinBarComboResults,
+            microMapResults: microMapResults,
+            mtrResults: mtrResults,
+            volumeProfileSessions: volumeProfileSessions,
+            zigzagTrendVP: zigzagTrendVP,
+            zigzagPivots: zigzagPivots,
+            taScenario: taScenario,
+            taAltScenario: taAltScenario,
+            drawings: drawings,
+            trades: trades,
+            journalEntries: journalEntries
+        )
+        let overlayExtremes = derived.overlayExtremes(overlayData)
+        if overlayExtremes.lo < lo { lo = overlayExtremes.lo }
+        if overlayExtremes.hi > hi { hi = overlayExtremes.hi }
 
         guard visibleCandles.isEmpty == false else { return 0...1 }
         let span = hi - lo

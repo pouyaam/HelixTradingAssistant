@@ -156,7 +156,7 @@ struct DashboardViewiPad: View {
             livePrices: $livePrices,
             isFetching: $isFetching,
             dataResetToken: $dataResetToken
-        ) {
+        ) { yahoo in
         ZStack {
             VStack(spacing: 8) {
                 if let pair = pair {
@@ -170,7 +170,7 @@ struct DashboardViewiPad: View {
                     // collapses to zero frame + zero opacity. Eliminates
                     // teardown/rebuild cycle on layout switch.
                     ZStack {
-                        chartCard(pair)
+                        chartCard(pair, yahoo: yahoo)
                             .frame(maxWidth: showsGrid ? 0 : .infinity,
                                    maxHeight: showsGrid ? 0 : .infinity)
                             .opacity(showsGrid ? 0 : 1)
@@ -427,7 +427,7 @@ struct DashboardViewiPad: View {
 
     // MARK: - Chart card (Phase 2: + drawing toolbar + layers + alerts)
 
-    private func chartCard(_ pair: TradingPair) -> some View {
+    private func chartCard(_ pair: TradingPair, yahoo: YahooScheduler) -> some View {
         VStack(spacing: 0) {
             // Chart header
             IPadChartHeaderToolbar(
@@ -503,7 +503,9 @@ struct DashboardViewiPad: View {
                 replayActive: replay.isActive,
                 showVolume: showVolume,
                 reloadToken: reloadToken,
-                candleCount: $candleCount
+                dataResetToken: dataResetToken,
+                candleCount: $candleCount,
+                yahoo: yahoo
             )
             .id("\(pair.id)|\(timeframe.rawValue)")
         }
@@ -618,10 +620,17 @@ private struct ChartPlotiPad: View {
     let replayActive: Bool
     let showVolume: Bool
     let reloadToken: Int
+    let dataResetToken: Int
     @Binding var candleCount: Int
 
     @EnvironmentObject private var app: AppState
-    @EnvironmentObject private var yahoo: YahooScheduler
+    /// Passed as a plain `let` (not `@EnvironmentObject`) so that
+    /// `@Published` writes on YahooScheduler (latestPrices, isFetching,
+    /// etc.) do NOT trigger body re-evaluation of this view. The parent
+    /// DashboardViewiPad already subscribes to the specific fields it
+    /// needs via YahooDataBridge — this view only reads the scheduler
+    /// in async tasks (warmHistory / refreshTrailingCandles).
+    let yahoo: YahooScheduler
     /// Shared economic-calendar feed — powers the on-chart news flags.
     @EnvironmentObject private var news: NewsStore
     /// News-flag layer toggle (shared key with the Mac chart).
@@ -664,12 +673,11 @@ private struct ChartPlotiPad: View {
             .frame(maxHeight: .infinity)
             .clipped()
             // Tap-and-hold to rescale — mirrors the double-tap reset, but
-            // discoverable. Drops the pinned window so the chart re-fits to
-            // the latest bars and auto-scales the price axis.
+            // discoverable. Frames the recent bars with the price scale fit
+            // to the *candles* (not indicators/overlays).
             .contextMenu {
                 Button {
-                    xDomain = nil
-                    yDomain = nil
+                    resetChart()
                 } label: {
                     Label("Reset Zoom", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
                 }
@@ -679,12 +687,15 @@ private struct ChartPlotiPad: View {
             // lockstep with the price chart.
             if !oscillators.isEmpty {
                 Divider().background(Theme.Color.border)
-                ForEach(Array(oscillators)) { kind in
+                // Sorted for stable ForEach ordering — Set iteration
+                // order is unstable, causing diff churn.
+                ForEach(Array(oscillators).sorted(by: { $0.rawValue < $1.rawValue })) { kind in
                     OscillatorPanel(
                         instance: Self.makeOscillatorInstance(kind: kind, config: indicatorConfig),
                         candles: candles,
                         xDomain: xDomain
                     )
+                    .equatable()
                     .padding(.horizontal, Theme.Spacing.lg)
                 }
             }
@@ -695,6 +706,7 @@ private struct ChartPlotiPad: View {
                 if volView.hasVolume {
                     Divider().background(Theme.Color.border)
                     volView
+                        .equatable()
                         .frame(height: 50)
                         .padding(.horizontal, Theme.Spacing.lg)
                 }
@@ -714,7 +726,7 @@ private struct ChartPlotiPad: View {
                 Task { await refreshTrailingCandles() }
             }
         }
-        .onChange(of: yahoo.dataResetToken) { _ in
+        .onChange(of: dataResetToken) { _ in
             Task { await reloadCandles() }
         }
         // Recompute HTF CHoCH when the user toggles the CHoCH layer or edits
@@ -738,6 +750,16 @@ private struct ChartPlotiPad: View {
             String(indicatorConfig.chochRequireFVG),
             String(indicatorConfig.chochShowMitigated)
         ].joined(separator: "|")
+    }
+
+    /// Reset to the default recent-bars window with the price scale
+    /// framed to the *candles* (not indicators/overlays), matching the
+    /// Mac chart's Reset and the chart's own double-tap.
+    private func resetChart() {
+        guard candles.count > 0 else { xDomain = nil; yDomain = nil; return }
+        let domain = ChartWindow.defaultDomain(count: candles.count)
+        yDomain = ChartWindow.candleYDomain(candles: candles, domain: domain)
+        xDomain = domain
     }
 
     // MARK: - Candle loading
@@ -839,19 +861,24 @@ private struct ChartPlotiPad: View {
 
     /// Build an OscillatorInstance whose params reflect the current
     /// OscillatorConfig so the panel actually renders with the user's
-    /// chosen periods instead of hardcoded defaults.
+    /// chosen periods instead of hardcoded defaults. Uses a stable UUID
+    /// derived from the kind so OscillatorPanel's Equatable check works
+    /// across renders (avoids diff churn from fresh UUIDs each frame).
     private static func makeOscillatorInstance(kind: OscillatorKind, config: OscillatorConfig) -> OscillatorInstance {
+        let raw = kind.rawValue
+        let padded = raw.padding(toLength: 12, withPad: "0", startingAt: 0)
+        let stableID = UUID(uuidString: "00000000-0000-0000-0000-\(padded)") ?? UUID()
         switch kind {
         case .rsi:
-            return OscillatorInstance(kind: .rsi, params: ["period": .double(Double(config.rsiPeriod))])
+            return OscillatorInstance(id: stableID, kind: .rsi, params: ["period": .double(Double(config.rsiPeriod))])
         case .macd:
-            return OscillatorInstance(kind: .macd, params: [
+            return OscillatorInstance(id: stableID, kind: .macd, params: [
                 "fast":   .double(Double(config.macdFast)),
                 "slow":   .double(Double(config.macdSlow)),
                 "signal": .double(Double(config.macdSignal)),
             ])
         case .stochastic:
-            return OscillatorInstance(kind: .stochastic, params: [
+            return OscillatorInstance(id: stableID, kind: .stochastic, params: [
                 "k": .double(Double(config.stochK)),
                 "d": .double(Double(config.stochD)),
             ])

@@ -707,10 +707,7 @@ struct ChartPaneView: View {
         }
         Divider()
         Button {
-            // Drop the pinned window so the chart re-fits to the latest
-            // bars and auto-scales the price axis (same as a double-tap).
-            xDomain = nil
-            yDomain = nil
+            resetChart()
         } label: {
             Label("Reset Zoom", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
         }
@@ -802,6 +799,18 @@ struct ChartPaneView: View {
         let lower = max(-0.5, upper - span)
         withAnimation(.easeInOut(duration: 0.25)) {
             xDomain = lower ... upper
+        }
+    }
+
+    /// Reset the pane to the default recent-bars window with the price
+    /// scale framed to the *candles* (not indicators/overlays). Mirrors
+    /// `DashboardView.resetChart()` so every Reset behaves the same.
+    private func resetChart() {
+        guard candles.count > 0 else { xDomain = nil; yDomain = nil; return }
+        let domain = ChartWindow.defaultDomain(count: candles.count)
+        yDomain = ChartWindow.candleYDomain(candles: candles, domain: domain)
+        withAnimation(.easeInOut(duration: 0.25)) {
+            xDomain = domain
         }
     }
 }
