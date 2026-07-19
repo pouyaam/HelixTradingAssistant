@@ -137,6 +137,32 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     case changeOfCharacter
     /// Session-based Volume Profile — per-day volume histogram with POC, VAH, VAL.
     case volumeProfile
+    /// Ichimoku Kinkō Hyō — Tenkan / Kijun / Senkou A+B (the shaded Kumo
+    /// cloud) / Chikou. Doesn't fit the single-line `IndicatorPoint`
+    /// shape: it renders as five lines plus a filled cloud (see
+    /// `Ichimoku` + ChartView's `ichimokuMarks`).
+    case ichimoku
+    /// Ichimoku-confluence Order Blocks — base order blocks kept only
+    /// where they line up with the Ichimoku picture (Kijun / Tenkan /
+    /// Kumo overlap, cloud-trend agreement). Renders as scored zones
+    /// (see `IchimokuOrderBlocks` + ChartView's `ichimokuOBMarks`).
+    case ichimokuOrderBlock
+    /// Ranked Order Blocks [VP + Ichimoku] — order blocks detected from a
+    /// displacement impulse and *graded* A / B / C by two confluences:
+    /// Volume Profile (how much volume sits inside the block) and Ichimoku
+    /// (cloud position + Tenkan/Kijun alignment). Draws the graded blocks
+    /// plus, optionally, the Ichimoku overlay, a right-margin volume
+    /// profile with POC, and a grade legend (see `RankedOrderBlocks` +
+    /// ChartView's `rankedOBMarks`). Ported from the PineScript v6
+    /// indicator of the same name.
+    case rankedOrderBlock
+    /// Volume-Filtered Order Block Detector — swing-anchored order blocks
+    /// with a volumetric up/down split + balance %, an ATR size filter, a
+    /// breaker (invalidation) lifecycle, and optional merging of
+    /// overlapping same-direction blocks. Ported from Mehdi Pirhayati's
+    /// PineScript v6 indicator (see `VolumeFilteredOrderBlocks` +
+    /// ChartView's `volumeFilteredOBMarks`).
+    case volumeFilteredOrderBlock
 
     var id: String { rawValue }
 
@@ -161,6 +187,10 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .sonarlabOrderBlock: return "Sonarlab OB"
         case .changeOfCharacter: return "CHoCH Zones"
         case .volumeProfile:     return "Volume Profile"
+        case .ichimoku:          return "Ichimoku Cloud"
+        case .ichimokuOrderBlock: return "Ichimoku OB"
+        case .rankedOrderBlock:   return "Ranked OB · VP+Ichimoku"
+        case .volumeFilteredOrderBlock: return "Volume-Filtered OB"
         }
     }
 
@@ -185,6 +215,10 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .sonarlabOrderBlock: return Color(red: 0.80, green: 0.45, blue: 0.90)
         case .changeOfCharacter: return Color(red: 0.95, green: 0.35, blue: 0.72)
         case .volumeProfile:     return Color(red: 0.20, green: 0.80, blue: 0.75)
+        case .ichimoku:          return Color(red: 0.60, green: 0.70, blue: 0.95)
+        case .ichimokuOrderBlock: return Color(red: 0.50, green: 0.80, blue: 0.70)
+        case .rankedOrderBlock:   return Color(red: 0.36, green: 0.78, blue: 0.55)
+        case .volumeFilteredOrderBlock: return Color(red: 0.34, green: 0.84, blue: 0.42)
         }
     }
 
@@ -350,12 +384,89 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
             ]
         case .volumeProfile:
             return [
-                .double(key: "bucketCount", label: "Buckets per session", default: 24, step: 2, range: 10...100),
+                .enum(key: "mode", label: "Profile mode", default: "zigzag", options: [
+                    ParamOption(label: "Sessions (trading day)", value: "session"),
+                    ParamOption(label: "ZigZag trend", value: "zigzag"),
+                    ParamOption(label: "Visible range + levels", value: "visible"),
+                ]),
+                .double(key: "bucketCount", label: "Buckets per profile", default: 24, step: 2, range: 10...100),
                 .double(key: "valueAreaPct", label: "Value area %", default: 70.0, step: 5.0, range: 50...95),
-                .bool(key: "useZigzag", label: "ZigZag trend mode (last trend only)", default: true),
+                .double(key: "levelCount", label: "Volume levels (visible mode)", default: 5, step: 1, range: 1...10),
                 .bool(key: "showZigzag", label: "Show ZigZag lines", default: true),
                 .double(key: "zzDepth", label: "ZigZag depth", default: 5, step: 1, range: 2...50),
                 .double(key: "zzMinChange", label: "ZigZag min change %", default: 1.0, step: 0.5, range: 0.1...10),
+            ]
+        case .ichimoku:
+            return [
+                .double(key: "tenkan", label: "Tenkan (conversion)", default: 9, step: 1, range: 2...60),
+                .double(key: "kijun", label: "Kijun (base)", default: 26, step: 1, range: 2...120),
+                .double(key: "senkouB", label: "Senkou B", default: 52, step: 1, range: 2...240),
+                .double(key: "displacement", label: "Displacement", default: 26, step: 1, range: 1...120),
+                .bool(key: "showChikou", label: "Show Chikou (lagging) span", default: true),
+                .bool(key: "showCloud", label: "Show Kumo cloud fill", default: true),
+            ]
+        case .ichimokuOrderBlock:
+            return [
+                .double(key: "periods", label: "Run Length (periods)", default: 5, step: 1, range: 1...20),
+                .double(key: "threshold", label: "Min % Move", default: 0.0, step: 0.1, range: 0...10),
+                .bool(key: "useWicks", label: "Use whole high/low range", default: false),
+                .double(key: "tenkan", label: "Tenkan (conversion)", default: 9, step: 1, range: 2...60),
+                .double(key: "kijun", label: "Kijun (base)", default: 26, step: 1, range: 2...120),
+                .double(key: "senkouB", label: "Senkou B", default: 52, step: 1, range: 2...240),
+                .double(key: "displacement", label: "Displacement", default: 26, step: 1, range: 1...120),
+                .double(key: "minScore", label: "Min confluence score", default: 1, step: 1, range: 0...4),
+                .bool(key: "requireTrend", label: "Require cloud-trend agreement", default: false),
+            ]
+        case .rankedOrderBlock:
+            return [
+                // ── Order Blocks ──
+                .double(key: "dispMult", label: "Displacement strength (× ATR)", default: 1.5, step: 0.1, range: 0.5...10),
+                .double(key: "atrLen", label: "ATR length", default: 14, step: 1, range: 1...100),
+                .enum(key: "zoneSrc", label: "OB zone built from", default: "Wicks", options: [
+                    ParamOption(label: "Wicks", value: "Wicks"),
+                    ParamOption(label: "Body", value: "Body"),
+                ]),
+                .enum(key: "mitBy", label: "Mitigation triggered by", default: "Close", options: [
+                    ParamOption(label: "Close", value: "Close"),
+                    ParamOption(label: "Wick", value: "Wick"),
+                ]),
+                .bool(key: "useBOS", label: "Require break of structure", default: false),
+                .double(key: "bosLen", label: "Structure lookback", default: 10, step: 1, range: 2...200),
+                .double(key: "maxOBs", label: "Max OBs on chart", default: 10, step: 1, range: 1...50),
+                .bool(key: "removeMit", label: "Remove mitigated OBs", default: true),
+                .bool(key: "showTxt", label: "Show grade labels", default: true),
+                // ── Volume Profile ──
+                .bool(key: "useVP", label: "Use VP in ranking", default: true),
+                .bool(key: "showVP", label: "Show volume profile", default: true),
+                .double(key: "vpLookback", label: "VP lookback bars", default: 200, step: 1, range: 20...500),
+                .double(key: "vpRows", label: "VP rows", default: 24, step: 1, range: 5...60),
+                .double(key: "vpWidth", label: "VP width (bars)", default: 30, step: 1, range: 5...100),
+                .bool(key: "showPOC", label: "Show POC line", default: true),
+                // ── Ichimoku ──
+                .bool(key: "useIchi", label: "Use Ichimoku in ranking", default: true),
+                .bool(key: "showIchi", label: "Show Ichimoku", default: true),
+                .double(key: "tenkanLen", label: "Tenkan-sen", default: 9, step: 1, range: 1...60),
+                .double(key: "kijunLen", label: "Kijun-sen", default: 26, step: 1, range: 1...120),
+                .double(key: "senkouBLen", label: "Senkou Span B", default: 52, step: 1, range: 2...240),
+                .double(key: "ichiDisp", label: "Displacement", default: 26, step: 1, range: 1...120),
+                // ── Misc ──
+                .bool(key: "showLegend", label: "Show legend", default: true),
+            ]
+        case .volumeFilteredOrderBlock:
+            return [
+                .bool(key: "showHistoric", label: "Show Historic Zones", default: true),
+                .bool(key: "volumetricInfo", label: "Volumetric Info", default: true),
+                .enum(key: "invalidation", label: "Zone Invalidation", default: "Wick", options: [
+                    ParamOption(label: "Wick", value: "Wick"),
+                    ParamOption(label: "Close", value: "Close"),
+                ]),
+                .double(key: "swingLength", label: "Swing Length", default: 10, step: 1, range: 3...50),
+                .enum(key: "zoneCount", label: "Zone Count", default: "Low", options: [
+                    ParamOption(label: "High", value: "High"),
+                    ParamOption(label: "Medium", value: "Medium"),
+                    ParamOption(label: "Low", value: "Low"),
+                    ParamOption(label: "One", value: "One"),
+                ]),
             ]
         }
     }

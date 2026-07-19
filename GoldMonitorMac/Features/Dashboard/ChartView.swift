@@ -404,10 +404,99 @@ struct ChartView: View {
         )
     }
 
-    /// Session-based Volume Profile sessions — per-day histograms with POC, VAH, VAL.
-    /// Only used when ZigZag mode is disabled.
+    /// Ichimoku Cloud output — five lines + the Kumo, computed when the
+    /// indicator is toggled on. Displacement is baked into the plot
+    /// indices (see `Ichimoku.compute`).
+    private var ichimokuOutput: Ichimoku.Output {
+        guard indicators.contains(.ichimoku) else { return .empty }
+        return derived.ichimoku(
+            candles: candles,
+            tenkan: indicatorConfig.ichiTenkan,
+            kijun: indicatorConfig.ichiKijun,
+            senkouB: indicatorConfig.ichiSenkouB,
+            displacement: indicatorConfig.ichiDisplacement
+        )
+    }
+
+    /// Ichimoku-confluence Order Block zones — base OBs filtered/scored
+    /// by their alignment with the Ichimoku picture. Capped to the most
+    /// recent few like the other order-block overlays.
+    private var ichimokuOBZones: [IchimokuOrderBlocks.Zone] {
+        guard indicators.contains(.ichimokuOrderBlock) else { return [] }
+        let all = derived.ichimokuOrderBlocks(
+            candles: candles,
+            periods: indicatorConfig.iobPeriods,
+            threshold: indicatorConfig.iobThreshold,
+            useWicks: indicatorConfig.iobUseWicks,
+            tenkan: indicatorConfig.iobTenkan,
+            kijun: indicatorConfig.iobKijun,
+            senkouB: indicatorConfig.iobSenkouB,
+            displacement: indicatorConfig.iobDisplacement,
+            minScore: indicatorConfig.iobMinScore,
+            requireTrend: indicatorConfig.iobRequireTrend
+        )
+        return Array(all.suffix(Self.maxOrderBlocks))
+    }
+
+    /// Ranked Order Blocks [VP + Ichimoku] — graded blocks plus the volume
+    /// profile the ranking is built from. Empty when the indicator is off.
+    private var rankedOBOutput: RankedOrderBlocks.Output {
+        guard indicators.contains(.rankedOrderBlock) else { return .empty }
+        let cfg = indicatorConfig
+        return derived.rankedOrderBlocks(
+            candles: candles,
+            dispMult: cfg.robDispMult, atrLen: cfg.robAtrLen,
+            zoneSrc: cfg.robZoneSrc, mitBy: cfg.robMitBy,
+            useBOS: cfg.robUseBOS, bosLen: cfg.robBosLen,
+            maxOBs: cfg.robMaxOBs, removeMit: cfg.robRemoveMit,
+            useVP: cfg.robUseVP, vpLookback: cfg.robVPLookback, vpRows: cfg.robVPRows,
+            useIchi: cfg.robUseIchi, tenkan: cfg.robTenkan, kijun: cfg.robKijun,
+            senkouB: cfg.robSenkouB, ichiDisp: cfg.robIchiDisp
+        )
+    }
+
+    /// The Ichimoku overlay the Ranked-OB indicator draws — only when both
+    /// the indicator and its "Show Ichimoku" toggle are on.
+    private var rankedOBIchimokuOutput: Ichimoku.Output {
+        guard indicators.contains(.rankedOrderBlock), indicatorConfig.robShowIchi else { return .empty }
+        let cfg = indicatorConfig
+        return derived.ichimoku(
+            candles: candles,
+            tenkan: cfg.robTenkan, kijun: cfg.robKijun,
+            senkouB: cfg.robSenkouB, displacement: cfg.robIchiDisp
+        )
+    }
+
+    /// Volume-Filtered Order Blocks — swing-anchored, volume-tagged zones
+    /// with a breaker lifecycle. Empty when the indicator is off.
+    private var volumeFilteredOBZones: [VolumeFilteredOrderBlocks.Zone] {
+        guard indicators.contains(.volumeFilteredOrderBlock) else { return [] }
+        let cfg = indicatorConfig
+        return derived.volumeFilteredOrderBlocks(
+            candles: candles,
+            swingLength: cfg.vfobSwingLength,
+            invalidationWick: cfg.vfobInvalidation == "Wick",
+            maxZonesPerSide: Self.vfobZoneCount(cfg.vfobZoneCount),
+            showHistoric: cfg.vfobShowHistoric,
+            combine: true
+        ).zones
+    }
+
+    /// Zone-count preset → zones rendered per side (matches the Pine
+    /// "One / Low / Medium / High" mapping).
+    static func vfobZoneCount(_ preset: String) -> Int {
+        switch preset {
+        case "One":    return 1
+        case "Medium": return 5
+        case "High":   return 10
+        default:       return 3   // "Low"
+        }
+    }
+
+    /// Session-based Volume Profile sessions — per-trading-day histograms
+    /// with POC, VAH, VAL. Only used in "session" mode.
     private var volumeProfileSessions: [VolumeProfile.SessionVP] {
-        guard indicators.contains(.volumeProfile), !indicatorConfig.vpUseZigzag else { return [] }
+        guard indicators.contains(.volumeProfile), indicatorConfig.vpMode == "session" else { return [] }
         return derived.volumeProfile(
             candles: candles,
             bucketCount: indicatorConfig.vpBucketCount,
@@ -416,9 +505,9 @@ struct ChartView: View {
     }
 
     /// ZigZag-based Volume Profile for the last trend segment only.
-    /// Used when ZigZag mode is enabled.
+    /// Used in "zigzag" mode.
     private var zigzagTrendVP: VolumeProfile.TrendVP? {
-        guard indicators.contains(.volumeProfile), indicatorConfig.vpUseZigzag else { return nil }
+        guard indicators.contains(.volumeProfile), indicatorConfig.vpMode == "zigzag" else { return nil }
         return derived.zigzagVolumeProfile(
             candles: candles,
             bucketCount: indicatorConfig.vpBucketCount,
@@ -428,10 +517,27 @@ struct ChartView: View {
         )
     }
 
+    /// Visible-range Volume Profile: histogram of the bars currently in
+    /// view plus ranked high-volume levels. Used in "visible" mode.
+    private var visibleRangeVP: VolumeProfile.VisibleRangeVP? {
+        guard indicators.contains(.volumeProfile), indicatorConfig.vpMode == "visible" else { return nil }
+        let domain = effectiveXDomain
+        let lo = max(0, Int(domain.lowerBound.rounded(.down)))
+        let hi = min(candles.count - 1, Int(domain.upperBound.rounded(.up)))
+        guard hi > lo else { return nil }
+        return derived.visibleRangeVolumeProfile(
+            candles: candles,
+            barRange: lo...hi,
+            bucketCount: indicatorConfig.vpBucketCount,
+            valueAreaPct: indicatorConfig.vpValueAreaPct,
+            levelCount: indicatorConfig.vpLevelCount
+        )
+    }
+
     /// ZigZag pivot points for drawing the zigzag line overlay.
     private var zigzagPivots: [ZigZag.Pivot] {
         guard indicators.contains(.volumeProfile),
-              indicatorConfig.vpUseZigzag,
+              indicatorConfig.vpMode == "zigzag",
               indicatorConfig.vpShowZigzag else { return [] }
         return derived.zigzagPivots(
             candles: candles,
@@ -716,6 +822,9 @@ struct ChartView: View {
             orderBlockMarks
             steroidOrderBlockMarks
             sonarlabOBMarks
+            ichimokuOBMarks
+            rankedOBMarks(visible: indexSet)
+            volumeFilteredOBMarks
             htfChochMarks
             chochMarks
             scenarioMarks
@@ -736,6 +845,11 @@ struct ChartView: View {
             // Indicator overlays — drawn on top of the price series so
             // SMA/EMA/Bollinger lines aren't obscured by candle bodies.
             indicatorMarks(visible: indexSet)
+
+            // Ichimoku Cloud — translucent Kumo + five component lines.
+            // On top so the lines read clearly; the cloud fill is faint
+            // enough not to hide candles.
+            ichimokuMarks(visible: indexSet)
 
             // UT Bot trailing-stop line + buy/sell labels. Rendered last
             // so the labels sit on top of every other mark.
@@ -3011,110 +3125,246 @@ struct ChartView: View {
         }
     }
 
-    /// Volume Profile — either zigzag-based (last trend, right side) or
-    /// session-based (per-day histograms), depending on `vpUseZigzag`.
+    /// Volume Profile — three modes, switched by `indicatorConfig.vpMode`:
+    /// "session" (per-trading-day histograms), "zigzag" (last trend
+    /// segment, right margin) and "visible" (visible window + ranked
+    /// high-volume levels).
     @ChartContentBuilder
     private var volumeProfileMarks: some ChartContent {
-        if indicatorConfig.vpUseZigzag {
-            zigzagVPMarks
-        } else {
-            sessionVPMarks
+        switch indicatorConfig.vpMode {
+        case "session": sessionVPMarks
+        case "visible": visibleRangeVPMarks
+        default:        zigzagVPMarks
+        }
+    }
+
+    /// Right margin geometry shared by the margin-anchored modes
+    /// (zigzag + visible): the histogram hugs the visible right edge so
+    /// it stays on screen while panning, sized relative to the visible
+    /// span instead of a fixed bar count.
+    private var vpMargin: (rightEdge: Double, width: Double) {
+        let domain = effectiveXDomain
+        let width = max(6, min(24, (domain.upperBound - domain.lowerBound) * 0.18))
+        return (domain.upperBound, width)
+    }
+
+    /// Two-tone histogram bars, right-anchored at `rightEdge` and
+    /// extending leftward by up to `maxWidth` bar units. Up-volume
+    /// (close ≥ open) renders success-tinted, down-volume danger-tinted;
+    /// buckets outside the value area are dimmed, the POC row is
+    /// emphasised. POC/VA membership comes from the precomputed indices
+    /// — no float comparisons against derived prices.
+    @ChartContentBuilder
+    private func vpHistogramMarks(
+        buckets: [VolumeProfile.Bucket],
+        bucketSize: Double,
+        pocIndex: Int,
+        vaLowIndex: Int,
+        vaHighIndex: Int,
+        rightEdge: Double,
+        maxWidth: Double,
+        tag: String
+    ) -> some ChartContent {
+        let maxVol = buckets.map(\.volume).max() ?? 1
+        ForEach(Array(buckets.enumerated()), id: \.offset) { idx, bucket in
+            let totalW = maxWidth * (bucket.volume / maxVol)
+            let upW = maxWidth * (bucket.upVolume / maxVol)
+            let inVA = idx >= vaLowIndex && idx <= vaHighIndex
+            let opacity: Double = idx == pocIndex ? 0.85 : (inVA ? 0.55 : 0.25)
+            // Down segment (left), up segment (right).
+            RectangleMark(
+                xStart: .value("\(tag) d0", rightEdge - totalW),
+                xEnd:   .value("\(tag) d1", rightEdge - upW),
+                yStart: .value("\(tag) dy0", bucket.priceLevel),
+                yEnd:   .value("\(tag) dy1", bucket.priceLevel + bucketSize * 0.92)
+            )
+            .foregroundStyle(Theme.Color.danger.opacity(opacity))
+            RectangleMark(
+                xStart: .value("\(tag) u0", rightEdge - upW),
+                xEnd:   .value("\(tag) u1", rightEdge),
+                yStart: .value("\(tag) uy0", bucket.priceLevel),
+                yEnd:   .value("\(tag) uy1", bucket.priceLevel + bucketSize * 0.92)
+            )
+            .foregroundStyle(Theme.Color.success.opacity(opacity))
+        }
+    }
+
+    /// Small "no volume data" note — when every candle lacked volume
+    /// the profile is time-at-price (TPO-style), not true volume; say
+    /// so once instead of silently degrading.
+    @ChartContentBuilder
+    private func vpTPONote(x: Double, y: Double) -> some ChartContent {
+        PointMark(x: .value("VP TPO x", x), y: .value("VP TPO y", y))
+            .symbolSize(0)
+            .annotation(position: .top, alignment: .trailing, spacing: 2) {
+                Text("TPO · no volume data")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Theme.Color.textMuted)
+            }
+    }
+
+    /// Visible-range VP: histogram in the right margin plus ranked
+    /// high-volume levels drawn across the profiled bar range.
+    @ChartContentBuilder
+    private var visibleRangeVPMarks: some ChartContent {
+        if let vp = visibleRangeVP {
+            let margin = vpMargin
+
+            vpHistogramMarks(
+                buckets: vp.buckets,
+                bucketSize: vp.bucketSize,
+                pocIndex: vp.pocIndex,
+                vaLowIndex: vp.vaLowIndex,
+                vaHighIndex: vp.vaHighIndex,
+                rightEdge: margin.rightEdge,
+                maxWidth: margin.width,
+                tag: "VRVP"
+            )
+
+            // Ranked volume levels — line weight and opacity scale with
+            // relative volume; the POC level is the accent one.
+            ForEach(vp.levels, id: \.price) { level in
+                RuleMark(
+                    xStart: .value("VR L x0", Double(vp.startBar)),
+                    xEnd:   .value("VR L x1", Double(vp.endBar)),
+                    y:      .value("VR L y", level.price)
+                )
+                .foregroundStyle(
+                    level.isPOC
+                        ? Color(red: 0.96, green: 0.36, blue: 0.36).opacity(0.9)
+                        : Theme.Color.info.opacity(0.25 + 0.55 * level.strength)
+                )
+                .lineStyle(StrokeStyle(
+                    lineWidth: level.isPOC ? 2 : 1 + level.strength,
+                    dash: level.isPOC ? [] : [6, 3]
+                ))
+                .annotation(position: .top, alignment: .trailing, spacing: 0) {
+                    Text(Self.priceExact(level.price))
+                        .font(.system(size: 8, weight: .medium))
+                        .foregroundStyle(
+                            level.isPOC ? Color(red: 0.96, green: 0.36, blue: 0.36) : Theme.Color.textMuted
+                        )
+                        .padding(.horizontal, 3)
+                        .background(
+                            Theme.Color.surfaceMax.opacity(0.85),
+                            in: RoundedRectangle(cornerRadius: 3)
+                        )
+                }
+            }
+
+            if !vp.hasRealVolume {
+                vpTPONote(x: margin.rightEdge, y: vp.vah)
+            }
         }
     }
 
     /// ZigZag-based VP: a single histogram for the last trend segment,
-    /// drawn on the right side of the chart past the candles so it
-    /// doesn't overlap the price action.
+    /// anchored to the visible right edge so it doesn't overlap the
+    /// price action.
     @ChartContentBuilder
     private var zigzagVPMarks: some ChartContent {
         if let vp = zigzagTrendVP {
-            let maxVol = vp.buckets.map(\.volume).max() ?? 1
+            let margin = vpMargin
             let lastBar = Double(candles.count - 1)
-            // VP sits in the margin to the right of the last candle.
-            // The histogram grows leftward from the right edge.
-            let marginStart = lastBar + 1.0
-            let marginWidth = 20.0  // visual width in bar-index units
-            let bucketSize = vp.buckets.count > 1
-                ? (vp.buckets[1].priceLevel - vp.buckets[0].priceLevel)
-                : vp.buckets[0].priceLevel * 0.001
 
-            ForEach(Array(vp.buckets.enumerated()), id: \.offset) { _, bucket in
-                let barWidth = marginWidth * (bucket.volume / maxVol)
-                let isPOC = abs(bucket.priceLevel - vp.poc) < bucketSize * 0.01
-                RectangleMark(
-                    xStart: .value("ZVP x0", marginStart + marginWidth - barWidth),
-                    xEnd:   .value("ZVP x1", marginStart + marginWidth),
-                    yStart: .value("ZVP y0", bucket.priceLevel),
-                    yEnd:   .value("ZVP y1", bucket.priceLevel + bucketSize * 0.92)
-                )
-                .foregroundStyle(
-                    isPOC
-                        ? Color(red: 0.96, green: 0.36, blue: 0.36).opacity(0.85)
-                        : Theme.Color.info.opacity(0.45)
-                )
+            vpHistogramMarks(
+                buckets: vp.buckets,
+                bucketSize: vp.bucketSize,
+                pocIndex: vp.pocIndex,
+                vaLowIndex: vp.vaLowIndex,
+                vaHighIndex: vp.vaHighIndex,
+                rightEdge: margin.rightEdge,
+                maxWidth: margin.width,
+                tag: "ZVP"
+            )
+
+            // POC — developing ray from the trend start to the visible
+            // right edge.
+            RuleMark(
+                xStart: .value("ZVP POC x0", Double(vp.startBar)),
+                xEnd:   .value("ZVP POC x1", margin.rightEdge),
+                y:      .value("ZVP POC", vp.poc)
+            )
+            .foregroundStyle(Color(red: 0.96, green: 0.36, blue: 0.36))
+            .lineStyle(StrokeStyle(lineWidth: 1.5))
+
+            // VAH / VAL — scoped to the trend segment.
+            RuleMark(
+                xStart: .value("ZVP VAH x0", Double(vp.startBar)),
+                xEnd:   .value("ZVP VAH x1", lastBar),
+                y:      .value("ZVP VAH", vp.vah)
+            )
+            .foregroundStyle(Theme.Color.info.opacity(0.7))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+
+            RuleMark(
+                xStart: .value("ZVP VAL x0", Double(vp.startBar)),
+                xEnd:   .value("ZVP VAL x1", lastBar),
+                y:      .value("ZVP VAL", vp.val)
+            )
+            .foregroundStyle(Theme.Color.info.opacity(0.7))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+
+            if !vp.hasRealVolume {
+                vpTPONote(x: margin.rightEdge, y: vp.vah)
             }
-
-            // POC line — solid, extends across the trend segment
-            RuleMark(y: .value("ZVP POC", vp.poc))
-                .foregroundStyle(Color(red: 0.96, green: 0.36, blue: 0.36))
-                .lineStyle(StrokeStyle(lineWidth: 1.5))
-
-            // VAH line — dashed
-            RuleMark(y: .value("ZVP VAH", vp.vah))
-                .foregroundStyle(Theme.Color.info.opacity(0.7))
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
-
-            // VAL line — dashed
-            RuleMark(y: .value("ZVP VAL", vp.val))
-                .foregroundStyle(Theme.Color.info.opacity(0.7))
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
         }
     }
 
-    /// Session-based VP: per-day histograms (the original behavior).
+    /// Session-based VP: per-trading-day histograms. POC/VAH/VAL are
+    /// scoped to their own session's bar range (only the latest session
+    /// extends a few bars as developing levels) so older sessions don't
+    /// spray full-width lines across the chart.
     @ChartContentBuilder
     private var sessionVPMarks: some ChartContent {
         let sessions = volumeProfileSessions
+        let lastBar = Double(candles.count - 1)
         ForEach(sessions) { session in
-            let maxVol = session.buckets.map(\.volume).max() ?? 1
             let sessionWidth = Double(session.endBar - session.startBar)
-            let maxBarWidth = sessionWidth * 0.25
+            let maxBarWidth = max(2, sessionWidth * 0.25)
             let rightEdge = Double(session.endBar)
-            let bucketSize = session.buckets.count > 1
-                ? (session.buckets[1].priceLevel - session.buckets[0].priceLevel)
-                : session.buckets[0].priceLevel * 0.001
+            let isLatest = session.id == sessions.last?.id
+            // Latest session's levels project a few bars forward —
+            // they're the actionable, still-developing ones.
+            let lineEnd = isLatest ? lastBar + 8 : rightEdge
 
-            // Volume histogram bars — right-anchored, left-extending.
-            ForEach(Array(session.buckets.enumerated()), id: \.offset) { _, bucket in
-                let barWidth = maxBarWidth * (bucket.volume / maxVol)
-                let isPOC = abs(bucket.priceLevel - session.poc) < bucketSize * 0.01
-                RectangleMark(
-                    xStart: .value("VP x0", rightEdge - barWidth),
-                    xEnd:   .value("VP x1", rightEdge),
-                    yStart: .value("VP y0", bucket.priceLevel),
-                    yEnd:   .value("VP y1", bucket.priceLevel + bucketSize * 0.92)
-                )
-                .foregroundStyle(
-                    isPOC
-                        ? Color(red: 0.96, green: 0.36, blue: 0.36).opacity(0.85)
-                        : Theme.Color.info.opacity(0.45)
-                )
-            }
+            vpHistogramMarks(
+                buckets: session.buckets,
+                bucketSize: session.bucketSize,
+                pocIndex: session.pocIndex,
+                vaLowIndex: session.vaLowIndex,
+                vaHighIndex: session.vaHighIndex,
+                rightEdge: rightEdge,
+                maxWidth: maxBarWidth,
+                tag: "VP\(session.id)"
+            )
 
             // POC line — solid
-            RuleMark(y: .value("VP POC", session.poc))
-                .foregroundStyle(Color(red: 0.96, green: 0.36, blue: 0.36))
-                .lineStyle(StrokeStyle(lineWidth: 1.5))
+            RuleMark(
+                xStart: .value("VP POC x0", Double(session.startBar)),
+                xEnd:   .value("VP POC x1", lineEnd),
+                y:      .value("VP POC", session.poc)
+            )
+            .foregroundStyle(Color(red: 0.96, green: 0.36, blue: 0.36))
+            .lineStyle(StrokeStyle(lineWidth: 1.5))
 
             // VAH line — dashed
-            RuleMark(y: .value("VP VAH", session.vah))
-                .foregroundStyle(Theme.Color.info.opacity(0.7))
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            RuleMark(
+                xStart: .value("VP VAH x0", Double(session.startBar)),
+                xEnd:   .value("VP VAH x1", lineEnd),
+                y:      .value("VP VAH", session.vah)
+            )
+            .foregroundStyle(Theme.Color.info.opacity(0.7))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
 
             // VAL line — dashed
-            RuleMark(y: .value("VP VAL", session.val))
-                .foregroundStyle(Theme.Color.info.opacity(0.7))
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            RuleMark(
+                xStart: .value("VP VAL x0", Double(session.startBar)),
+                xEnd:   .value("VP VAL x1", lineEnd),
+                y:      .value("VP VAL", session.val)
+            )
+            .foregroundStyle(Theme.Color.info.opacity(0.7))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
 
             // Session boundary — faint vertical
             if session.startBar > 0 {
@@ -3122,6 +3372,9 @@ struct ChartView: View {
                     .foregroundStyle(Theme.Color.textMuted.opacity(0.15))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 4]))
             }
+        }
+        if let latest = sessions.last, !latest.hasRealVolume {
+            vpTPONote(x: Double(latest.endBar), y: latest.vah)
         }
     }
 
@@ -4087,6 +4340,366 @@ struct ChartView: View {
         band == "bb_mid" ? 1 : 1.6
     }
 
+    // Ichimoku component colours — kept close to the traditional TradingView
+    // palette so the overlay reads familiarly.
+    private static let ichiTenkanColor = Color(red: 0.30, green: 0.65, blue: 1.00)
+    private static let ichiKijunColor  = Color(red: 0.95, green: 0.45, blue: 0.35)
+    private static let ichiSpanAColor  = Color(red: 0.30, green: 0.78, blue: 0.52)
+    private static let ichiSpanBColor  = Color(red: 0.88, green: 0.38, blue: 0.44)
+    private static let ichiChikouColor = Color(red: 0.72, green: 0.55, blue: 0.95)
+
+    /// Ichimoku Cloud — the shaded Kumo (two-tone `AreaMark` ribbon)
+    /// behind the five component lines. Displacement is already baked into
+    /// each point's plot index, so we just filter to the visible window
+    /// and plot. The forward-projected tail past the last candle sits
+    /// outside the x-domain and is clipped.
+    @ChartContentBuilder
+    private func ichimokuMarks(visible: Set<Int>) -> some ChartContent {
+        let out = ichimokuOutput
+        // Kumo fill first so the lines read on top of it.
+        if indicatorConfig.ichiShowCloud {
+            ForEach(out.cloud.filter { visible.contains($0.index) }) { c in
+                AreaMark(
+                    x: .value("Bar", Double(c.index)),
+                    yStart: .value("Span B", c.spanB),
+                    yEnd: .value("Span A", c.spanA)
+                )
+                .foregroundStyle(
+                    (c.isBullish ? Self.ichiSpanAColor : Self.ichiSpanBColor).opacity(0.14)
+                )
+                .interpolationMethod(.monotone)
+            }
+        }
+        ichimokuLine(out.senkouA, band: "ichiA", color: Self.ichiSpanAColor, width: 1, visible: visible)
+        ichimokuLine(out.senkouB, band: "ichiB", color: Self.ichiSpanBColor, width: 1, visible: visible)
+        ichimokuLine(out.tenkan, band: "ichiTenkan", color: Self.ichiTenkanColor, width: 1.4, visible: visible)
+        ichimokuLine(out.kijun, band: "ichiKijun", color: Self.ichiKijunColor, width: 1.6, visible: visible)
+        if indicatorConfig.ichiShowChikou {
+            ichimokuLine(out.chikou, band: "ichiChikou", color: Self.ichiChikouColor, width: 1, visible: visible)
+        }
+    }
+
+    /// One Ichimoku line series, keyed by `band` so Charts connects it as
+    /// a single line rather than disjoint segments.
+    @ChartContentBuilder
+    private func ichimokuLine(
+        _ points: [Ichimoku.LinePoint],
+        band: String,
+        color: Color,
+        width: CGFloat,
+        visible: Set<Int>
+    ) -> some ChartContent {
+        ForEach(points.filter { visible.contains($0.index) }) { p in
+            LineMark(
+                x: .value("Bar", Double(p.index)),
+                y: .value("Ichimoku", p.value),
+                series: .value("Series", band)
+            )
+            .foregroundStyle(color)
+            .lineStyle(StrokeStyle(lineWidth: width))
+            .interpolationMethod(.monotone)
+        }
+    }
+
+    /// Ichimoku-confluence Order Block zones — like the plain order-block
+    /// overlay but tagged with the confluence score and the components it
+    /// lined up with.
+    @ChartContentBuilder
+    private var ichimokuOBMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(ichimokuOBZones) { zone in
+            ichimokuOBMark(for: zone, lastIndex: lastIndex)
+        }
+    }
+
+    @ChartContentBuilder
+    private func ichimokuOBMark(for zone: IchimokuOrderBlocks.Zone, lastIndex: Int) -> some ChartContent {
+        let baseColor: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
+        let xStart = Double(zone.index)
+        let xEnd   = Double(lastIndex)
+        // Stronger confluence → more opaque fill.
+        let fillOpacity = min(0.30, 0.08 + Double(zone.confluenceScore) * 0.05)
+
+        RectangleMark(
+            xStart: .value("iOB start", xStart),
+            xEnd:   .value("iOB end",   xEnd),
+            yStart: .value("iOB low",   zone.low),
+            yEnd:   .value("iOB high",  zone.high)
+        )
+        .foregroundStyle(baseColor.opacity(fillOpacity))
+
+        RuleMark(
+            xStart: .value("iOB s hi", xStart), xEnd: .value("iOB e hi", xEnd),
+            y: .value("iOB hi", zone.high)
+        )
+        .foregroundStyle(baseColor.opacity(0.7))
+        .lineStyle(StrokeStyle(lineWidth: 1))
+        RuleMark(
+            xStart: .value("iOB s lo", xStart), xEnd: .value("iOB e lo", xEnd),
+            y: .value("iOB lo", zone.low)
+        )
+        .foregroundStyle(baseColor.opacity(0.7))
+        .lineStyle(StrokeStyle(lineWidth: 1))
+
+        PointMark(
+            x: .value("iOB label", xEnd),
+            y: .value("iOB hi", zone.high)
+        )
+        .symbolSize(0)
+        .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+            let tag = zone.isBullish ? "☁OB↑" : "☁OB↓"
+            let detail = zone.reasons.isEmpty ? "" : " · " + zone.reasons.joined(separator: "·")
+            Text("\(tag) \(zone.confluenceScore)\(detail)")
+                .font(.system(size: 8, weight: .heavy))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(baseColor.opacity(0.95)))
+        }
+    }
+
+    // MARK: - Ranked Order Blocks [VP + Ichimoku]
+
+    private static let robGrey = Color(red: 0.565, green: 0.643, blue: 0.682) // #90A4AE
+    private static let robPOCColor = Color(red: 1.0, green: 0.60, blue: 0.0)  // #FF9800
+
+    @ChartContentBuilder
+    private func rankedOBMarks(visible: Set<Int>) -> some ChartContent {
+        let out = rankedOBOutput
+        // Ichimoku overlay (its own toggle), behind the blocks.
+        if indicatorConfig.robShowIchi {
+            rankedIchimokuMarks(visible: visible)
+        }
+        // Right-margin volume profile + POC line.
+        if indicatorConfig.robShowVP, let vp = out.vp {
+            rankedVPMarks(vp: vp)
+        }
+        // Graded order blocks.
+        ForEach(out.zones) { zone in
+            rankedOBZoneMark(zone)
+        }
+        // Grade legend, top-right.
+        if indicatorConfig.robShowLegend, !out.zones.isEmpty {
+            rankedOBLegend()
+        }
+    }
+
+    /// The Ichimoku picture the Ranked-OB indicator draws — the same five
+    /// lines + Kumo the standalone indicator uses, on its own periods.
+    @ChartContentBuilder
+    private func rankedIchimokuMarks(visible: Set<Int>) -> some ChartContent {
+        let out = rankedOBIchimokuOutput
+        ForEach(out.cloud.filter { visible.contains($0.index) }) { c in
+            AreaMark(
+                x: .value("Bar", Double(c.index)),
+                yStart: .value("Span B", c.spanB),
+                yEnd: .value("Span A", c.spanA)
+            )
+            .foregroundStyle((c.isBullish ? Self.ichiSpanAColor : Self.ichiSpanBColor).opacity(0.12))
+            .interpolationMethod(.monotone)
+        }
+        ichimokuLine(out.senkouA, band: "robA", color: Self.ichiSpanAColor, width: 1, visible: visible)
+        ichimokuLine(out.senkouB, band: "robB", color: Self.ichiSpanBColor, width: 1, visible: visible)
+        ichimokuLine(out.tenkan, band: "robTenkan", color: Self.ichiTenkanColor, width: 1.4, visible: visible)
+        ichimokuLine(out.kijun, band: "robKijun", color: Self.ichiKijunColor, width: 1.6, visible: visible)
+        ichimokuLine(out.chikou, band: "robChikou", color: Self.ichiChikouColor, width: 1, visible: visible)
+    }
+
+    /// The volume profile the ranking is built from, drawn as a right-edge
+    /// horizontal histogram (POC row emphasised) plus an optional POC line.
+    @ChartContentBuilder
+    private func rankedVPMarks(vp: RankedOrderBlocks.VPProfile) -> some ChartContent {
+        let margin = vpMargin
+        let rightEdge = margin.rightEdge
+        let maxW = margin.width
+        ForEach(Array(vp.volumes.enumerated()), id: \.offset) { idx, v in
+            if vp.maxVolume > 0, v > 0 {
+                let w = maxW * (v / vp.maxVolume)
+                let y0 = vp.lo + Double(idx) * vp.step
+                RectangleMark(
+                    xStart: .value("ROBVP x0", rightEdge - w),
+                    xEnd:   .value("ROBVP x1", rightEdge),
+                    yStart: .value("ROBVP y0", y0),
+                    yEnd:   .value("ROBVP y1", y0 + vp.step * 0.9)
+                )
+                .foregroundStyle(
+                    idx == vp.pocIndex
+                        ? Self.robPOCColor.opacity(0.55)
+                        : Theme.Color.info.opacity(0.30)
+                )
+            }
+        }
+        if indicatorConfig.robShowPOC, vp.maxVolume > 0 {
+            let pocPrice = vp.lo + (Double(vp.pocIndex) + 0.5) * vp.step
+            RuleMark(y: .value("ROB POC", pocPrice))
+                .foregroundStyle(Self.robPOCColor.opacity(0.9))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+        }
+    }
+
+    @ChartContentBuilder
+    private func rankedOBZoneMark(_ zone: RankedOrderBlocks.Zone) -> some ChartContent {
+        let bull = zone.isBullish
+        let base: Color = zone.mitigated
+            ? Self.robGrey
+            : (bull ? Theme.Color.success : Theme.Color.danger)
+        let (fillOp, borderOp): (Double, Double) = {
+            if zone.mitigated { return (0.10, 0.40) }
+            switch zone.grade {
+            case "A": return (0.30, 0.90)
+            case "B": return (0.18, 0.55)
+            default:  return (0.10, 0.40)   // "C" / "–"
+            }
+        }()
+        let xStart = Double(zone.startIndex)
+        let xEnd   = Double(zone.endIndex)
+
+        RectangleMark(
+            xStart: .value("ROB x0", xStart), xEnd: .value("ROB x1", xEnd),
+            yStart: .value("ROB y0", zone.low), yEnd: .value("ROB y1", zone.high)
+        )
+        .foregroundStyle(base.opacity(fillOp))
+
+        RuleMark(
+            xStart: .value("ROB hi0", xStart), xEnd: .value("ROB hi1", xEnd),
+            y: .value("ROB hi", zone.high)
+        )
+        .foregroundStyle(base.opacity(borderOp))
+        .lineStyle(StrokeStyle(lineWidth: 1))
+        RuleMark(
+            xStart: .value("ROB lo0", xStart), xEnd: .value("ROB lo1", xEnd),
+            y: .value("ROB lo", zone.low)
+        )
+        .foregroundStyle(base.opacity(borderOp))
+        .lineStyle(StrokeStyle(lineWidth: 1))
+
+        if indicatorConfig.robShowTxt, zone.grade != "–", !zone.mitigated {
+            PointMark(
+                x: .value("ROB lbl x", xEnd),
+                y: .value("ROB lbl y", (zone.high + zone.low) / 2)
+            )
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                Text("\(zone.grade)  \(zone.score)/\(zone.maxScore)")
+                    .font(.system(size: 8, weight: .heavy))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(base.opacity(0.95)))
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private func rankedOBLegend() -> some ChartContent {
+        PointMark(
+            x: .value("ROB legend x", effectiveXDomain.upperBound),
+            y: .value("ROB legend y", effectiveYDomain.upperBound)
+        )
+        .symbolSize(0)
+        .annotation(position: .bottomLeading, alignment: .trailing, spacing: 2) {
+            VStack(alignment: .leading, spacing: 2) {
+                Self.robLegendRow(color: Theme.Color.success, grade: "A", text: "Strong")
+                Self.robLegendRow(color: Theme.Color.success.opacity(0.55), grade: "B", text: "Moderate")
+                Self.robLegendRow(color: Self.robGrey, grade: "C", text: "Weak / unranked")
+            }
+            .padding(5)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Theme.Color.surfaceMax.opacity(0.88))
+            )
+        }
+    }
+
+    private static func robLegendRow(color: Color, grade: String, text: String) -> some View {
+        HStack(spacing: 4) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(color)
+                .frame(width: 9, height: 9)
+            Text(grade)
+                .font(.system(size: 8, weight: .heavy))
+                .foregroundStyle(Theme.Color.textPrimary)
+            Text(text)
+                .font(.system(size: 8))
+                .foregroundStyle(Theme.Color.textMuted)
+        }
+    }
+
+    // MARK: - Volume-Filtered Order Blocks
+
+    @ChartContentBuilder
+    private var volumeFilteredOBMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(volumeFilteredOBZones) { zone in
+            volumeFilteredOBMark(zone, lastIndex: lastIndex)
+        }
+    }
+
+    @ChartContentBuilder
+    private func volumeFilteredOBMark(_ zone: VolumeFilteredOrderBlocks.Zone, lastIndex: Int) -> some ChartContent {
+        let base: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
+        let fillOp = zone.breaker ? 0.08 : 0.20
+        let borderOp = zone.breaker ? 0.35 : 0.75
+        let xStart = Double(zone.startIndex)
+        let xEnd   = Double(min(zone.endIndex, lastIndex))
+
+        RectangleMark(
+            xStart: .value("VFOB x0", xStart), xEnd: .value("VFOB x1", xEnd),
+            yStart: .value("VFOB y0", zone.bottom), yEnd: .value("VFOB y1", zone.top)
+        )
+        .foregroundStyle(base.opacity(fillOp))
+
+        RuleMark(xStart: .value("VFOB t0", xStart), xEnd: .value("VFOB t1", xEnd), y: .value("VFOB top", zone.top))
+            .foregroundStyle(base.opacity(borderOp))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: zone.breaker ? [3, 3] : []))
+        RuleMark(xStart: .value("VFOB b0", xStart), xEnd: .value("VFOB b1", xEnd), y: .value("VFOB bot", zone.bottom))
+            .foregroundStyle(base.opacity(borderOp))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: zone.breaker ? [3, 3] : []))
+
+        // Volumetric split — an up-volume (top half) and down-volume
+        // (bottom half) bar anchored at the block's left edge, widths ∝
+        // each share of the block's total volume.
+        if indicatorConfig.vfobVolumetricInfo, zone.volume > 0 {
+            let mid = (zone.top + zone.bottom) / 2
+            let span = max(1.0, xEnd - xStart)
+            let barMax = min(span * 0.5, 8.0)
+            let upW = barMax * (zone.highVolume / zone.volume)
+            let dnW = barMax * (zone.lowVolume / zone.volume)
+            RectangleMark(
+                xStart: .value("VFOB uv0", xStart), xEnd: .value("VFOB uv1", xStart + upW),
+                yStart: .value("VFOB uvy0", mid), yEnd: .value("VFOB uvy1", zone.top)
+            )
+            .foregroundStyle(Theme.Color.success.opacity(0.55))
+            RectangleMark(
+                xStart: .value("VFOB dv0", xStart), xEnd: .value("VFOB dv1", xStart + dnW),
+                yStart: .value("VFOB dvy0", zone.bottom), yEnd: .value("VFOB dvy1", mid)
+            )
+            .foregroundStyle(Theme.Color.danger.opacity(0.55))
+
+            PointMark(x: .value("VFOB lbl x", xEnd), y: .value("VFOB lbl y", zone.top))
+                .symbolSize(0)
+                .annotation(position: .overlay, alignment: .topTrailing, spacing: 0) {
+                    Text("\(Self.volumeShort(zone.volume)) (\(zone.balancePct)%)")
+                        .font(.system(size: 8, weight: .heavy))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(base.opacity(0.9)))
+                }
+        }
+    }
+
+    /// Compact volume formatter (1.2K / 3.4M / 5.1B) for the OB labels.
+    private static func volumeShort(_ v: Double) -> String {
+        let a = abs(v)
+        switch a {
+        case 1_000_000_000...: return String(format: "%.1fB", v / 1_000_000_000)
+        case 1_000_000...:     return String(format: "%.1fM", v / 1_000_000)
+        case 1_000...:         return String(format: "%.1fK", v / 1_000)
+        default:               return String(format: "%.0f", v)
+        }
+    }
+
     private static func makeIndicatorInstance(kind: IndicatorKind, config: OscillatorConfig) -> IndicatorInstance {
         let raw = kind.rawValue
         let padded = raw.padding(toLength: 12, withPad: "0", startingAt: 0)
@@ -4606,6 +5219,11 @@ struct ChartView: View {
             orderBlockZones: orderBlockZones,
             steroidOrderBlockZones: steroidOrderBlockZones,
             sonarlabOBZones: sonarlabOBZones,
+            ichimokuOutput: ichimokuOutput,
+            ichimokuOBZones: ichimokuOBZones,
+            rankedOBZones: rankedOBOutput.zones,
+            rankedOBIchimoku: rankedOBIchimokuOutput,
+            volumeFilteredOBZones: volumeFilteredOBZones,
             chochZones: chochZones,
             htfChochZones: htfChochZones,
             sessionRuns: sessionRuns,
@@ -4616,6 +5234,7 @@ struct ChartView: View {
             mtrResults: mtrResults,
             volumeProfileSessions: volumeProfileSessions,
             zigzagTrendVP: zigzagTrendVP,
+            visibleRangeVP: visibleRangeVP,
             zigzagPivots: zigzagPivots,
             taScenario: taScenario,
             taAltScenario: taAltScenario,

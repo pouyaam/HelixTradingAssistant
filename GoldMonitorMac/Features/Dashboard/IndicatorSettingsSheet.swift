@@ -521,16 +521,80 @@ struct IndicatorSettingsSheet: View {
 
             Divider().background(Theme.Color.border)
 
-            section(title: "Volume Profile") {
-                Toggle(isOn: $config.vpUseZigzag) {
-                    checkboxLabel("ZigZag trend mode (last trend only)")
+            section(title: "Ichimoku Cloud") {
+                periodStepper(label: "Tenkan (conversion)", value: $config.ichiTenkan, range: 2...60)
+                periodStepper(label: "Kijun (base)", value: $config.ichiKijun, range: 2...120)
+                periodStepper(label: "Senkou B", value: $config.ichiSenkouB, range: 2...240)
+                periodStepper(label: "Displacement", value: $config.ichiDisplacement, range: 1...120)
+                Toggle(isOn: $config.ichiShowChikou) {
+                    checkboxLabel("Show Chikou (lagging) span")
                 }
                 #if os(iOS)
 .toggleStyle(.switch)
 #else
 .toggleStyle(.checkbox)
 #endif
-                if config.vpUseZigzag {
+                Toggle(isOn: $config.ichiShowCloud) {
+                    checkboxLabel("Show Kumo cloud fill")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                Text("Tenkan/Kijun/Senkou B midlines with the ±displacement cloud and lagging span. Standard settings: 9 / 26 / 52 / 26.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider().background(Theme.Color.border)
+
+            section(title: "Ichimoku OB") {
+                periodStepper(label: "Run length (periods)", value: $config.iobPeriods, range: 1...20)
+                doubleStepper(
+                    label: "Min. % move",
+                    value: $config.iobThreshold,
+                    range: 0.0...10.0,
+                    step: 0.1
+                )
+                Toggle(isOn: $config.iobUseWicks) {
+                    checkboxLabel("Use whole high/low range")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                periodStepper(label: "Tenkan (conversion)", value: $config.iobTenkan, range: 2...60)
+                periodStepper(label: "Kijun (base)", value: $config.iobKijun, range: 2...120)
+                periodStepper(label: "Senkou B", value: $config.iobSenkouB, range: 2...240)
+                periodStepper(label: "Displacement", value: $config.iobDisplacement, range: 1...120)
+                periodStepper(label: "Min confluence score", value: $config.iobMinScore, range: 0...4)
+                Toggle(isOn: $config.iobRequireTrend) {
+                    checkboxLabel("Require cloud-trend agreement")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                Text("Order blocks kept only where they line up with the Ichimoku picture. Score is +1 each for Kijun / Tenkan / Kumo overlap and cloud-trend agreement.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider().background(Theme.Color.border)
+
+            section(title: "Volume Profile") {
+                Picker("Profile mode", selection: $config.vpMode) {
+                    Text("Sessions (trading day)").tag("session")
+                    Text("ZigZag trend").tag("zigzag")
+                    Text("Visible range + levels").tag("visible")
+                }
+                .pickerStyle(.menu)
+                if config.vpMode == "zigzag" {
                     Toggle(isOn: $config.vpShowZigzag) {
                         checkboxLabel("Show ZigZag lines on chart")
                     }
@@ -547,20 +611,108 @@ struct IndicatorSettingsSheet: View {
                         step: 0.5
                     )
                 }
-                periodStepper(label: "Buckets per session", value: $config.vpBucketCount, range: 10...100)
+                if config.vpMode == "visible" {
+                    periodStepper(label: "Volume levels", value: $config.vpLevelCount, range: 1...10)
+                }
+                periodStepper(label: "Buckets per profile", value: $config.vpBucketCount, range: 10...100)
                 doubleStepper(
                     label: "Value Area %",
                     value: $config.vpValueAreaPct,
                     range: 50...95,
                     step: 5.0
                 )
-                Text(config.vpUseZigzag
-                     ? "Shows a volume profile for the current ZigZag trend segment only, placed on the right side of the chart."
-                     : "Computes a per-day volume profile with POC and value area (VAH/VAL). Works best on intraday timeframes with volume data.")
+                Text(vpModeDescription)
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.Color.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            Divider().background(Theme.Color.border)
+
+            section(title: "Ranked OB · VP+Ichimoku") {
+                doubleStepper(label: "Displacement strength (× ATR)", value: $config.robDispMult, range: 0.5...10, step: 0.1)
+                periodStepper(label: "ATR length", value: $config.robAtrLen, range: 1...100)
+                Picker("OB zone built from", selection: $config.robZoneSrc) {
+                    Text("Wicks").tag("Wicks")
+                    Text("Body").tag("Body")
+                }
+                .pickerStyle(.menu)
+                Picker("Mitigation triggered by", selection: $config.robMitBy) {
+                    Text("Close").tag("Close")
+                    Text("Wick").tag("Wick")
+                }
+                .pickerStyle(.menu)
+                robCheckbox("Require break of structure", $config.robUseBOS)
+                periodStepper(label: "Structure lookback", value: $config.robBosLen, range: 2...200)
+                periodStepper(label: "Max OBs on chart", value: $config.robMaxOBs, range: 1...50)
+                robCheckbox("Remove mitigated OBs", $config.robRemoveMit)
+                robCheckbox("Show grade labels", $config.robShowTxt)
+                robCheckbox("Use VP in ranking", $config.robUseVP)
+                robCheckbox("Show volume profile", $config.robShowVP)
+                periodStepper(label: "VP lookback bars", value: $config.robVPLookback, range: 20...500)
+                periodStepper(label: "VP rows", value: $config.robVPRows, range: 5...60)
+                periodStepper(label: "VP width (bars)", value: $config.robVPWidth, range: 5...100)
+                robCheckbox("Show POC line", $config.robShowPOC)
+                robCheckbox("Use Ichimoku in ranking", $config.robUseIchi)
+                robCheckbox("Show Ichimoku", $config.robShowIchi)
+                periodStepper(label: "Tenkan-sen", value: $config.robTenkan, range: 1...60)
+                periodStepper(label: "Kijun-sen", value: $config.robKijun, range: 1...120)
+                periodStepper(label: "Senkou Span B", value: $config.robSenkouB, range: 2...240)
+                periodStepper(label: "Displacement", value: $config.robIchiDisp, range: 1...120)
+                robCheckbox("Show legend", $config.robShowLegend)
+                Text("Order blocks from a displacement impulse, graded A/B/C by Volume Profile (0–2) and Ichimoku (0–3) confluence. Grade = score ÷ max: ≥70 % A, ≥40 % B, else C.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider().background(Theme.Color.border)
+
+            section(title: "Volume-Filtered OB") {
+                robCheckbox("Show Historic Zones", $config.vfobShowHistoric)
+                robCheckbox("Volumetric Info", $config.vfobVolumetricInfo)
+                Picker("Zone Invalidation", selection: $config.vfobInvalidation) {
+                    Text("Wick").tag("Wick")
+                    Text("Close").tag("Close")
+                }
+                .pickerStyle(.menu)
+                periodStepper(label: "Swing Length", value: $config.vfobSwingLength, range: 3...50)
+                Picker("Zone Count", selection: $config.vfobZoneCount) {
+                    Text("High").tag("High")
+                    Text("Medium").tag("Medium")
+                    Text("Low").tag("Low")
+                    Text("One").tag("One")
+                }
+                .pickerStyle(.menu)
+                Text("Swing-anchored order blocks with a volumetric up/down split and balance %. Zones invalidate (turn historic) when price breaks through, and overlapping same-side zones merge.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Platform-styled checkbox row for the Ranked-OB section (checkbox on
+    /// macOS, switch when this shared file compiles into the iOS target).
+    private func robCheckbox(_ text: String, _ isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) { checkboxLabel(text) }
+        #if os(iOS)
+        .toggleStyle(.switch)
+        #else
+        .toggleStyle(.checkbox)
+        #endif
+    }
+
+    /// One-line explainer under the Volume Profile settings, matching
+    /// the selected mode.
+    private var vpModeDescription: String {
+        switch config.vpMode {
+        case "session":
+            return "One profile per trading day (18:00 ET boundary) with POC and value area. Levels are scoped to their session; the latest day's project forward."
+        case "visible":
+            return "Profiles the bars on screen and draws the strongest high-volume levels across the range. Recomputes as you pan and zoom."
+        default:
+            return "Shows a volume profile for the current ZigZag trend segment only, placed in the right margin."
         }
     }
 

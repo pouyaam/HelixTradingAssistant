@@ -40,9 +40,19 @@ GRDB, and the local `claude` / `codex` / `opencode` CLIs.
 - **Indicators** — SMA, EMA, Bollinger, UT Bot, RSI, MACD, Stochastic,
   Order Blocks (+ exhaustion lifecycle), Steroid Order Blocks
   (volume-validated), Sonarlab OB, Fair Value Gaps, Volume Profile
-  (session-based), Trading Sessions, ZigZag, Change of Character (CHoCH,
+  (three modes — per-trading-day sessions anchored to 18:00 ET, last
+  ZigZag trend segment, or visible-range with ranked high-volume
+  levels; two-tone up/down buckets, POC + VAH/VAL), Trading Sessions,
+  ZigZag, Change of Character (CHoCH,
   incl. higher-timeframe zones projected onto the current TF), NY Open
-  Setup, SP2L, Pin Bar Combo / BTB, MicroMap, Major Trend Reversal.
+  Setup, SP2L, Pin Bar Combo / BTB, MicroMap, Major Trend Reversal,
+  Ichimoku Cloud, Ichimoku-confluence Order Blocks, and Ranked Order
+  Blocks [VP + Ichimoku] (displacement OBs graded A/B/C by Volume-Profile
+  + Ichimoku confluence, with an on-chart Ichimoku overlay, right-margin
+  VP + POC, and a grade legend — a faithful PineScript v6 port), and
+  Volume-Filtered Order Blocks (swing-anchored OBs with a volumetric
+  up/down split + balance %, ATR size filter, breaker/invalidation
+  lifecycle, and overlapping-zone merging — PineScript v6 port).
   Multi-instance: indicators/oscillators are `[IndicatorInstance]` /
   `[OscillatorInstance]` arrays with per-instance params
   (`ParamSpec`/`ParamValue`), hide/show, and floating settings panels.
@@ -107,6 +117,10 @@ xcodebuild -project HelixTradingApp.xcodeproj -scheme HelixTradingApp \
 
 - `project.yml` is the **source of truth**; the `.xcodeproj` is gitignored
   and regenerated. Never edit `.xcodeproj` files directly.
+- Tests: `xcodebuild -project HelixTradingApp.xcodeproj -scheme
+  HelixTradingApp -destination 'platform=macOS' test` (target
+  `HelixTradingAppTests` is wired into the scheme's test action via the
+  `schemes:` block in project.yml — keep that block if you regenerate).
 - Toolchain: Xcode 15+, Swift 5.9, macOS 13+ / iOS 16+ deployment (Apple
   Charts baseline).
 - Real iPad/iPhone device deploys: `DEVELOPMENT_TEAM=<team-id> ./run.sh --ipad`.
@@ -432,7 +446,6 @@ leave the model to rank, narrate, and judge edge cases. All items open:
   Equatable work — those update state async/off-body). Best caught with a
   symbolic breakpoint on the runtime warning to get the offending view.
 - iPad redesign Phases 4–6 (see iPad section).
-- Volume Profile indicator is still marked WIP.
 
 ---
 
@@ -440,7 +453,7 @@ leave the model to rank, narrate, and judge edge cases. All items open:
 
 | Version | Date | Highlights |
 |---|---|---|
-| Unreleased | 2026-07-13+ | SP2L / Pin Bar Combo / MicroMap / Major Trend Reversal close-confirmed strategies + overlays + unit tests; layer-eye-driven notifications with baselining + dedup; HTF CHoCH zones; grid-pane indicator legend; multi-chart perf overhaul (Equatable views, async first compute); focused-pane sidebar symbol targeting; WTI symbol |
+| Unreleased | 2026-07-13+ | SP2L / Pin Bar Combo / MicroMap / Major Trend Reversal close-confirmed strategies + overlays + unit tests; layer-eye-driven notifications with baselining + dedup; HTF CHoCH zones; grid-pane indicator legend; multi-chart perf overhaul (Equatable views, async first compute); focused-pane sidebar symbol targeting; WTI symbol; Volume Profile overhaul (trading-day sessions at 18:00 ET, ZigZag-trend and visible-range modes, ranked high-volume levels, two-tone up/down buckets, live-tick-aware caching) + unit tests; Ichimoku Cloud + Ichimoku-confluence OBs; Ranked Order Blocks [VP + Ichimoku] graded-OB indicator (Mac + iPad) + unit tests; Volume-Filtered Order Block Detector (swing-anchored OBs, volumetric split, breaker lifecycle, zone merging; Mac + iPad) + unit tests |
 | v1.4 b7 | 2026-07-12 | iPhone support (adaptive split/tab shell, Markets watchlist, touch design system), automatic Faraz re-login (WKWebView cookie capture) |
 | v1.6 | 2026-07-08 | Multi-instance indicators with per-instance params + floating settings panels; Volume Profile indicator; `ParamSpec` model |
 | v1.4 b6 | 2026-07-07 | Chart gesture polish; iPad trailing-window live ticks + deep-history backfill |

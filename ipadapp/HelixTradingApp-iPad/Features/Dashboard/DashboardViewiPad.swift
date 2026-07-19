@@ -1061,11 +1061,83 @@ private struct IndicatorSettingsBody: View {
             }
             Divider().background(Theme.Color.border)
             settingsSection(title: "Volume Profile") {
+                Picker("Mode", selection: $config.vpMode) {
+                    Text("Sessions (trading day)").tag("session")
+                    Text("ZigZag trend").tag("zigzag")
+                    Text("Visible range + levels").tag("visible")
+                }
+                .pickerStyle(.menu)
+                if config.vpMode == "visible" {
+                    settingsStepper(label: "Levels", value: $config.vpLevelCount, range: 1...10)
+                }
                 settingsStepper(label: "Buckets", value: $config.vpBucketCount, range: 10...100)
                 settingsDoubleStepper(label: "Value Area %", value: $config.vpValueAreaPct, range: 50...95, step: 5.0)
             }
+            Divider().background(Theme.Color.border)
+            settingsSection(title: "Ranked OB · VP+Ichimoku") {
+                settingsDoubleStepper(label: "Displacement strength (× ATR)", value: $config.robDispMult, range: 0.5...10, step: 0.1)
+                settingsStepper(label: "ATR length", value: $config.robAtrLen, range: 1...100)
+                Picker("OB zone built from", selection: $config.robZoneSrc) {
+                    Text("Wicks").tag("Wicks")
+                    Text("Body").tag("Body")
+                }
+                .pickerStyle(.menu)
+                .font(.system(size: 12))
+                Picker("Mitigation triggered by", selection: $config.robMitBy) {
+                    Text("Close").tag("Close")
+                    Text("Wick").tag("Wick")
+                }
+                .pickerStyle(.menu)
+                .font(.system(size: 12))
+                robToggle("Require break of structure", $config.robUseBOS)
+                settingsStepper(label: "Structure lookback", value: $config.robBosLen, range: 2...200)
+                settingsStepper(label: "Max OBs on chart", value: $config.robMaxOBs, range: 1...50)
+                robToggle("Remove mitigated OBs", $config.robRemoveMit)
+                robToggle("Show grade labels", $config.robShowTxt)
+                robToggle("Use VP in ranking", $config.robUseVP)
+                robToggle("Show volume profile", $config.robShowVP)
+                settingsStepper(label: "VP lookback bars", value: $config.robVPLookback, range: 20...500)
+                settingsStepper(label: "VP rows", value: $config.robVPRows, range: 5...60)
+                settingsStepper(label: "VP width (bars)", value: $config.robVPWidth, range: 5...100)
+                robToggle("Show POC line", $config.robShowPOC)
+                robToggle("Use Ichimoku in ranking", $config.robUseIchi)
+                robToggle("Show Ichimoku", $config.robShowIchi)
+                settingsStepper(label: "Tenkan-sen", value: $config.robTenkan, range: 1...60)
+                settingsStepper(label: "Kijun-sen", value: $config.robKijun, range: 1...120)
+                settingsStepper(label: "Senkou Span B", value: $config.robSenkouB, range: 2...240)
+                settingsStepper(label: "Displacement", value: $config.robIchiDisp, range: 1...120)
+                robToggle("Show legend", $config.robShowLegend)
+            }
+            Divider().background(Theme.Color.border)
+            settingsSection(title: "Volume-Filtered OB") {
+                robToggle("Show Historic Zones", $config.vfobShowHistoric)
+                robToggle("Volumetric Info", $config.vfobVolumetricInfo)
+                Picker("Zone Invalidation", selection: $config.vfobInvalidation) {
+                    Text("Wick").tag("Wick")
+                    Text("Close").tag("Close")
+                }
+                .pickerStyle(.menu)
+                .font(.system(size: 12))
+                settingsStepper(label: "Swing Length", value: $config.vfobSwingLength, range: 3...50)
+                Picker("Zone Count", selection: $config.vfobZoneCount) {
+                    Text("High").tag("High")
+                    Text("Medium").tag("Medium")
+                    Text("Low").tag("Low")
+                    Text("One").tag("One")
+                }
+                .pickerStyle(.menu)
+                .font(.system(size: 12))
+            }
         }
         .padding(14)
+    }
+
+    /// Compact switch row used by the Ranked-OB section.
+    private func robToggle(_ label: String, _ value: Binding<Bool>) -> some View {
+        Toggle(label, isOn: value)
+            .toggleStyle(.switch)
+            .font(.system(size: 12))
+            .foregroundStyle(Theme.Color.textSecondary)
     }
 
     @ViewBuilder
