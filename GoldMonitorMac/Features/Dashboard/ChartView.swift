@@ -392,6 +392,16 @@ struct ChartView: View {
     }
     private static let maxSonarlabOBs = 20
 
+    /// Ranked Order Block zones — swing-structure OBs graded A/B/C by
+    /// Volume Profile + Ichimoku confluence.
+    private var rankedOBZones: [RankedOrderBlocks.Zone] {
+        guard indicators.contains(.rankedOrderBlock) else { return [] }
+        return derived.rankedOrderBlocks(
+            candles: candles,
+            config: indicatorConfig.rankedOrderBlockConfiguration
+        )
+    }
+
     /// Change of Character confluence zones — structure break + OB/FVG.
     private var chochZones: [ChangeOfCharacter.Zone] {
         guard indicators.contains(.changeOfCharacter) else { return [] }
@@ -716,6 +726,7 @@ struct ChartView: View {
             orderBlockMarks
             steroidOrderBlockMarks
             sonarlabOBMarks
+            rankedOBMarks
             htfChochMarks
             chochMarks
             scenarioMarks
@@ -2828,6 +2839,125 @@ struct ChartView: View {
     }
 
 
+
+    // MARK: - Ranked order block marks
+
+    /// Ranked Order Blocks. Unlike the other OB layers these carry a
+    /// grade: A zones are drawn boldly, B at half strength, C in
+    /// neutral grey. A breaker (price traded through it) stops at the
+    /// break bar and switches to a dashed grey outline.
+    @ChartContentBuilder
+    private var rankedOBMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(rankedOBZones) { zone in
+            rankedOBMark(for: zone, lastIndex: lastIndex)
+        }
+    }
+
+    @ChartContentBuilder
+    private func rankedOBMark(for zone: RankedOrderBlocks.Zone, lastIndex: Int) -> some ChartContent {
+        let style = Self.rankedOBStyle(for: zone)
+        let xStart = Double(zone.startIndex)
+        let xEnd   = Double(min(zone.endIndex, lastIndex))
+        let edge = StrokeStyle(
+            lineWidth: zone.isCombined ? 2 : 1,
+            dash: zone.isBreaker ? [4, 3] : []
+        )
+
+        RectangleMark(
+            xStart: .value("ROB start", xStart),
+            xEnd:   .value("ROB end",   xEnd),
+            yStart: .value("ROB low",   zone.bottom),
+            yEnd:   .value("ROB high",  zone.top)
+        )
+        .foregroundStyle(style.base.opacity(style.fillOpacity))
+
+        RuleMark(
+            xStart: .value("ROB start hi", xStart),
+            xEnd:   .value("ROB end hi",   xEnd),
+            y:      .value("ROB hi",       zone.top)
+        )
+        .foregroundStyle(style.base.opacity(style.borderOpacity))
+        .lineStyle(edge)
+
+        RuleMark(
+            xStart: .value("ROB start lo", xStart),
+            xEnd:   .value("ROB end lo",   xEnd),
+            y:      .value("ROB lo",       zone.bottom)
+        )
+        .foregroundStyle(style.base.opacity(style.borderOpacity))
+        .lineStyle(edge)
+
+        // Badge sits centred inside the zone, like the Pine original's
+        // box text. Anchoring it at the right edge (as the other OB
+        // layers do) puts it flush against the price axis, where the
+        // plot area clips it away entirely.
+        if indicatorConfig.robShowLabels {
+            PointMark(
+                x: .value("ROB label x", Self.rankedOBLabelX(
+                    xStart: xStart, xEnd: xEnd, domain: effectiveXDomain
+                )),
+                y: .value("ROB label y", (zone.top + zone.bottom) / 2)
+            )
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .center, spacing: 0) {
+                // `.fixedSize()` is load-bearing: an overlay annotation on
+                // a zero-size PointMark is proposed zero width, which
+                // truncates the badge down to an unreadable sliver.
+                Text(Self.rankedOBBadge(for: zone))
+                    .font(.system(size: 8, weight: .heavy))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(style.base.opacity(0.85)))
+            }
+        }
+    }
+
+    /// Where along the zone to park its badge. Zones run from the order
+    /// block to the right edge of the chart, so a plain midpoint lands
+    /// off-screen on an old zone once the user pans. Clamp it into the
+    /// part of the zone that is actually visible, inset from the plot
+    /// edges so the capsule isn't clipped.
+    private static func rankedOBLabelX(
+        xStart: Double,
+        xEnd: Double,
+        domain: ClosedRange<Double>
+    ) -> Double {
+        let inset = (domain.upperBound - domain.lowerBound) * 0.05
+        let lo = max(xStart, domain.lowerBound + inset)
+        let hi = min(xEnd, domain.upperBound - inset)
+        return lo <= hi ? (lo + hi) / 2 : (xStart + xEnd) / 2
+    }
+
+    /// Badge text: grade + score, with the zone's lifecycle state
+    /// appended so a merged or broken zone reads at a glance.
+    private static func rankedOBBadge(for zone: RankedOrderBlocks.Zone) -> String {
+        var text = zone.badge
+        if zone.isCombined { text += " ·M" }
+        if zone.isBreaker  { text += " ·BRK" }
+        return text
+    }
+
+    /// Grade → colour weight. Breakers desaturate to grey whatever grade
+    /// they held; C-grade zones are grey from the start.
+    private static func rankedOBStyle(
+        for zone: RankedOrderBlocks.Zone
+    ) -> (base: Color, fillOpacity: Double, borderOpacity: Double) {
+        guard !zone.isBreaker else {
+            return (Theme.Color.textMuted, 0.08, 0.55)
+        }
+        let directional = zone.isBullish ? Theme.Color.success : Theme.Color.danger
+        switch zone.grade {
+        case .a:        return (directional, 0.22, 0.95)
+        case .b:        return (directional, 0.12, 0.65)
+        case .c:        return (Theme.Color.textMuted, 0.10, 0.50)
+        case .unranked: return (IndicatorKind.rankedOrderBlock.color, 0.12, 0.65)
+        }
+    }
+
     /// Change of Character overlays. For every CHoCH we always draw the
     /// broken-structure line + a "CHoCH↑/↓" capsule at the break bar; the
     /// order block, the displacement FVG and the inverse FVG each draw as
@@ -4606,6 +4736,7 @@ struct ChartView: View {
             orderBlockZones: orderBlockZones,
             steroidOrderBlockZones: steroidOrderBlockZones,
             sonarlabOBZones: sonarlabOBZones,
+            rankedOBZones: rankedOBZones,
             chochZones: chochZones,
             htfChochZones: htfChochZones,
             sessionRuns: sessionRuns,

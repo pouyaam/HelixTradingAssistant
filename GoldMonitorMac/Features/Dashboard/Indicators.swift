@@ -127,6 +127,14 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     /// block. Ported from ClayeWeight's PineScript v5 "Sonarlab -
     /// Order Blocks" (MPL 2.0).
     case sonarlabOrderBlock
+    /// Ranked Order Blocks — swing-structure order blocks graded A/B/C
+    /// by Volume Profile + Ichimoku confluence. Invalidated zones flip
+    /// into breakers rather than disappearing, and overlapping zones on
+    /// the same side can merge. Renders as graded rectangles with a
+    /// score badge (see `RankedOrderBlocks` + ChartView's
+    /// `rankedOBMarks`). Ported from the PineScript v6 "Ranked Order
+    /// Blocks Pro [Swing + VP + Ichimoku]".
+    case rankedOrderBlock
     /// Change of Character (CHoCH) — Smart-Money structure-break detector.
     /// Reads market structure from swing pivots (via `ZigZag`); when a
     /// close breaks the last protected swing *against* the prevailing
@@ -159,6 +167,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .mtrStrategy:    return "MTR · Major Trend Reversal"
         case .fairValueGap:   return "Fair Value Gap"
         case .sonarlabOrderBlock: return "Sonarlab OB"
+        case .rankedOrderBlock:   return "Ranked OB"
         case .changeOfCharacter: return "CHoCH Zones"
         case .volumeProfile:     return "Volume Profile"
         }
@@ -183,6 +192,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .mtrStrategy: return Color(red: 0.66, green: 0.48, blue: 1.00)
         case .fairValueGap: return Color(red: 0.30, green: 0.80, blue: 0.75)
         case .sonarlabOrderBlock: return Color(red: 0.80, green: 0.45, blue: 0.90)
+        case .rankedOrderBlock:   return Color(red: 0.25, green: 0.90, blue: 0.60)
         case .changeOfCharacter: return Color(red: 0.95, green: 0.35, blue: 0.72)
         case .volumeProfile:     return Color(red: 0.20, green: 0.80, blue: 0.75)
         }
@@ -328,6 +338,33 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                     ParamOption(label: "Close", value: "Close"),
                     ParamOption(label: "Wick", value: "Wick"),
                 ]),
+            ]
+        case .rankedOrderBlock:
+            return [
+                .double(key: "swingLength", label: "Swing length", default: 10, step: 1, range: 3...50),
+                .enum(key: "zoneFrom", label: "Zone built from", default: "Wicks", options: [
+                    ParamOption(label: "Wicks", value: "Wicks"),
+                    ParamOption(label: "Body", value: "Body"),
+                ]),
+                .double(key: "maxATRMult", label: "Max zone size (x ATR)", default: 3.5, step: 0.5, range: 0.5...20),
+                .double(key: "atrLength", label: "ATR length", default: 10, step: 1, range: 1...100),
+                .enum(key: "invalidation", label: "Zone invalidation", default: "Wick", options: [
+                    ParamOption(label: "Wick", value: "Wick"),
+                    ParamOption(label: "Close", value: "Close"),
+                ]),
+                .double(key: "zonesPerSide", label: "Zones per side", default: 3, step: 1, range: 1...10),
+                .bool(key: "showBreakers", label: "Show breaker zones", default: true),
+                .bool(key: "combineZones", label: "Combine overlapping zones", default: true),
+                .double(key: "mergeThreshold", label: "Merge overlap threshold %", default: 0, step: 1, range: 0...100),
+                .bool(key: "showLabels", label: "Show grade labels", default: true),
+                .bool(key: "useVP", label: "Use Volume Profile in ranking", default: true),
+                .double(key: "vpLookback", label: "VP lookback bars", default: 200, step: 10, range: 20...500),
+                .double(key: "vpRows", label: "VP rows", default: 24, step: 1, range: 5...60),
+                .bool(key: "useIchimoku", label: "Use Ichimoku in ranking", default: true),
+                .double(key: "tenkanLength", label: "Tenkan-sen", default: 9, step: 1, range: 1...100),
+                .double(key: "kijunLength", label: "Kijun-sen", default: 26, step: 1, range: 1...200),
+                .double(key: "senkouBLength", label: "Senkou Span B", default: 52, step: 1, range: 2...300),
+                .double(key: "displacement", label: "Displacement", default: 26, step: 1, range: 1...100),
             ]
         case .changeOfCharacter:
             return [

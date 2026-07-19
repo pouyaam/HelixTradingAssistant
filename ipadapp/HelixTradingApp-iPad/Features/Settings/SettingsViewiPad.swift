@@ -281,7 +281,7 @@ struct SettingsViewiPad: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 marketToggle("Forex", subtitle: "XAU/USD ounce", isOn: $forexEnabled)
                 marketToggle("Crypto", subtitle: "BTC / SOL / ETH", isOn: $cryptoEnabled)
-                marketToggle("Indices", subtitle: "Dow Jones (DJI)", isOn: $indicesEnabled)
+                marketToggle("Indices", subtitle: "Dow Jones (DJI) / Dollar Index (DXY)", isOn: $indicesEnabled)
             }
         }
     }

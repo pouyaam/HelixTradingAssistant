@@ -239,6 +239,29 @@ struct OscillatorConfig: Codable, Equatable {
     var sonarlabSensitivity: Double = 26.0
     var sonarlabMitigationType: String = "Close"
 
+    // Ranked Order Blocks parameters (see `RankedOrderBlocks`). Swing
+    // engine tuning up top; the two ranking legs (Volume Profile and
+    // Ichimoku) can each be switched out of the score independently,
+    // which changes the badge divisor (2, 3, or 5).
+    var robSwingLength: Int = 10
+    var robZoneFrom: String = "Wicks"
+    var robMaxATRMult: Double = 3.5
+    var robATRLength: Int = 10
+    var robInvalidation: String = "Wick"
+    var robZonesPerSide: Int = 3
+    var robShowBreakers: Bool = true
+    var robCombineZones: Bool = true
+    var robMergeThreshold: Double = 0.0
+    var robShowLabels: Bool = true
+    var robUseVP: Bool = true
+    var robVPLookback: Int = 200
+    var robVPRows: Int = 24
+    var robUseIchimoku: Bool = true
+    var robTenkanLength: Int = 9
+    var robKijunLength: Int = 26
+    var robSenkouBLength: Int = 52
+    var robDisplacement: Int = 26
+
     // Change of Character parameters (see `ChangeOfCharacter`).
     // `chochSwingLength` is the ZigZag pivot depth used to read structure;
     // `chochMinSwingPct` filters swing noise. `chochRequireFVG` restricts
@@ -388,6 +411,24 @@ struct OscillatorConfig: Codable, Equatable {
         fvgShowMitigated   = try c.decodeIfPresent(Bool.self,   forKey: .fvgShowMitigated)   ?? true
         sonarlabSensitivity = try c.decodeIfPresent(Double.self, forKey: .sonarlabSensitivity) ?? 26.0
         sonarlabMitigationType = try c.decodeIfPresent(String.self, forKey: .sonarlabMitigationType) ?? "Close"
+        robSwingLength     = try c.decodeIfPresent(Int.self,    forKey: .robSwingLength)     ?? 10
+        robZoneFrom        = try c.decodeIfPresent(String.self, forKey: .robZoneFrom)        ?? "Wicks"
+        robMaxATRMult      = try c.decodeIfPresent(Double.self, forKey: .robMaxATRMult)      ?? 3.5
+        robATRLength       = try c.decodeIfPresent(Int.self,    forKey: .robATRLength)       ?? 10
+        robInvalidation    = try c.decodeIfPresent(String.self, forKey: .robInvalidation)    ?? "Wick"
+        robZonesPerSide    = try c.decodeIfPresent(Int.self,    forKey: .robZonesPerSide)    ?? 3
+        robShowBreakers    = try c.decodeIfPresent(Bool.self,   forKey: .robShowBreakers)    ?? true
+        robCombineZones    = try c.decodeIfPresent(Bool.self,   forKey: .robCombineZones)    ?? true
+        robMergeThreshold  = try c.decodeIfPresent(Double.self, forKey: .robMergeThreshold)  ?? 0.0
+        robShowLabels      = try c.decodeIfPresent(Bool.self,   forKey: .robShowLabels)      ?? true
+        robUseVP           = try c.decodeIfPresent(Bool.self,   forKey: .robUseVP)           ?? true
+        robVPLookback      = try c.decodeIfPresent(Int.self,    forKey: .robVPLookback)      ?? 200
+        robVPRows          = try c.decodeIfPresent(Int.self,    forKey: .robVPRows)          ?? 24
+        robUseIchimoku     = try c.decodeIfPresent(Bool.self,   forKey: .robUseIchimoku)     ?? true
+        robTenkanLength    = try c.decodeIfPresent(Int.self,    forKey: .robTenkanLength)    ?? 9
+        robKijunLength     = try c.decodeIfPresent(Int.self,    forKey: .robKijunLength)     ?? 26
+        robSenkouBLength   = try c.decodeIfPresent(Int.self,    forKey: .robSenkouBLength)   ?? 52
+        robDisplacement    = try c.decodeIfPresent(Int.self,    forKey: .robDisplacement)    ?? 26
         chochSwingLength   = try c.decodeIfPresent(Int.self,    forKey: .chochSwingLength)   ?? 5
         chochMinSwingPct   = try c.decodeIfPresent(Double.self, forKey: .chochMinSwingPct)   ?? 0.2
         chochShowOB        = try c.decodeIfPresent(Bool.self,   forKey: .chochShowOB)        ?? true
@@ -430,6 +471,28 @@ struct OscillatorConfig: Codable, Equatable {
         if let data = try? JSONEncoder().encode(self) {
             UserDefaults.standard.set(data, forKey: Self.storageKey)
         }
+    }
+
+    var rankedOrderBlockConfiguration: RankedOrderBlocks.Config {
+        var config = RankedOrderBlocks.Config()
+        config.swingLength = robSwingLength
+        config.zoneSource = robZoneFrom == "Body" ? .body : .wicks
+        config.maxATRMult = robMaxATRMult
+        config.atrLength = robATRLength
+        config.invalidation = robInvalidation == "Close" ? .close : .wick
+        config.zonesPerSide = robZonesPerSide
+        config.showBreakers = robShowBreakers
+        config.combineOverlapping = robCombineZones
+        config.mergeThreshold = robMergeThreshold
+        config.useVolumeProfile = robUseVP
+        config.vpLookback = robVPLookback
+        config.vpRows = robVPRows
+        config.useIchimoku = robUseIchimoku
+        config.tenkanLength = robTenkanLength
+        config.kijunLength = robKijunLength
+        config.senkouBLength = robSenkouBLength
+        config.ichimokuDisplacement = robDisplacement
+        return config
     }
 
     var pinBarComboConfiguration: PinBarComboSetup.Configuration {

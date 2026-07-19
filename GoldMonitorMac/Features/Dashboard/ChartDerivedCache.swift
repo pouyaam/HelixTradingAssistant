@@ -460,6 +460,31 @@ final class ChartDerivedCache: ObservableObject {
         }
     }
 
+    // ── Ranked Order Blocks (swing + VP + Ichimoku) ────────────────
+
+    private struct RankedOBSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastClose: Double
+        let config: RankedOrderBlocks.Config
+    }
+    private let rankedOBSlot = Slot<RankedOBSig, [RankedOrderBlocks.Zone]>([])
+
+    func rankedOrderBlocks(
+        candles: [Candle],
+        config: RankedOrderBlocks.Config
+    ) -> [RankedOrderBlocks.Zone] {
+        let sig = RankedOBSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastClose: candles.last?.close ?? 0,
+            config: config
+        )
+        return resolve(rankedOBSlot, signature: sig) {
+            RankedOrderBlocks.compute(candles, config: config)
+        }
+    }
+
     // ── Change of Character (CHoCH + OB/FVG confluence) ────────────────
 
     private struct CHoCHSig: Equatable {
@@ -866,6 +891,7 @@ final class ChartDerivedCache: ObservableObject {
         let orderBlockZones: [OrderBlocks.Zone]
         let steroidOrderBlockZones: [SteroidOrderBlocks.Zone]
         let sonarlabOBZones: [SonarlabOrderBlocks.Zone]
+        let rankedOBZones: [RankedOrderBlocks.Zone]
         let chochZones: [ChangeOfCharacter.Zone]
         let htfChochZones: [ChangeOfCharacter.DatedZone]
         let sessionRuns: [TradingSessions.SessionRun]
@@ -897,6 +923,7 @@ final class ChartDerivedCache: ObservableObject {
         let obCount: Int
         let sobCount: Int
         let sonarlabCount: Int
+        let rankedOBCount: Int
         let chochCount: Int
         let htfChochCount: Int
         let sessionCount: Int
@@ -935,6 +962,7 @@ final class ChartDerivedCache: ObservableObject {
             obCount: data.orderBlockZones.count,
             sobCount: data.steroidOrderBlockZones.count,
             sonarlabCount: data.sonarlabOBZones.count,
+            rankedOBCount: data.rankedOBZones.count,
             chochCount: data.chochZones.count,
             htfChochCount: data.htfChochZones.count,
             sessionCount: data.sessionRuns.count,
@@ -1012,6 +1040,10 @@ final class ChartDerivedCache: ObservableObject {
             for zone in data.sonarlabOBZones {
                 if zone.low < lo { lo = zone.low }
                 if zone.high > hi { hi = zone.high }
+            }
+            for zone in data.rankedOBZones {
+                if zone.bottom < lo { lo = zone.bottom }
+                if zone.top > hi { hi = zone.top }
             }
             for zone in data.chochZones {
                 if zone.low < lo { lo = zone.low }

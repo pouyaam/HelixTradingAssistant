@@ -290,6 +290,74 @@ struct IndicatorSettingsSheet: View {
 
             Divider().background(Theme.Color.border)
 
+            section(title: "Ranked Order Blocks") {
+                periodStepper(label: "Swing length", value: $config.robSwingLength, range: 3...50)
+                doubleStepper(
+                    label: "Max zone size (× ATR)",
+                    value: $config.robMaxATRMult,
+                    range: 0.5...20.0,
+                    step: 0.5
+                )
+                periodStepper(label: "ATR length", value: $config.robATRLength, range: 1...100)
+                periodStepper(label: "Zones per side", value: $config.robZonesPerSide, range: 1...10)
+                Picker("Zone built from", selection: $config.robZoneFrom) {
+                    Text("Wicks").tag("Wicks")
+                    Text("Body").tag("Body")
+                }
+                .pickerStyle(.segmented)
+                Picker("Zone invalidation", selection: $config.robInvalidation) {
+                    Text("Wick").tag("Wick")
+                    Text("Close").tag("Close")
+                }
+                .pickerStyle(.segmented)
+                Toggle(isOn: $config.robShowBreakers) {
+                    checkboxLabel("Show breaker zones")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                Toggle(isOn: $config.robCombineZones) {
+                    checkboxLabel("Combine overlapping zones")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                Toggle(isOn: $config.robShowLabels) {
+                    checkboxLabel("Show grade labels")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                Toggle(isOn: $config.robUseVP) {
+                    checkboxLabel("Rank by Volume Profile (0–2)")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                Toggle(isOn: $config.robUseIchimoku) {
+                    checkboxLabel("Rank by Ichimoku (0–3)")
+                }
+                #if os(iOS)
+.toggleStyle(.switch)
+#else
+.toggleStyle(.checkbox)
+#endif
+                Text("Zones score A / B / C on confluence. Turning a leg off shrinks the divisor on the badge (5 → 3 or 2); with both off zones render unranked.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider().background(Theme.Color.border)
+
             // Times shown match the baked presets in `TradingSessions.catalog`
             // (regular cash hours, each in its venue's own time zone).
             section(title: "Trading Sessions") {

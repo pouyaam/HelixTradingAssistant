@@ -39,7 +39,8 @@ GRDB, and the local `claude` / `codex` / `opencode` CLIs.
   symbol targeting, and pane/grid fullscreen.
 - **Indicators** — SMA, EMA, Bollinger, UT Bot, RSI, MACD, Stochastic,
   Order Blocks (+ exhaustion lifecycle), Steroid Order Blocks
-  (volume-validated), Sonarlab OB, Fair Value Gaps, Volume Profile
+  (volume-validated), Sonarlab OB, Ranked OB (swing OBs graded A/B/C on
+  Volume-Profile + Ichimoku confluence, with breakers), Fair Value Gaps, Volume Profile
   (session-based), Trading Sessions, ZigZag, Change of Character (CHoCH,
   incl. higher-timeframe zones projected onto the current TF), NY Open
   Setup, SP2L, Pin Bar Combo / BTB, MicroMap, Major Trend Reversal.

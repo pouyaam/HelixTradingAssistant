@@ -927,6 +927,25 @@ struct DashboardView: View {
         case .sonarlabOrderBlock:
             if let v = p["sensitivity"]     { oscillatorConfig.sonarlabSensitivity = v.doubleValue }
             if let v = p["mitigationType"]  { oscillatorConfig.sonarlabMitigationType = v.stringValue }
+        case .rankedOrderBlock:
+            if let v = p["swingLength"]    { oscillatorConfig.robSwingLength = Int(v.doubleValue) }
+            if let v = p["zoneFrom"]       { oscillatorConfig.robZoneFrom = v.stringValue }
+            if let v = p["maxATRMult"]     { oscillatorConfig.robMaxATRMult = v.doubleValue }
+            if let v = p["atrLength"]      { oscillatorConfig.robATRLength = Int(v.doubleValue) }
+            if let v = p["invalidation"]   { oscillatorConfig.robInvalidation = v.stringValue }
+            if let v = p["zonesPerSide"]   { oscillatorConfig.robZonesPerSide = Int(v.doubleValue) }
+            if let v = p["showBreakers"]   { oscillatorConfig.robShowBreakers = v.boolValue }
+            if let v = p["combineZones"]   { oscillatorConfig.robCombineZones = v.boolValue }
+            if let v = p["mergeThreshold"] { oscillatorConfig.robMergeThreshold = v.doubleValue }
+            if let v = p["showLabels"]     { oscillatorConfig.robShowLabels = v.boolValue }
+            if let v = p["useVP"]          { oscillatorConfig.robUseVP = v.boolValue }
+            if let v = p["vpLookback"]     { oscillatorConfig.robVPLookback = Int(v.doubleValue) }
+            if let v = p["vpRows"]         { oscillatorConfig.robVPRows = Int(v.doubleValue) }
+            if let v = p["useIchimoku"]    { oscillatorConfig.robUseIchimoku = v.boolValue }
+            if let v = p["tenkanLength"]   { oscillatorConfig.robTenkanLength = Int(v.doubleValue) }
+            if let v = p["kijunLength"]    { oscillatorConfig.robKijunLength = Int(v.doubleValue) }
+            if let v = p["senkouBLength"]  { oscillatorConfig.robSenkouBLength = Int(v.doubleValue) }
+            if let v = p["displacement"]   { oscillatorConfig.robDisplacement = Int(v.doubleValue) }
         case .changeOfCharacter:
             if let v = p["swingLength"]   { oscillatorConfig.chochSwingLength = Int(v.doubleValue) }
             if let v = p["minSwingPct"]   { oscillatorConfig.chochMinSwingPct = v.doubleValue }
