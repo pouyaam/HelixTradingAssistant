@@ -169,6 +169,7 @@ struct ChartPaneView: View {
                         indicatorConfig: indicatorConfig,
                         drawings: drawingStore.drawings(for: pane.pairID),
                         activeTool: effectiveDrawingTool,
+                        contractSpec: .forPair(id: pane.pairID),
                         onCommitDrawing: { drawing in
                             drawingStore.add(drawing, for: pane.pairID)
                             setDrawingTool(.none)
@@ -197,6 +198,7 @@ struct ChartPaneView: View {
                         indicatorInstances: visibleIndicatorInstances,
                         drawings: drawingStore.drawings(for: pane.pairID),
                         activeTool: effectiveDrawingTool,
+                        contractSpec: .forPair(id: pane.pairID),
                         onCommitDrawing: { drawing in
                             drawingStore.add(drawing, for: pane.pairID)
                             setDrawingTool(.none)

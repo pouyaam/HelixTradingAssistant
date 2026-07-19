@@ -1746,6 +1746,7 @@ struct DashboardView: View {
                     taAltScenario: altScenarioVisible ? taAltScenario : nil,
                     drawings: drawingStore.drawings(for: pair.id),
                     activeTool: activeDrawingTool,
+                    contractSpec: .forPair(id: pair.id),
                     onCommitDrawing: { drawing in
                         drawingStore.add(drawing, for: pair.id)
                         // TradingView-style: after a successful draw,
@@ -2618,6 +2619,10 @@ struct DashboardView: View {
             return "Rectangle"
         case .volumeProfile:
             return "Vol Profile"
+        case .longPosition:
+            return "Long · \(ChartView.priceShort(d.start.price))"
+        case .shortPosition:
+            return "Short · \(ChartView.priceShort(d.start.price))"
         }
     }
 

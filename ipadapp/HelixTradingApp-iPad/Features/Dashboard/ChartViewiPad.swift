@@ -24,6 +24,10 @@ struct ChartViewiPad: View {
     var taAltScenario: PromptBuilder.TAScenario? = nil
     var drawings: [ChartDrawing] = []
     var activeTool: DrawingTool = .none
+
+    /// Contract spec for the pair on screen — drives position-tool
+    /// sizing. Passed down because the chart is otherwise pair-agnostic.
+    var contractSpec: ContractSpec = .forPair(id: "ounce")
     var onCommitDrawing: ((ChartDrawing) -> Void)? = nil
     var onMoveDrawing: ((ChartDrawing) -> Void)? = nil
     var selectedDrawingID: UUID? = nil
@@ -678,6 +682,53 @@ struct ChartViewiPad: View {
                 // Pan / axis-scale mode — never while a pinch owns the domains.
                 guard magnifyStartDomain == nil else { return }
 
+                // Cursor mode: decide once, on the first frame, whether
+                // this touch grabbed a handle, a drawing body, or the
+                // chart itself. The choice sticks for the gesture so a
+                // drag can't switch modes mid-flight.
+                let alreadyChose =
+                    editingDrawingID != nil ||
+                    movingDrawingOriginal != nil ||
+                    dragStartDomain != nil
+                if !alreadyChose, !drawings.isEmpty {
+                    if let sel = selectionTargetDrawing,
+                       let anchor = hitTestHandle(
+                            of: sel,
+                            at: value.startLocation,
+                            plotOrigin: plotOrigin,
+                            proxy: proxy
+                       ) {
+                        editingDrawingID = sel.id
+                        editingHandle = anchor
+                        editingCursor = drawingPoint(at: value.startLocation, plotOrigin: plotOrigin, proxy: proxy)
+                        hovered = nil
+                    } else if let hit = hitTestDrawing(
+                        at: value.startLocation,
+                        plotOrigin: plotOrigin,
+                        proxy: proxy
+                    ) {
+                        movingDrawingOriginal = hit
+                        movingDeltaTime = 0
+                        movingDeltaPrice = 0
+                        hovered = nil
+                    }
+                }
+
+                if editingDrawingID != nil {
+                    editingCursor = drawingPoint(at: value.location, plotOrigin: plotOrigin, proxy: proxy)
+                    dragHadMovement = true
+                    return
+                }
+                if movingDrawingOriginal != nil {
+                    if let s = drawingPoint(at: value.startLocation, plotOrigin: plotOrigin, proxy: proxy),
+                       let n = drawingPoint(at: value.location, plotOrigin: plotOrigin, proxy: proxy) {
+                        movingDeltaTime  = n.date.timeIntervalSince(s.date)
+                        movingDeltaPrice = n.price - s.price
+                        dragHadMovement = true
+                    }
+                    return
+                }
+
                 if dragStartDomain == nil {
                     dragStartDomain = effectiveXDomain
                     dragStartYDomain = effectiveYDomain
@@ -744,9 +795,33 @@ struct ChartViewiPad: View {
                 }
             }
             .onEnded { value in
+                let hadMovement = dragHadMovement
+                dragHadMovement = false
+
                 if activeTool != .none {
                     commitDrawing(value, plotOrigin: plotOrigin, proxy: proxy)
                     return
+                }
+                if editingDrawingID != nil {
+                    handleResizeEnd()
+                    return
+                }
+                if let moving = movingDrawingOriginal {
+                    if hadMovement {
+                        handleMoveEnd()
+                    } else {
+                        // A tap without movement means "select", not
+                        // "move" — same rule as the Mac build.
+                        onSelectDrawing?(moving.id)
+                        movingDrawingOriginal = nil
+                        movingDeltaTime = 0
+                        movingDeltaPrice = 0
+                    }
+                    return
+                }
+                // Tap on empty chart clears the selection.
+                if !hadMovement, selectedDrawingID != nil {
+                    onSelectDrawing?(nil)
                 }
                 dragStartDomain = nil
                 dragStartYDomain = nil
@@ -807,7 +882,46 @@ struct ChartViewiPad: View {
         case .volumeProfile:
             guard hasDrag else { return }
             onCommitDrawing?(ChartDrawing(kind: .volumeProfile, start: start, end: end))
+        case .longPosition, .shortPosition:
+            // Drag height sets the stop distance; a tap falls back to
+            // 0.5% of price so the box is never zero-height (which
+            // would divide by zero in the metrics).
+            let dragged = abs(end.price - start.price)
+            let stopDistance = dragged > 0 ? dragged : abs(start.price) * 0.005
+            guard stopDistance > 0 else { return }
+            let rightDate = end.date > start.date
+                ? end.date
+                : defaultPositionRightEdge(from: start.date)
+            onCommitDrawing?(ChartDrawing.position(
+                long: activeTool == .longPosition,
+                entry: start,
+                end: DrawingPoint(date: rightDate, price: start.price),
+                stopDistance: stopDistance,
+                balance: defaultPositionBalance,
+                riskPercent: defaultPositionRisk
+            ))
         }
+    }
+
+    /// Right edge for a position committed without a horizontal drag —
+    /// far enough forward to be grabbable, clamped to the last candle.
+    private func defaultPositionRightEdge(from start: Date) -> Date {
+        guard let startIdx = barIndex(closestTo: start), !candles.isEmpty else { return start }
+        let idx = min(candles.count - 1, startIdx + 20)
+        return candles[idx].bucketStart
+    }
+
+    /// Seeded from the Risk Calculator's stored settings so a new
+    /// position starts with the user's usual sizing; each position
+    /// keeps its own copy afterwards.
+    private var defaultPositionBalance: Double {
+        let stored = UserDefaults.standard.double(forKey: "riskcalc.accountBalance")
+        return stored > 0 ? stored : 10_000
+    }
+
+    private var defaultPositionRisk: Double {
+        let stored = UserDefaults.standard.double(forKey: "riskcalc.riskPercent")
+        return stored > 0 ? stored : 1.0
     }
 
     // MARK: - Pinch-to-zoom (throttled)
@@ -2881,8 +2995,142 @@ struct ChartViewiPad: View {
                     )
                     .foregroundStyle(stroke.opacity(0.15))
                 }
+            case .longPosition, .shortPosition:
+                if let end = d.end,
+                   let xs = barIndex(forDate: d.start.date),
+                   let xe = barIndex(forDate: end.date) {
+                    positionMarks(for: d, xs: xs, xe: xe)
+                }
             }
         }
+        selectionHandleMarks
+    }
+
+    // MARK: - Position tool
+
+    /// Long/short position box: green reward zone entry→target, red
+    /// risk zone entry→stop, dashed entry line, and a label with lot
+    /// size and P/L. Drawn outward from entry so each side keeps its
+    /// colour even if a level is dragged through the entry.
+    @ChartContentBuilder
+    private func positionMarks(for d: ChartDrawing, xs: Double, xe: Double) -> some ChartContent {
+        let x0 = min(xs, xe), x1 = max(xs, xe)
+        let entry = d.start.price
+
+        if let target = d.targetPrice {
+            RectangleMark(
+                xStart: .value("X0", x0), xEnd: .value("X1", x1),
+                yStart: .value("Y0", entry), yEnd: .value("Y1", target)
+            )
+            .foregroundStyle(DrawingPalette.profit.opacity(DrawingPalette.zoneAlpha))
+            RuleMark(xStart: .value("T0", x0), xEnd: .value("T1", x1),
+                     y: .value("Target", target))
+                .foregroundStyle(DrawingPalette.profit)
+                .lineStyle(StrokeStyle(lineWidth: 1))
+        }
+
+        if let stop = d.stopPrice {
+            RectangleMark(
+                xStart: .value("X0", x0), xEnd: .value("X1", x1),
+                yStart: .value("Y0", entry), yEnd: .value("Y1", stop)
+            )
+            .foregroundStyle(DrawingPalette.loss.opacity(DrawingPalette.zoneAlpha))
+            RuleMark(xStart: .value("S0", x0), xEnd: .value("S1", x1),
+                     y: .value("Stop", stop))
+                .foregroundStyle(DrawingPalette.loss)
+                .lineStyle(StrokeStyle(lineWidth: 1))
+        }
+
+        RuleMark(xStart: .value("E0", x0), xEnd: .value("E1", x1),
+                 y: .value("Entry", entry))
+            .foregroundStyle(DrawingPalette.entryLine)
+            .lineStyle(StrokeStyle(lineWidth: 1.2, dash: [5, 3]))
+            .annotation(position: .topLeading, spacing: 2) {
+                positionLabel(for: d)
+            }
+    }
+
+    @ViewBuilder
+    private func positionLabel(for d: ChartDrawing) -> some View {
+        let metrics = d.positionMetrics(spec: contractSpec)
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 4) {
+                Text(d.kind.isLong ? "LONG" : "SHORT")
+                    .font(.system(size: 9, weight: .heavy))
+                    .foregroundStyle(d.kind.isLong ? DrawingPalette.profit : DrawingPalette.loss)
+                if let m = metrics {
+                    Text(String(format: "%.3f lots", m.lots))
+                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Theme.Color.textPrimary)
+                }
+            }
+            if let m = metrics {
+                HStack(spacing: 5) {
+                    Text("−" + Self.moneyShort(m.riskAmount))
+                        .foregroundStyle(DrawingPalette.loss)
+                    if let reward = m.reward {
+                        Text("+" + Self.moneyShort(reward))
+                            .foregroundStyle(DrawingPalette.profit)
+                    }
+                    if let rr = m.rr {
+                        Text(String(format: "%.2fR", rr))
+                            .foregroundStyle(Theme.Color.textMuted)
+                    }
+                }
+                .font(.system(size: 9, weight: .medium).monospacedDigit())
+                if m.belowMinLot {
+                    Text("below min lot")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(Theme.Color.warn)
+                }
+            }
+        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Theme.Color.surfaceMax.opacity(0.85))
+        )
+    }
+
+    static func moneyShort(_ v: Double) -> String {
+        let a = Swift.abs(v)
+        if a >= 1_000_000 { return String(format: "$%.2fM", v / 1_000_000) }
+        if a >= 1_000     { return String(format: "$%.1fk", v / 1_000) }
+        return String(format: "$%.0f", v)
+    }
+
+    /// Grab handles for the selected drawing. Sized larger than the Mac
+    /// build — these are finger targets, not cursor targets.
+    @ChartContentBuilder
+    private var selectionHandleMarks: some ChartContent {
+        if let sel = selectionTargetDrawing {
+            ForEach(handlePositions(for: sel), id: \.self) { hp in
+                PointMark(x: .value("Handle X", hp.x), y: .value("Handle Y", hp.y))
+                    .symbol(.square)
+                    .symbolSize(110)
+                    .foregroundStyle(Color.white)
+            }
+        }
+    }
+
+    private var selectionTargetDrawing: ChartDrawing? {
+        if let id = editingDrawingID,
+           let d = drawings.first(where: { $0.id == id }) {
+            if let cursor = editingCursor, let anchor = editingHandle {
+                return d.resized(anchor: anchor, to: cursor)
+            }
+            return d
+        }
+        if let id = selectedDrawingID {
+            return drawings.first(where: { $0.id == id && $0.visible })
+        }
+        return nil
+    }
+
+    struct HandlePoint: Hashable {
+        let x: Double
+        let y: Double
     }
 
     @ChartContentBuilder
@@ -2931,6 +3179,31 @@ struct ChartViewiPad: View {
                         yEnd:   .value("VP Preview y1", max(s.price, e.price))
                     )
                     .foregroundStyle(DrawingPalette.fill.opacity(0.25))
+                }
+            case .longPosition, .shortPosition:
+                // Mirror what the commit will build: drag height is the
+                // stop distance, target sits 2R the other side.
+                if let e = drawingEnd,
+                   let xs = barIndex(forDate: s.date),
+                   let xe = barIndex(forDate: e.date) {
+                    let long = activeTool == .longPosition
+                    let dist = Swift.abs(e.price - s.price)
+                    let stop   = long ? s.price - dist : s.price + dist
+                    let target = long ? s.price + dist * 2 : s.price - dist * 2
+                    RectangleMark(
+                        xStart: .value("Pos preview x0", min(xs, xe)),
+                        xEnd:   .value("Pos preview x1", max(xs, xe)),
+                        yStart: .value("Pos preview y0", s.price),
+                        yEnd:   .value("Pos preview y1", target)
+                    )
+                    .foregroundStyle(DrawingPalette.profit.opacity(0.14))
+                    RectangleMark(
+                        xStart: .value("Pos preview x2", min(xs, xe)),
+                        xEnd:   .value("Pos preview x3", max(xs, xe)),
+                        yStart: .value("Pos preview y2", s.price),
+                        yEnd:   .value("Pos preview y3", stop)
+                    )
+                    .foregroundStyle(DrawingPalette.loss.opacity(0.14))
                 }
             }
         }
@@ -3441,22 +3714,205 @@ struct ChartViewiPad: View {
         return nil
     }
 
+    /// Mutates a copy so non-geometry fields (colour, line width, a
+    /// position's risk settings) survive the move — rebuilding from
+    /// scratch used to reset them.
     private func translated(_ d: ChartDrawing) -> ChartDrawing {
-        ChartDrawing(
-            id: d.id,
-            kind: d.kind,
-            start: DrawingPoint(
-                date: d.start.date.addingTimeInterval(movingDeltaTime),
-                price: d.start.price + movingDeltaPrice
-            ),
-            end: d.end.map { e in
-                DrawingPoint(
-                    date: e.date.addingTimeInterval(movingDeltaTime),
-                    price: e.price + movingDeltaPrice
-                )
-            },
-            visible: d.visible
+        var copy = d
+        copy.start = DrawingPoint(
+            date: d.start.date.addingTimeInterval(movingDeltaTime),
+            price: d.start.price + movingDeltaPrice
         )
+        copy.end = d.end.map { e in
+            DrawingPoint(
+                date: e.date.addingTimeInterval(movingDeltaTime),
+                price: e.price + movingDeltaPrice
+            )
+        }
+        // Stop/target are absolute prices, so they must travel with the
+        // entry or a drag would reshape the trade instead of moving it.
+        if d.kind.isPosition {
+            copy.stopPrice   = d.stopPrice.map   { $0 + movingDeltaPrice }
+            copy.targetPrice = d.targetPrice.map { $0 + movingDeltaPrice }
+        }
+        return copy
+    }
+
+    // MARK: - Drawing hit-testing (touch)
+
+    /// Handle grab points for a drawing, paired positionally with
+    /// `handleAnchors(for:)`.
+    private func handlePositions(for d: ChartDrawing) -> [HandlePoint] {
+        switch d.kind {
+        case .horizontalLine:
+            return [HandlePoint(x: effectiveXDomain.upperBound - 0.5, y: d.start.price)]
+        case .trendLine:
+            guard let end = d.end,
+                  let xs = barIndex(forDate: d.start.date),
+                  let xe = barIndex(forDate: end.date) else { return [] }
+            return [HandlePoint(x: xs, y: d.start.price), HandlePoint(x: xe, y: end.price)]
+        case .rectangle, .volumeProfile:
+            guard let end = d.end,
+                  let xs = barIndex(forDate: d.start.date),
+                  let xe = barIndex(forDate: end.date) else { return [] }
+            return [
+                HandlePoint(x: xs, y: d.start.price),
+                HandlePoint(x: xe, y: d.start.price),
+                HandlePoint(x: xs, y: end.price),
+                HandlePoint(x: xe, y: end.price)
+            ]
+        case .longPosition, .shortPosition:
+            guard let end = d.end,
+                  let xs = barIndex(forDate: d.start.date),
+                  let xe = barIndex(forDate: end.date) else { return [] }
+            var pts = [HandlePoint(x: xs, y: d.start.price)]
+            if let stop = d.stopPrice     { pts.append(HandlePoint(x: xs, y: stop)) }
+            if let target = d.targetPrice { pts.append(HandlePoint(x: xs, y: target)) }
+            pts.append(HandlePoint(x: xe, y: d.start.price))
+            return pts
+        }
+    }
+
+    /// Must stay positionally in step with `handlePositions(for:)` —
+    /// the two are zipped, so conditional handles need conditional
+    /// anchors or a missing stop maps the target handle onto `.stop`.
+    private func handleAnchors(for d: ChartDrawing) -> [ChartDrawing.Handle] {
+        switch d.kind {
+        case .horizontalLine: return [.start]
+        case .trendLine:      return [.start, .end]
+        case .rectangle, .volumeProfile:
+            return [.topLeft, .topRight, .bottomLeft, .bottomRight]
+        case .longPosition, .shortPosition:
+            var anchors: [ChartDrawing.Handle] = [.entry]
+            if d.stopPrice != nil   { anchors.append(.stop) }
+            if d.targetPrice != nil { anchors.append(.target) }
+            anchors.append(.timeEnd)
+            return anchors
+        }
+    }
+
+    /// Touch targets are bigger than cursor targets — 22pt vs the Mac
+    /// build's 10pt, roughly a fingertip.
+    private func hitTestHandle(
+        of d: ChartDrawing,
+        at location: CGPoint,
+        plotOrigin: CGPoint,
+        proxy: ChartProxy,
+        threshold: CGFloat = 22
+    ) -> ChartDrawing.Handle? {
+        let p = CGPoint(x: location.x - plotOrigin.x, y: location.y - plotOrigin.y)
+        for (hp, anchor) in zip(handlePositions(for: d), handleAnchors(for: d)) {
+            guard let hx: CGFloat = proxy.position(forX: hp.x),
+                  let hy: CGFloat = proxy.position(forY: hp.y) else { continue }
+            if hypot(p.x - hx, p.y - hy) <= threshold { return anchor }
+        }
+        return nil
+    }
+
+    private func hitTestDrawing(
+        at location: CGPoint,
+        plotOrigin: CGPoint,
+        proxy: ChartProxy,
+        threshold: CGFloat = 16
+    ) -> ChartDrawing? {
+        let p = CGPoint(x: location.x - plotOrigin.x, y: location.y - plotOrigin.y)
+        var best: (ChartDrawing, CGFloat)?
+        for d in drawings where d.visible {
+            guard let dist = drawingDistance(d, at: p, proxy: proxy) else { continue }
+            if dist <= threshold, best == nil || dist < best!.1 { best = (d, dist) }
+        }
+        return best?.0
+    }
+
+    private func drawingDistance(
+        _ d: ChartDrawing,
+        at p: CGPoint,
+        proxy: ChartProxy
+    ) -> CGFloat? {
+        switch d.kind {
+        case .horizontalLine:
+            guard let lineY = proxy.position(forY: d.start.price) else { return nil }
+            return Swift.abs(p.y - lineY)
+        case .trendLine:
+            guard let end = d.end,
+                  let xs = barIndex(forDate: d.start.date),
+                  let xe = barIndex(forDate: end.date),
+                  let xsS: CGFloat = proxy.position(forX: xs),
+                  let xeS: CGFloat = proxy.position(forX: xe),
+                  let ysS = proxy.position(forY: d.start.price),
+                  let yeS = proxy.position(forY: end.price) else { return nil }
+            return Self.distanceToSegment(p, CGPoint(x: xsS, y: ysS), CGPoint(x: xeS, y: yeS))
+        case .rectangle, .volumeProfile:
+            guard let end = d.end,
+                  let xs = barIndex(forDate: d.start.date),
+                  let xe = barIndex(forDate: end.date),
+                  let xsS: CGFloat = proxy.position(forX: xs),
+                  let xeS: CGFloat = proxy.position(forX: xe),
+                  let ysS = proxy.position(forY: d.start.price),
+                  let yeS = proxy.position(forY: end.price) else { return nil }
+            return Self.distanceToRect(p, xsS, xeS, ysS, yeS)
+        case .longPosition, .shortPosition:
+            // Whole box is grabbable: stop edge to target edge.
+            guard let end = d.end,
+                  let xs = barIndex(forDate: d.start.date),
+                  let xe = barIndex(forDate: end.date),
+                  let xsS: CGFloat = proxy.position(forX: xs),
+                  let xeS: CGFloat = proxy.position(forX: xe) else { return nil }
+            let levels = [d.start.price, d.stopPrice, d.targetPrice].compactMap { $0 }
+            guard let lo = levels.min(), let hi = levels.max(),
+                  let loS = proxy.position(forY: lo),
+                  let hiS = proxy.position(forY: hi) else { return nil }
+            return Self.distanceToRect(p, xsS, xeS, loS, hiS)
+        }
+    }
+
+    private static func distanceToRect(
+        _ p: CGPoint, _ x0: CGFloat, _ x1: CGFloat, _ y0: CGFloat, _ y1: CGFloat
+    ) -> CGFloat {
+        let rect = CGRect(
+            x: min(x0, x1), y: min(y0, y1),
+            width: Swift.abs(x1 - x0), height: Swift.abs(y1 - y0)
+        )
+        if rect.contains(p) { return 0 }
+        let dx = max(rect.minX - p.x, 0, p.x - rect.maxX)
+        let dy = max(rect.minY - p.y, 0, p.y - rect.maxY)
+        return hypot(dx, dy)
+    }
+
+    private static func distanceToSegment(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
+        let dx = b.x - a.x, dy = b.y - a.y
+        let len2 = dx * dx + dy * dy
+        if len2 == 0 { return hypot(p.x - a.x, p.y - a.y) }
+        let t = max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2))
+        return hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+    }
+
+    /// Commit an in-flight handle drag.
+    private func handleResizeEnd() {
+        defer {
+            editingDrawingID = nil
+            editingHandle = nil
+            editingCursor = nil
+        }
+        guard let id = editingDrawingID,
+              let original = drawings.first(where: { $0.id == id }),
+              let anchor = editingHandle,
+              let cursor = editingCursor else { return }
+        let resized = original.resized(anchor: anchor, to: cursor)
+        if resized == original { return }
+        onMoveDrawing?(resized)
+    }
+
+    /// Commit an in-flight body drag.
+    private func handleMoveEnd() {
+        defer {
+            movingDrawingOriginal = nil
+            movingDeltaTime = 0
+            movingDeltaPrice = 0
+        }
+        guard let original = movingDrawingOriginal else { return }
+        if movingDeltaTime == 0 && movingDeltaPrice == 0 { return }
+        onMoveDrawing?(translated(original))
     }
 
     // MARK: - Formatting

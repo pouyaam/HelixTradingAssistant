@@ -485,6 +485,7 @@ struct DashboardViewiPad: View {
                 taAltScenario: altScenarioVisible ? taAltScenario : nil,
                 drawings: app.selectedPairID.map { drawingStore.drawings(for: $0) } ?? [],
                 activeTool: activeDrawingTool,
+                contractSpec: .forPair(id: app.selectedPairID ?? ""),
                 onCommitDrawing: { drawing in
                     guard let pairID = app.selectedPairID else { return }
                     drawingStore.add(drawing, for: pairID)
@@ -610,6 +611,7 @@ private struct ChartPlotiPad: View {
     let taAltScenario: PromptBuilder.TAScenario?
     let drawings: [ChartDrawing]
     let activeTool: DrawingTool
+    let contractSpec: ContractSpec
     let onCommitDrawing: (ChartDrawing) -> Void
     let onMoveDrawing: (ChartDrawing) -> Void
     let selectedDrawingID: UUID?
@@ -658,6 +660,7 @@ private struct ChartPlotiPad: View {
                 taAltScenario: taAltScenario,
                 drawings: drawings,
                 activeTool: activeTool,
+                contractSpec: contractSpec,
                 onCommitDrawing: onCommitDrawing,
                 onMoveDrawing: onMoveDrawing,
                 selectedDrawingID: selectedDrawingID,

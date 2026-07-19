@@ -46,6 +46,15 @@ struct DrawingInspector: View {
                     .frame(width: 24, alignment: .trailing)
             }
 
+            // Risk inputs — only positions size against an account, so
+            // these stay hidden for every other shape rather than
+            // showing dead fields.
+            if drawing.kind.isPosition {
+                Divider()
+                    .frame(height: 18)
+                riskFields
+            }
+
             Divider()
                 .frame(height: 18)
 
@@ -110,6 +119,8 @@ struct DrawingInspector: View {
         case .trendLine:      return "line.diagonal"
         case .rectangle:      return "rectangle"
         case .volumeProfile:  return "chart.bar.xaxis.ascending"
+        case .longPosition:   return "arrow.up.right.square"
+        case .shortPosition:  return "arrow.down.right.square"
         }
     }
 
@@ -119,6 +130,8 @@ struct DrawingInspector: View {
         case .trendLine:      return "Trend line"
         case .rectangle:      return "Rectangle"
         case .volumeProfile:  return "Vol Profile"
+        case .longPosition:   return "Long"
+        case .shortPosition:  return "Short"
         }
     }
 
@@ -142,6 +155,71 @@ struct DrawingInspector: View {
         )
         .labelsHidden()
         .help("Stroke color · also drives fill opacity")
+    }
+
+    /// Account balance + risk % for a position drawing. Each position
+    /// carries its own pair so several scenarios can share a chart
+    /// without one edit rewriting them all.
+    @ViewBuilder
+    private var riskFields: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "dollarsign.circle")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.Color.textMuted)
+            TextField("Balance", text: balanceText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 10, weight: .medium).monospacedDigit())
+                .foregroundStyle(Theme.Color.textPrimary)
+                .frame(width: 62)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 4).fill(Theme.Color.surface)
+                )
+                .help("Account balance this position sizes against")
+
+            TextField("Risk", text: riskText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 10, weight: .medium).monospacedDigit())
+                .foregroundStyle(Theme.Color.textPrimary)
+                .frame(width: 34)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 4).fill(Theme.Color.surface)
+                )
+                .help("Percent of balance risked if the stop fills")
+            Text("%")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Theme.Color.textMuted)
+        }
+    }
+
+    /// Text bindings that only commit parseable numbers — a partially
+    /// typed value (empty field, lone "-") leaves the stored setting
+    /// alone rather than writing a zero that would blank the metrics.
+    private var balanceText: Binding<String> {
+        Binding<String>(
+            get: { drawing.accountBalance.map { String(format: "%.0f", $0) } ?? "" },
+            set: { raw in
+                guard let v = Double(raw.replacingOccurrences(of: ",", with: ".")), v > 0 else { return }
+                var copy = drawing
+                copy.accountBalance = v
+                onChange(copy)
+            }
+        )
+    }
+
+    private var riskText: Binding<String> {
+        Binding<String>(
+            get: { drawing.riskPercent.map { String(format: "%.2g", $0) } ?? "" },
+            set: { raw in
+                guard let v = Double(raw.replacingOccurrences(of: ",", with: ".")), v > 0 else { return }
+                var copy = drawing
+                copy.riskPercent = v
+                onChange(copy)
+            }
+        )
     }
 
     /// Slider binding for the line width. Goes through the same

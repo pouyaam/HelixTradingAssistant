@@ -104,6 +104,11 @@ struct ChartView: View {
     /// stay active so the user keeps spatial reference while drawing.
     var activeTool: DrawingTool = .none
 
+    /// Contract spec for the pair on screen, used to size the position
+    /// tool. The chart is otherwise pair-agnostic, so the dashboard
+    /// passes this down rather than the chart looking up a pair id.
+    var contractSpec: ContractSpec = .forPair(id: "ounce")
+
     /// Called with the fully-formed `ChartDrawing` when the user
     /// finishes a draw gesture (mouse-up). DashboardView appends to
     /// its `DrawingStore`. Optional so existing call-sites that don't
@@ -1203,6 +1208,17 @@ struct ChartView: View {
         case .trendLine:      return [.start, .end]
         case .rectangle:      return [.topLeft, .topRight, .bottomLeft, .bottomRight]
         case .volumeProfile:  return [.topLeft, .topRight, .bottomLeft, .bottomRight]
+        // Must stay positionally in step with `handlePositions(for:)`,
+        // which omits handles for levels the position doesn't have —
+        // `hitTestHandle` zips the two lists, so an unconditional list
+        // here would map the target handle onto `.stop` when a position
+        // has no stop.
+        case .longPosition, .shortPosition:
+            var anchors: [ChartDrawing.Handle] = [.entry]
+            if d.stopPrice != nil   { anchors.append(.stop) }
+            if d.targetPrice != nil { anchors.append(.target) }
+            anchors.append(.timeEnd)
+            return anchors
         }
     }
 
@@ -1314,7 +1330,57 @@ struct ChartView: View {
         case .volumeProfile:
             guard hasDrag else { return }
             onCommitDrawing?(ChartDrawing(kind: .volumeProfile, start: start, end: end))
+        case .longPosition, .shortPosition:
+            // Entry is where the drag began; its vertical extent sets
+            // the stop distance so the box lands roughly where the user
+            // gestured. A plain click (no drag) still commits, using a
+            // default stop of 0.5% of price — otherwise a zero-height
+            // position would divide by zero in the metrics.
+            let dragged = abs(end.price - start.price)
+            let stopDistance = dragged > 0 ? dragged : abs(start.price) * 0.005
+            guard stopDistance > 0 else { return }
+            // Give the box a visible width even on a click, and always
+            // extend rightward regardless of drag direction.
+            let rightDate = end.date > start.date
+                ? end.date
+                : defaultPositionRightEdge(from: start.date)
+            onCommitDrawing?(ChartDrawing.position(
+                long: activeTool == .longPosition,
+                entry: start,
+                end: DrawingPoint(date: rightDate, price: start.price),
+                stopDistance: stopDistance,
+                balance: defaultPositionBalance,
+                riskPercent: defaultPositionRisk
+            ))
         }
+    }
+
+    /// Account balance / risk % a freshly-drawn position starts with.
+    /// Seeded from the Risk Calculator's stored settings so the two
+    /// features agree out of the box; each position keeps its own copy
+    /// afterwards and the inspector edits that.
+    ///
+    /// Read straight from `UserDefaults` rather than `@AppStorage`
+    /// because these are only consulted inside a gesture handler —
+    /// making them observable would invalidate an equatable view on
+    /// every unrelated settings write.
+    private var defaultPositionBalance: Double {
+        let stored = UserDefaults.standard.double(forKey: "riskcalc.accountBalance")
+        return stored > 0 ? stored : 10_000
+    }
+
+    private var defaultPositionRisk: Double {
+        let stored = UserDefaults.standard.double(forKey: "riskcalc.riskPercent")
+        return stored > 0 ? stored : 1.0
+    }
+
+    /// Right edge for a position committed without a horizontal drag —
+    /// a fixed number of bars forward so the box is grabbable. Clamps to
+    /// the last candle so the anchor always resolves to a real bar.
+    private func defaultPositionRightEdge(from start: Date) -> Date {
+        guard let startIdx = barIndex(forDate: start), !candles.isEmpty else { return start }
+        let idx = min(candles.count - 1, Int(startIdx) + 20)
+        return candles[idx].bucketStart
     }
 
     /// Drag-to-move: update the in-flight (time, price) delta. Both
@@ -1353,22 +1419,30 @@ struct ChartView: View {
 
     /// Apply the in-flight delta to a drawing. Used by both the live
     /// preview render and the final commit.
+    /// Mutates a copy rather than rebuilding from scratch, so every
+    /// field that isn't geometry (colour, line width, a position's risk
+    /// settings) survives the move. Rebuilding used to silently reset
+    /// the drawing's colour on every drag.
     private func translated(_ d: ChartDrawing) -> ChartDrawing {
-        ChartDrawing(
-            id: d.id,
-            kind: d.kind,
-            start: DrawingPoint(
-                date: d.start.date.addingTimeInterval(movingDeltaTime),
-                price: d.start.price + movingDeltaPrice
-            ),
-            end: d.end.map { e in
-                DrawingPoint(
-                    date: e.date.addingTimeInterval(movingDeltaTime),
-                    price: e.price + movingDeltaPrice
-                )
-            },
-            visible: d.visible
+        var copy = d
+        copy.start = DrawingPoint(
+            date: d.start.date.addingTimeInterval(movingDeltaTime),
+            price: d.start.price + movingDeltaPrice
         )
+        copy.end = d.end.map { e in
+            DrawingPoint(
+                date: e.date.addingTimeInterval(movingDeltaTime),
+                price: e.price + movingDeltaPrice
+            )
+        }
+        // A position's stop/target are absolute prices, not offsets, so
+        // they have to travel with the entry or a drag would reshape
+        // the trade instead of relocating it.
+        if d.kind.isPosition {
+            copy.stopPrice   = d.stopPrice.map   { $0 + movingDeltaPrice }
+            copy.targetPrice = d.targetPrice.map { $0 + movingDeltaPrice }
+        }
+        return copy
     }
 
     /// Pick the topmost visible drawing within `threshold` screen
@@ -1452,6 +1526,29 @@ struct ChartView: View {
             let rect = CGRect(
                 x: min(xsScreen, xeScreen), y: min(ysScreen, yeScreen),
                 width: abs(xeScreen - xsScreen), height: abs(yeScreen - ysScreen)
+            )
+            if rect.contains(p) { return 0 }
+            let dx = max(rect.minX - p.x, 0, p.x - rect.maxX)
+            let dy = max(rect.minY - p.y, 0, p.y - rect.maxY)
+            return hypot(dx, dy)
+        case .longPosition, .shortPosition:
+            // Grab area spans the full box: stop edge to target edge
+            // vertically, entry bar to right edge horizontally. Falls
+            // back to the entry line alone if neither level is set.
+            guard let end = d.end,
+                  let xs = barIndex(forDate: d.start.date),
+                  let xe = barIndex(forDate: end.date),
+                  let xsScreen: CGFloat = proxy.position(forX: xs),
+                  let xeScreen: CGFloat = proxy.position(forX: xe)
+            else { return nil }
+            let levels = [d.start.price, d.stopPrice, d.targetPrice].compactMap { $0 }
+            guard let lo = levels.min(), let hi = levels.max(),
+                  let loScreen = proxy.position(forY: lo),
+                  let hiScreen = proxy.position(forY: hi)
+            else { return nil }
+            let rect = CGRect(
+                x: min(xsScreen, xeScreen), y: min(loScreen, hiScreen),
+                width: abs(xeScreen - xsScreen), height: abs(hiScreen - loScreen)
             )
             if rect.contains(p) { return 0 }
             let dx = max(rect.minX - p.x, 0, p.x - rect.maxX)
@@ -4067,6 +4164,13 @@ struct ChartView: View {
                 {
                     vpMarks(for: d, end: end, xs: xs, xe: xe, stroke: stroke, lw: lw)
                 }
+            case .longPosition, .shortPosition:
+                if let end = d.end,
+                   let xs = barIndex(forDate: d.start.date),
+                   let xe = barIndex(forDate: end.date)
+                {
+                    positionMarks(for: d, xs: xs, xe: xe)
+                }
             }
         }
 
@@ -4074,6 +4178,113 @@ struct ChartView: View {
         // committed mark. Only the selected drawing gets handles; click
         // anywhere else to deselect.
         selectionHandleMarks
+    }
+
+    // MARK: - Position tool
+
+    /// A long/short position box: a green reward zone from entry to
+    /// target, a red risk zone from entry to stop, the entry line
+    /// between them, and a label carrying lot size + P/L.
+    ///
+    /// Zones are drawn from the entry outward rather than as one box so
+    /// each side keeps its own colour even when the user drags a level
+    /// through the entry (an inverted setup still renders truthfully
+    /// instead of flipping colours).
+    @ChartContentBuilder
+    private func positionMarks(for d: ChartDrawing, xs: Double, xe: Double) -> some ChartContent {
+        let x0 = min(xs, xe), x1 = max(xs, xe)
+        let entry = d.start.price
+
+        // ── Reward zone ─────────────────────────────────────────────
+        if let target = d.targetPrice {
+            RectangleMark(
+                xStart: .value("X0", x0), xEnd: .value("X1", x1),
+                yStart: .value("Y0", entry), yEnd: .value("Y1", target)
+            )
+            .foregroundStyle(DrawingPalette.profit.opacity(DrawingPalette.zoneAlpha))
+            RuleMark(xStart: .value("T0", x0), xEnd: .value("T1", x1),
+                     y: .value("Target", target))
+                .foregroundStyle(DrawingPalette.profit)
+                .lineStyle(StrokeStyle(lineWidth: 1))
+        }
+
+        // ── Risk zone ───────────────────────────────────────────────
+        if let stop = d.stopPrice {
+            RectangleMark(
+                xStart: .value("X0", x0), xEnd: .value("X1", x1),
+                yStart: .value("Y0", entry), yEnd: .value("Y1", stop)
+            )
+            .foregroundStyle(DrawingPalette.loss.opacity(DrawingPalette.zoneAlpha))
+            RuleMark(xStart: .value("S0", x0), xEnd: .value("S1", x1),
+                     y: .value("Stop", stop))
+                .foregroundStyle(DrawingPalette.loss)
+                .lineStyle(StrokeStyle(lineWidth: 1))
+        }
+
+        // ── Entry ───────────────────────────────────────────────────
+        RuleMark(xStart: .value("E0", x0), xEnd: .value("E1", x1),
+                 y: .value("Entry", entry))
+            .foregroundStyle(DrawingPalette.entryLine)
+            .lineStyle(StrokeStyle(lineWidth: 1.2, dash: [5, 3]))
+            .annotation(position: .topLeading, spacing: 2) {
+                positionLabel(for: d)
+            }
+    }
+
+    /// Lot size, risk, reward and R:R for a position box. Rendered as a
+    /// chart annotation so it tracks the entry line as the user drags.
+    @ViewBuilder
+    private func positionLabel(for d: ChartDrawing) -> some View {
+        let metrics = d.positionMetrics(spec: contractSpec)
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 4) {
+                Text(d.kind.isLong ? "LONG" : "SHORT")
+                    .font(.system(size: 8, weight: .heavy))
+                    .foregroundStyle(d.kind.isLong ? DrawingPalette.profit : DrawingPalette.loss)
+                if let m = metrics {
+                    Text(String(format: "%.3f lots", m.lots))
+                        .font(.system(size: 8, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Theme.Color.textPrimary)
+                }
+            }
+            if let m = metrics {
+                HStack(spacing: 5) {
+                    Text("−" + Self.moneyShort(m.riskAmount))
+                        .foregroundStyle(DrawingPalette.loss)
+                    if let reward = m.reward {
+                        Text("+" + Self.moneyShort(reward))
+                            .foregroundStyle(DrawingPalette.profit)
+                    }
+                    if let rr = m.rr {
+                        Text(String(format: "%.2fR", rr))
+                            .foregroundStyle(Theme.Color.textMuted)
+                    }
+                }
+                .font(.system(size: 8, weight: .medium).monospacedDigit())
+                // A size no broker will accept is worth saying out loud
+                // rather than leaving the trader to notice the decimals.
+                if m.belowMinLot {
+                    Text("below min lot")
+                        .font(.system(size: 7, weight: .semibold))
+                        .foregroundStyle(Theme.Color.warn)
+                }
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: 3)
+                .fill(Theme.Color.surfaceMax.opacity(0.85))
+        )
+    }
+
+    /// Compact money formatting for the position label — "$1.2k" keeps
+    /// the annotation narrow enough not to cover price action.
+    static func moneyShort(_ v: Double) -> String {
+        let a = abs(v)
+        if a >= 1_000_000 { return String(format: "$%.2fM", v / 1_000_000) }
+        if a >= 1_000     { return String(format: "$%.1fk", v / 1_000) }
+        return String(format: "$%.0f", v)
     }
 
     /// Small square handles drawn at the selected drawing's endpoints
@@ -4160,6 +4371,19 @@ struct ChartView: View {
                 HandlePoint(x: xs, y: end.price),
                 HandlePoint(x: xe, y: end.price)
             ]
+        case .longPosition, .shortPosition:
+            guard let end = d.end,
+                  let xs = barIndex(forDate: d.start.date),
+                  let xe = barIndex(forDate: end.date)
+            else { return [] }
+            // Entry / stop / target grab points sit on the left edge so
+            // they never collide with the time handle on the right.
+            // Levels the position doesn't have simply get no handle.
+            var pts = [HandlePoint(x: xs, y: d.start.price)]
+            if let stop = d.stopPrice     { pts.append(HandlePoint(x: xs, y: stop)) }
+            if let target = d.targetPrice { pts.append(HandlePoint(x: xs, y: target)) }
+            pts.append(HandlePoint(x: xe, y: d.start.price))
+            return pts
         }
     }
 
@@ -4246,6 +4470,34 @@ struct ChartView: View {
                         yEnd:   .value("VP Preview y1", max(s.price, e.price))
                     )
                     .foregroundStyle(DrawingPalette.fill.opacity(0.25))
+                }
+            case .longPosition, .shortPosition:
+                // Preview the risk/reward split the drag will produce:
+                // the drag height becomes the stop distance, and the
+                // target sits 2R the other side of entry (matching
+                // `ChartDrawing.position`).
+                if let e = drawingEnd,
+                   let xs = barIndex(forDate: s.date),
+                   let xe = barIndex(forDate: e.date)
+                {
+                    let long = activeTool == .longPosition
+                    let dist = abs(e.price - s.price)
+                    let stop   = long ? s.price - dist : s.price + dist
+                    let target = long ? s.price + dist * 2 : s.price - dist * 2
+                    RectangleMark(
+                        xStart: .value("Pos preview x0", min(xs, xe)),
+                        xEnd:   .value("Pos preview x1", max(xs, xe)),
+                        yStart: .value("Pos preview y0", s.price),
+                        yEnd:   .value("Pos preview y1", target)
+                    )
+                    .foregroundStyle(DrawingPalette.profit.opacity(0.14))
+                    RectangleMark(
+                        xStart: .value("Pos preview x2", min(xs, xe)),
+                        xEnd:   .value("Pos preview x3", max(xs, xe)),
+                        yStart: .value("Pos preview y2", s.price),
+                        yEnd:   .value("Pos preview y3", stop)
+                    )
+                    .foregroundStyle(DrawingPalette.loss.opacity(0.14))
                 }
             }
         }
