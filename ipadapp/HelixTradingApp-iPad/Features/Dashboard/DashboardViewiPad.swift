@@ -1061,11 +1061,48 @@ private struct IndicatorSettingsBody: View {
             }
             Divider().background(Theme.Color.border)
             settingsSection(title: "Volume Profile") {
+                Picker("Mode", selection: $config.vpMode) {
+                    Text("Sessions (trading day)").tag("session")
+                    Text("ZigZag trend").tag("zigzag")
+                    Text("Visible range + levels").tag("visible")
+                }
+                .pickerStyle(.menu)
+                if config.vpMode == "visible" {
+                    settingsStepper(label: "Levels", value: $config.vpLevelCount, range: 1...10)
+                }
                 settingsStepper(label: "Buckets", value: $config.vpBucketCount, range: 10...100)
                 settingsDoubleStepper(label: "Value Area %", value: $config.vpValueAreaPct, range: 50...95, step: 5.0)
             }
+            Divider().background(Theme.Color.border)
+            settingsSection(title: "Volume-Filtered OB") {
+                robToggle("Show Historic Zones", $config.vfobShowHistoric)
+                robToggle("Volumetric Info", $config.vfobVolumetricInfo)
+                Picker("Zone Invalidation", selection: $config.vfobInvalidation) {
+                    Text("Wick").tag("Wick")
+                    Text("Close").tag("Close")
+                }
+                .pickerStyle(.menu)
+                .font(.system(size: 12))
+                settingsStepper(label: "Swing Length", value: $config.vfobSwingLength, range: 3...50)
+                Picker("Zone Count", selection: $config.vfobZoneCount) {
+                    Text("High").tag("High")
+                    Text("Medium").tag("Medium")
+                    Text("Low").tag("Low")
+                    Text("One").tag("One")
+                }
+                .pickerStyle(.menu)
+                .font(.system(size: 12))
+            }
         }
         .padding(14)
+    }
+
+    /// Compact switch row used by the Ranked-OB section.
+    private func robToggle(_ label: String, _ value: Binding<Bool>) -> some View {
+        Toggle(label, isOn: value)
+            .toggleStyle(.switch)
+            .font(.system(size: 12))
+            .foregroundStyle(Theme.Color.textSecondary)
     }
 
     @ViewBuilder

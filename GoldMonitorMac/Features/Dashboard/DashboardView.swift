@@ -961,10 +961,37 @@ struct DashboardView: View {
         case .volumeProfile:
             if let v = p["bucketCount"]  { oscillatorConfig.vpBucketCount = Int(v.doubleValue) }
             if let v = p["valueAreaPct"] { oscillatorConfig.vpValueAreaPct = v.doubleValue }
-            if let v = p["useZigzag"]   { oscillatorConfig.vpUseZigzag = v.boolValue }
+            // Legacy param from before the mode picker — older saved
+            // instances still carry it; map it onto `vpMode`.
+            if let v = p["useZigzag"]   { oscillatorConfig.vpMode = v.boolValue ? "zigzag" : "session" }
+            if let v = p["mode"]        { oscillatorConfig.vpMode = v.stringValue }
+            if let v = p["levelCount"]  { oscillatorConfig.vpLevelCount = Int(v.doubleValue) }
             if let v = p["showZigzag"]  { oscillatorConfig.vpShowZigzag = v.boolValue }
             if let v = p["zzDepth"]     { oscillatorConfig.vpZZDepth = Int(v.doubleValue) }
             if let v = p["zzMinChange"] { oscillatorConfig.vpZZMinChange = v.doubleValue }
+        case .ichimoku:
+            if let v = p["tenkan"]       { oscillatorConfig.ichiTenkan = Int(v.doubleValue) }
+            if let v = p["kijun"]        { oscillatorConfig.ichiKijun = Int(v.doubleValue) }
+            if let v = p["senkouB"]      { oscillatorConfig.ichiSenkouB = Int(v.doubleValue) }
+            if let v = p["displacement"] { oscillatorConfig.ichiDisplacement = Int(v.doubleValue) }
+            if let v = p["showChikou"]   { oscillatorConfig.ichiShowChikou = v.boolValue }
+            if let v = p["showCloud"]    { oscillatorConfig.ichiShowCloud = v.boolValue }
+        case .ichimokuOrderBlock:
+            if let v = p["periods"]      { oscillatorConfig.iobPeriods = Int(v.doubleValue) }
+            if let v = p["threshold"]    { oscillatorConfig.iobThreshold = v.doubleValue }
+            if let v = p["useWicks"]     { oscillatorConfig.iobUseWicks = v.boolValue }
+            if let v = p["tenkan"]       { oscillatorConfig.iobTenkan = Int(v.doubleValue) }
+            if let v = p["kijun"]        { oscillatorConfig.iobKijun = Int(v.doubleValue) }
+            if let v = p["senkouB"]      { oscillatorConfig.iobSenkouB = Int(v.doubleValue) }
+            if let v = p["displacement"] { oscillatorConfig.iobDisplacement = Int(v.doubleValue) }
+            if let v = p["minScore"]     { oscillatorConfig.iobMinScore = Int(v.doubleValue) }
+            if let v = p["requireTrend"] { oscillatorConfig.iobRequireTrend = v.boolValue }
+        case .volumeFilteredOrderBlock:
+            if let v = p["showHistoric"]   { oscillatorConfig.vfobShowHistoric = v.boolValue }
+            if let v = p["volumetricInfo"] { oscillatorConfig.vfobVolumetricInfo = v.boolValue }
+            if let v = p["invalidation"]   { oscillatorConfig.vfobInvalidation = v.stringValue }
+            if let v = p["swingLength"]    { oscillatorConfig.vfobSwingLength = Int(v.doubleValue) }
+            if let v = p["zoneCount"]      { oscillatorConfig.vfobZoneCount = v.stringValue }
         default:
             break // SMA/EMA/Bollinger — read from indicatorInstances, no config sync needed
         }
