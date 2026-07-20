@@ -2,7 +2,7 @@
 
 The single source of truth for anyone (human or AI) editing this codebase.
 It merges the old `README.md`, `CLAUDE.md`, `CHANGELOG.md`, release notes,
-`CTS_IMPROVEMENT_PLAN.md`, `ipadapp/REDESIGN.md`, and `CTraderBridge/README.md`
+`CTS_IMPROVEMENT_PLAN.md`, and `ipadapp/REDESIGN.md`
 — those files were removed in favour of this one. If a behaviour or
 convention here conflicts with what you'd guess from reading a single
 file, this document wins.
@@ -30,8 +30,7 @@ GRDB, and the local `claude` / `codex` / `opencode` CLIs.
 - **Live multi-source price feed** — Yahoo Finance for XAU/USD (10s ticks),
   TwelveData WebSocket for BTC/ETH/SOL, Faraz WebSocket feed (gold + crypto,
   with automatic in-app re-login on HTTP 401 via WKWebView cookie capture),
-  gold-api fallback, and an optional cTrader bridge (see below) that takes
-  priority for XAU/USD when connected. WTI symbol also supported.
+  and a gold-api fallback. WTI symbol also supported.
 - **Interactive charts** — line / candle / Heikin Ashi; pan + zoom; vertical
   price-axis scaling; replay mode; "scroll to latest"; infinite-scroll
   history paging; multi-chart grid (2-col / 2-row / 2×2) with per-pane
@@ -135,7 +134,7 @@ App lifecycle
                              • AppState       — selected pair, db handle, errors, fullscreen flag
                              • FetchScheduler — periodic snapshot fetch
                              • YahooScheduler — live ticks (Yahoo 10s, TwelveData WS,
-                               Faraz WS, cTrader bridge), OHLC writes, focusedPairID
+                               Faraz WS), OHLC writes, focusedPairID
                            Boots the database, kicks schedulers, hands env objects to RootView.
 
 RootView (Features/)
@@ -157,15 +156,14 @@ DashboardView (Features/Dashboard/)
 | `GoldMonitorMac/App/` | `HelixTradingApp` (entry), `AppState`, `Theme`, `DataSourceConfig` (ALL user-configurable values, persisted under `dataSourceConfig.v1`) |
 | `GoldMonitorMac/Models/` | `Snapshot`, `Candle`, `TradingPair` (catalog), `MarketCalendar` (COMEX weekend filter; Sunday 6pm ET reopen respected) |
 | `GoldMonitorMac/Storage/` | `AppDatabase` (GRDB pool under `~/Library/Application Support/HelixTrading/`), `Schema`, `SnapshotRepo`, `OHLCRepo` (batched multi-row upserts), `Importer`, `ServerImporter`, `OHLCCandleLoader.loadAsync` (all DB reads off-main) |
-| `GoldMonitorMac/Fetching/` | `PriceFetcher` (concurrent sources), `Sources.swift`, `BackendClient`, `ProxyTransport` (SOCKS5), `YahooGoldSource` (incremental via `period1`), Faraz sources + `FarazAuthCoordinator`/`FarazLoginWebView` (401 → in-app login), TwelveData WS, `CTraderWSReceiver` |
-| `GoldMonitorMac/Scheduling/` | `FetchScheduler` (60s), `YahooScheduler` (10s ticks, 1 Hz `@Published` throttle, `focusedPairID`, `dataResetToken`), `CTraderScheduler`, `NewsStore` |
+| `GoldMonitorMac/Fetching/` | `PriceFetcher` (concurrent sources), `Sources.swift`, `BackendClient`, `ProxyTransport` (SOCKS5), `YahooGoldSource` (incremental via `period1`), Faraz sources + `FarazAuthCoordinator`/`FarazLoginWebView` (401 → in-app login), TwelveData WS |
+| `GoldMonitorMac/Scheduling/` | `FetchScheduler` (60s), `YahooScheduler` (10s ticks, 1 Hz `@Published` throttle, `focusedPairID`, `dataResetToken`), `NewsStore` |
 | `GoldMonitorMac/AI/` | `AIEngine` protocol (`run(system:user:)` → `AsyncThrowingStream<String, Error>`), `ClaudeEngine` (spawns `claude --print --output-format stream-json --include-partial-messages --verbose`, prompt on stdin, `StreamJSONParser` for NDJSON deltas), `CodexEngine`, OpenCode engine (local `opencode run` or remote `opencode serve` + basic auth), `PromptBuilder` (kinds, system prompts, JSON-block parsers), `AnalysisStore` (per-(pair,kind) sessions, history capped at 50), `MarketSnapshot` |
 | `GoldMonitorMac/Features/Dashboard/` | `DashboardView`, `ChartView`, `ChartGridView`/`ChartPane`/`ChartPaneView` (multi-chart grid), `ChartDerivedCache`, `ChartWindowing`, indicators/oscillators + setups (`OrderBlocks`, `SteroidOrderBlocks`, `SonarlabOrderBlocks`, `FairValueGap`, `VolumeProfile`, `TradingSessions`, `ZigZag`, `ChangeOfCharacter`, `NYOpenSetup`, `SP2LSetup`, `PinBarComboSetup`, `MicroMapSetup`, `MTRSetup`, `UTBot`), `Drawings`/`DrawingInspector`, `ReplayController`, `RiskCalculatorView`, `IndicatorSettingsPanel`/`Sheet`, `Trades`, `TimeframeCountdown` |
 | `GoldMonitorMac/Features/…` | `AIAnalysis` (report UI, MarkdownUI theme), `AutoTrader`, `Journal`, `Alerts`, `Inbox`, `News`, `Portfolio`, `Sidebar`, `Settings`, `Wizard`, `WhatsNewView` |
 | `GoldMonitorMac/UI/` | `Card`, buttons, `KeychainHelper` (secrets → macOS Keychain), `WindowConfigurator` |
 | `GoldMonitorMacTests/` | macOS unit tests — SP2L, Pin Bar Combo/BTB, MicroMap, MTR detection/geometry/decoding suites |
 | `ipadapp/HelixTradingApp-iPad/` | Touch target overrides (see iPad/iPhone section) |
-| `CTraderBridge/` | `HelixBridgeBot.cs` cBot (see cTrader bridge section) |
 | `Tools/` | `HelixIconGen.swift` — regenerates app icons |
 
 **Secrets**: nothing hardcoded, ever. User config → `DataSourceConfig`;
@@ -366,41 +364,7 @@ at runtime). iOS 16+; `TARGETED_DEVICE_FAMILY = "1,2"`.
   (computed in `ChartPlotiPad.reloadHTFChoch`, drawn by
   `ChartViewiPad.htfChochMarks`).
 
----
-
-## cTrader bridge
-
-`CTraderBridge/HelixBridgeBot.cs` is a cTrader cBot that streams XAU/USD
-ticks + bar closes as newline-delimited UTF-8 JSON over loopback TCP
-(default `127.0.0.1:7878`) to `CTraderWSReceiver`. When connected and
-fresh, it's the **authoritative** XAU/USD source; TwelveData / gold-api
-step back in automatically after >10s of silence. Other symbols unaffected.
-
-- **Install**: cTrader → Automate → New cBot `HelixBridgeBot` → paste the
-  .cs contents → Build → drag onto an XAU/USD chart (the chart's timeframe
-  decides which bar closes stream; attach multiple instances for multiple
-  TFs — the Mac merges by `tf`) → confirm host/port/Send ticks/Send bars →
-  Start. Mac side: Settings → cTrader → Bridge enabled ("Listening" flips
-  to "Connected"; green dot = tick within 10s).
-- **Message schema** (versioned by `bot` in the hello frame):
-
-```
-{"type":"hello","symbol":"XAUUSD","tf":"M1","account":"Broker/12345","bot":"0.1"}
-{"type":"tick","symbol":"XAUUSD","bid":2340.55,"ask":2340.62,"ts":"…"}
-{"type":"bar","symbol":"XAUUSD","tf":"M1","o":…,"h":…,"l":…,"c":…,"v":…,"ts":"…"}
-{"type":"ping","ts":"…"}
-```
-
-- **Customising**: new symbol → `symbolToPairID` in `CTraderScheduler.swift`
-  + a pair in `TradingPair.catalog`. Port must match on both sides. LAN
-  binding requires editing `CTraderWSReceiver.start` to `.any` — add a
-  shared-secret check first; there's **no auth on the bridge today**.
-- Troubleshooting: stuck "Listening" = bot not started / wrong port;
-  "Connection refused" in the cTrader log = bridge disabled on the Mac;
-  connected but no ticks = "Send ticks" off; chip stops counting = cBot
-  crashed (check the cTrader Log tab).
-
----
+--
 
 ## Open work
 

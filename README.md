@@ -4,67 +4,154 @@
   <img src="screenshots/architecture.svg" width="900" alt="Helix Trading Assistant — AI co-pilot completes its analysis, then applies S/R, FVG, and trade markers onto the chart." />
 </p>
 
-A native macOS and iPad app for monitoring gold, oil, crypto, and index
-markets, charting them with technical indicators, and running AI-driven
-analyses against live data — built in SwiftUI on top of Apple Charts, GRDB,
-and the local `claude` / `codex` / `opencode` CLIs.
+A native **macOS and iPad** app for studying gold, oil, crypto, and index
+markets: live multi-source price feeds, a deep technical-indicator suite
+built around smart-money concepts (order blocks, fair value gaps, volume
+profile), on-chart position planning with correct lot sizing, a trade
+journal with AI reviews, and AI market analysis driven by the local
+`claude` / `codex` / `opencode` CLIs. Built in SwiftUI on Apple Charts and
+GRDB — no Electron, no web view, no server.
 
 > **⚠️ Not financial advice.** Helix Trading Assistant is a personal-use
 > research tool. The AI engines generate trade ideas and plans from market
 > snapshots; nothing here is investment advice, and no trades are placed
-> automatically against a live broker. Use at your own risk.
+> against a live broker — the auto-trader is paper-only. Use at your own
+> risk.
 
 ---
 
-## Features
+## What the app is
 
-- **Live multi-source price feed** — Yahoo Finance for XAU/USD (10s ticks),
-  TwelveData WebSocket for BTC/ETH/SOL, a Faraz source for WTI Crude and the
-  US Dollar Index, and an optional **cTrader bridge**
-  (`CTraderBridge/HelixBridgeBot.cs`) that streams broker-grade XAU/USD ticks
-  over a loopback socket and takes priority when connected.
-- **Interactive charts** — line, candle, or Heikin Ashi; pan + zoom; bar-index
-  X-axis so weekend gaps for COMEX don't open visible holes. Split the
-  dashboard into a 2- or 4-pane grid, each pane with its own pair, timeframe,
-  and indicators.
-- **Indicators** — SMA, EMA, Bollinger Bands, UT Bot, RSI, MACD, Stochastic,
-  plus a deep order-block suite (base Order Blocks with an exhaustion
-  lifecycle, Steroid, Sonarlab, Ranked, Ichimoku-confluence, and
-  Volume-Filtered), Fair Value Gaps, three-mode Volume Profile, Ichimoku
-  Cloud, Trading Sessions, ZigZag, Change of Character (including
-  higher-timeframe zones), and the NY Open / SP2L / Pin Bar Combo / MicroMap /
-  Major Trend Reversal strategies. Indicators are multi-instance, each with
-  its own parameters and floating settings panel.
-- **On-chart position tool** — drop a long or short position onto the chart
-  and drag its entry, stop, target, or time extent. Each carries its own
-  account balance and risk %, showing live lot size, profit, loss, and R:R.
-  Sizing uses per-instrument contract specs so gold, oil, crypto, and indices
-  each size correctly.
-- **Drawing tools** — horizontal lines, trend lines, rectangles, and Volume
-  Profile boxes, anchored to dates so they survive a timeframe switch.
-- **AI analysis** — runs against the local **Claude Code** CLI (no API key
-  required — reuses your existing Claude session), the **OpenAI Codex** CLI,
-  or **OpenCode** (locally or against your own remote OpenCode server).
-  Four analysis kinds out of the box:
-  - **Full TA** — overall scenario, bias, key levels, trade plan.
-  - **Support / Resistance** — extracts structured `LEVELS_JSON` and plots
-    horizontal lines directly on the chart.
-  - **Fair Value Gaps** — `FVG_JSON` zones drawn as shaded rectangles.
-  - **Multi-Timeframe** — bundles 4 timeframes into one prompt for confluence.
-- **Auto-trader (paper)** — risk-% lot sizing, paper P&L tracker, strategy
-  profiles. Never talks to a real broker — purely a learning sandbox.
-- **Journal + Alerts** — keep multiple separate trade logs, each with its own
-  win rate and P&L, with per-trade AI post-mortems and day/week/month AI
-  reviews. Set price and indicator alerts and watch them fire on the chart.
-- **Notification Inbox** — every alert collected into one filterable history
-  with unread badges, instead of relying on macOS Notification Center.
-- **Economic calendar** — ForexFactory feed filtered by impact, with events
-  plotted as markers along the chart's time axis.
-- **Replay mode** — step the chart forward bar by bar from any anchor point.
-- **In-app updates** — Settings → Updates checks GitHub releases, shows the
-  new version's notes, and downloads the `.dmg` for you.
-- **First-run wizard** — collects all API keys / endpoints / CLI paths so the
-  open-source build ships with zero secrets baked in.
+Helix is organised as one **Dashboard** (the chart) surrounded by
+supporting rooms:
+
+| Screen | What it does |
+|---|---|
+| **Dashboard** | The chart: candles, indicators, drawings, positions, replay, alerts, AI analysis. Split into a 2- or 4-pane grid, each pane with its own pair/timeframe/indicators. |
+| **News** | ForexFactory economic calendar filtered by impact; events also plot as flags on the chart's time axis. |
+| **Portfolio** | Paper balance and open/closed trade P&L from the auto-trader sandbox. |
+| **Journal** | Multiple trade logs (e.g. "Prop challenge", "Personal", "Backtests"), each with win rate and P&L, per-trade AI post-mortems, and day/week/month AI reviews. Imports broker statement CSVs. |
+| **Inbox** | Every alert the app fires — price, indicator, order-block lifecycle — in one filterable history with unread badges. |
+| **Settings** | Data sources, AI engines, proxy, auto-trader, notifications, in-app updates. |
+
+**Symbols out of the box:** XAU/USD (gold), WTI crude, BTC, ETH, SOL,
+Dow Jones, US Dollar Index. Prices stream from Yahoo Finance, a TwelveData
+WebSocket, and a Faraz source for WTI/DXY; history is stored in SQLite via
+GRDB, so the chart works on years of 1-minute data offline.
+
+---
+
+## The chart
+
+- **Candle, line, or Heikin Ashi**, on a bar-index X axis so weekend gaps
+  don't tear holes in the series.
+- **Pan / pinch-zoom / axis scaling**, with the visible window rendered
+  and decimated for speed — years of 1m bars stay smooth.
+- **Replay mode** — pick an anchor bar and step the market forward
+  bar-by-bar to practice setups.
+- **Multi-chart grid** — 2 or 4 independent panes, optional symbol sync,
+  per-pane fullscreen.
+- **Drawing tools** — horizontal line, trend line, rectangle, Volume
+  Profile box, and long/short **positions** (below). Drawings anchor to
+  dates, so they survive timeframe switches, and can be placed *ahead* of
+  price in the chart's right margin. Select one to recolor, restyle, or
+  drag any handle.
+
+### Position tool
+
+Drop a **Long** or **Short** position on the chart — TradingView style:
+
+- Drag height sets the initial stop distance; the target defaults to 2R.
+- Drag the **entry** (price + time), **stop**, **target**, or the **right
+  edge** (time extent) independently.
+- Every position carries its own **account balance and risk %**, editable
+  in the floating inspector.
+- The label shows the computed **lot size, risk $, reward $, and R:R**
+  live while you drag, and warns when the size falls below the broker
+  minimum.
+- Lot math runs through per-instrument **contract specs** (gold = 100 oz,
+  WTI = 1,000 bbl, crypto = 1 coin, …) so each symbol sizes correctly —
+  the same engine behind the Risk Calculator popover.
+
+---
+
+## Indicators
+
+All indicators are **multi-instance**: add several copies with different
+parameters, toggle visibility per instance, and tune everything in a
+floating settings panel. Overlays render on the price chart; oscillators
+get their own sub-panes.
+
+### Classic
+
+| Indicator | Notes |
+|---|---|
+| **SMA / EMA** | Any length, any number of instances. |
+| **Bollinger Bands** | Length + multiplier. |
+| **UT Bot** | ATR trailing-stop flip signals, optional Heikin Ashi source. |
+| **RSI, MACD, Stochastic** | Oscillator pane with configurable lengths. |
+| **Ichimoku Cloud** | Full five-line system with filled Kumo, all lengths and displacement tunable. |
+| **ZigZag** | Swing-pivot polyline; depth + minimum-change filters. |
+
+### Smart-money / order-flow
+
+| Indicator | Notes |
+|---|---|
+| **Order Blocks** | Base detector with a full **exhaustion lifecycle**: fresh → tested → exhausted with a retest counter, optional notifications on appear/retest/exhaust. |
+| **Steroid Order Blocks** | Volume-validated: a zone only survives if its origin candle beats its 20-period average volume or overlaps a high-volume node. |
+| **Sonarlab Order Blocks** | Port of the Sonarlab detector with its sensitivity + mitigation options. |
+| **Ranked Order Blocks** | Swing-structure blocks graded **A/B/C** by two confluences: Volume Profile (does the zone sit on a high-volume node?) and Ichimoku (position vs the cloud + Tenkan/Kijun agreement). Breaker lifecycle and overlap merging; the badge shows grade + score, e.g. "A 4/5". |
+| **Ichimoku-confluence Order Blocks** | Base blocks kept only where they agree with the Ichimoku picture (Kijun/Tenkan/Kumo overlap, cloud trend). |
+| **Volume-Filtered Order Blocks** | Swing-anchored zones with a volumetric **up/down split + balance %**, ATR size filter, breaker lifecycle, and same-direction zone merging. |
+| **Fair Value Gaps** | Three-candle imbalance zones with mitigation tracking. |
+| **Change of Character (CHoCH)** | Structure-shift zones with OB/FVG confluence, including **higher-timeframe zones projected onto the current timeframe**. |
+| **Volume Profile** | Three modes: per-trading-day sessions (anchored 18:00 ET), the last ZigZag trend segment, or visible-range with ranked high-volume levels. Two-tone up/down buckets, POC, and value-area high/low. Also available as a drag-anywhere drawing. |
+| **Trading Sessions** | Asia / London / New York boxes with session high/low. |
+
+### Strategy overlays
+
+Close-confirmed setups that paint entries, stops, and targets directly on
+the chart, each with unit tests:
+
+- **NY Open Setup** — the New York open range play.
+- **SP2L** — session-pivot two-leg continuation.
+- **Pin Bar Combo / BTB** — pin-bar cluster reversals.
+- **MicroMap** — micro structure map of local highs/lows.
+- **MTR** — major trend reversal detection.
+
+---
+
+## AI features
+
+The AI engines run as **local subprocesses** — the app writes a prompt to
+stdin and parses streaming output. No API keys are stored in the repo.
+
+- **Engines:** Claude Code CLI (reuses your existing Claude session),
+  OpenAI Codex CLI, or OpenCode (local, or pointed at your own remote
+  OpenCode server — the iPad build uses remote OpenCode).
+- **Full TA** — scenario, bias, key levels, and a trade plan from a
+  bundled market snapshot.
+- **Support / Resistance** — returns structured `LEVELS_JSON`, plotted
+  straight onto the chart as horizontal lines.
+- **Fair Value Gaps** — `FVG_JSON` zones drawn as shaded rectangles.
+- **Multi-Timeframe** — four timeframes bundled into one confluence
+  prompt.
+- **Journal reviews** — per-trade post-mortems plus whole day/week/month
+  reviews with OHLC context; history is persisted and browsable.
+- **Auto-trader (paper only)** — reacts to AI scenarios with risk-%
+  sized paper trades, tracks P&L against a paper balance, enforces safety
+  gates (news blackouts, loss cooldowns, daily limits). No broker
+  connection exists; nothing can place a real order.
+
+---
+
+## Alerts
+
+- **Price alerts** — above/below lines drawn on the chart.
+- **Indicator alerts** — RSI thresholds, UT Bot flips, order-block
+  lifecycle events (appear / retest / exhaust), CHoCH shifts.
+- Everything lands in the **Inbox** with unread badges and the
+  triggering timeframe, and optionally in macOS Notification Center.
 
 ---
 
@@ -77,12 +164,12 @@ and the local `claude` / `codex` / `opencode` CLIs.
    Faraz (WTI, DXY) ───────┤  ─────────────►    │  ┌────────────────────┐  │
    ForexFactory calendar ──┘                    │  │  GRDB SQLite       │  │
                                                 │  │  ohlc, snapshots,  │  │
-   cTrader desktop                              │  │  alerts, journal   │  │
-   ┌─────────────────────┐                      │  └────────────────────┘  │
-   │ HelixBridgeBot.cs   │ ── JSON / TCP ─────► │                          │
-   │ (XAU/USD ticks +    │   loopback :7878     │  Apple Charts            │
-   │  bar closes)        │                      │  + Indicators            │
-   └─────────────────────┘                      │                          │
+                                                │  │  alerts, journal   │  │
+                                                │  └────────────────────┘  │
+                                                │                          │
+                                                │  Apple Charts            │
+                                                │  + Indicators            │
+                                                │                          │
                                                 │  ┌────────────────────┐  │
    ~/.claude/bin/claude  ◄── stdin/stdout ───── │  │ AI/ClaudeEngine    │  │
    ~/.local/bin/codex    ◄── stdin/stdout ───── │  │ AI/CodexEngine     │  │
@@ -93,21 +180,22 @@ and the local `claude` / `codex` / `opencode` CLIs.
 
 - **Fetching** (`GoldMonitorMac/Fetching/`) — concurrent HTTP / WebSocket
   sources, each independently retryable. Results land in GRDB.
-- **Scheduling** (`GoldMonitorMac/Scheduling/`) — `YahooScheduler` (10s),
-  `CTraderScheduler`, snapshot fetchers. Each runs on its own timer.
+- **Scheduling** (`GoldMonitorMac/Scheduling/`) — `YahooScheduler` (10s
+  ticks + history bootstrap), Faraz WS, snapshot fetchers.
 - **Storage** (`GoldMonitorMac/Storage/`) — `GRDB.DatabasePool` under
   `~/Library/Application Support/HelixTrading/`. Writes serialise; reads
   parallelise.
+- **Indicators** (`GoldMonitorMac/Features/Dashboard/`) — pure functions
+  over `[Candle]`, memoized per-pane in `ChartDerivedCache` so pan/zoom
+  never recomputes.
 - **AI engines** (`GoldMonitorMac/AI/`) — spawn the local CLI binary as a
-  subprocess, write the prompt to stdin, parse the streaming NDJSON output as
-  it arrives. No HTTP, no API keys in this codebase.
-- **UI** (`GoldMonitorMac/Features/`) — SwiftUI views. Dashboard owns the
-  chart; AIAnalysis owns the report column; everything else is its own
-  feature folder.
+  subprocess and stream its output. No HTTP, no keys in the codebase.
+- **UI** (`GoldMonitorMac/Features/`) — SwiftUI. Dashboard owns the chart;
+  everything else is its own feature folder.
 
-See [`AGENTS.md`](AGENTS.md) for the detailed architecture notes, persistence
-patterns, and gotchas for contributors — it is the single working brief for
-this repository.
+See [`AGENTS.md`](AGENTS.md) for the detailed architecture notes,
+persistence patterns, and contributor gotchas — it is the single working
+brief for this repository.
 
 ---
 
@@ -124,7 +212,6 @@ this repository.
 | **`codex` CLI** *(optional)* | drives the Codex engine | `npm i -g @openai/codex` |
 | **`opencode` CLI** *(optional)* | drives the OpenCode engine (or point it at a remote server) | `npm i -g opencode-ai` |
 | **TwelveData API key** *(optional)* | live crypto stream (free tier OK) | Wizard, on first launch |
-| **cTrader Desktop** *(optional)* | broker-grade XAU/USD ticks | Wizard + see `CTraderBridge/` |
 
 You only need **Xcode + Homebrew** to start. `./run.sh` bootstraps the rest.
 
@@ -138,38 +225,20 @@ cd HelixTradingAssistant
 ./run.sh
 ```
 
-That's it. The script will:
-
-1. Verify (and install if needed) Homebrew, xcodegen, Node.js.
-2. Install the `claude` CLI globally (`npm i -g @anthropic-ai/claude-code`).
-3. Install the `codex` CLI globally (`npm i -g @openai/codex`).
-4. Regenerate `HelixTradingApp.xcodeproj` from `project.yml`.
-5. Build into `./build/` (predictable DerivedData path).
-6. Launch the app.
-
-On first launch, the **setup wizard** walks you through:
-
-1. **Welcome** — permission ask.
-2. **Claude** — auto-detects the `claude` binary; if found, you're done. If
-   not, follow the on-screen install instructions.
-3. **Data sources** — paste your TwelveData key (free tier at
-   <https://twelvedata.com>) and confirm the ForexFactory calendar URL.
-4. **cTrader** *(optional)* — toggle the bridge and choose a loopback port,
-   then follow [`CTraderBridge/README.md`](CTraderBridge/README.md) to install
-   the cBot.
-5. **Done** — you're trading. Re-runnable from Settings.
-
-You can re-run the wizard any time from **Settings → Run setup wizard**.
+The script verifies (and installs if needed) Homebrew, xcodegen, and
+Node.js, installs the AI CLIs, regenerates the Xcode project from
+`project.yml`, builds, and launches. On first launch the **setup wizard**
+walks you through detecting the `claude` binary and entering your
+TwelveData key (free tier at <https://twelvedata.com>). Re-run it any time
+from **Settings → Run setup wizard**.
 
 ---
 
 ## iPad app
 
-A native iPad target (`HelixTradingAppiPad`) shares the same data model, AI
-engines, indicators, and storage as the Mac app. It runs independently — no
-Mac required at runtime.
-
-### Building for iPad
+A native iPad target (`HelixTradingAppiPad`) shares the same data model,
+indicator engines, and storage as the Mac app, with touch-sized drawing
+handles and a `NavigationSplitView` shell.
 
 ```bash
 # Simulator
@@ -179,53 +248,28 @@ Mac required at runtime.
 DEVELOPMENT_TEAM=<your-team-id> ./run.sh --ipad
 ```
 
-`./run.sh --ipad` lists all iPad simulators (with iOS version and boot state)
-and connected real devices. Pick a number and it builds, installs, and launches.
-
-### iPad-specific design
-
-| Feature | iPad |
-|---|---|
-| Navigation | `NavigationSplitView` sidebar (Dashboard, News, Portfolio, Journal, Inbox, Settings) |
-| Pair selection | Dropdown menu in dashboard header (replaces sidebar pair list) |
-| Chart controls | Full toolbar: timeframe, chart type, indicators, layers, drawings, replay, alerts, AI analyze, debug, fullscreen |
-| Fullscreen | Single chart and grid pane fullscreen — same chromeless chartCard |
-| AI engines | OpenCode (remote mode) — Claude/Codex CLI engines are macOS-only |
-| Data syncing | Only the selected pair is synced (`focusedPairID`), reducing CPU usage |
-| Grid charts | Hidden panes skip data loading entirely |
-
-### Requirements
-
-- **iOS 16+** (Apple Charts baseline)
-- **Xcode 15+**
-- A development team for real device deployment (free Apple ID works)
+iPad specifics: only the selected pair syncs live data (saves CPU),
+hidden grid panes skip loading entirely, and the AI engine is OpenCode in
+remote mode — the Claude/Codex CLI engines are macOS-only.
 
 ---
 
 ## Manual build (without `run.sh`)
 
 ```bash
-# One-time deps
 brew install xcodegen node
 npm i -g @anthropic-ai/claude-code @openai/codex
 
-# Build
 xcodegen generate
 open HelixTradingApp.xcodeproj   # then ⌘R in Xcode
 ```
 
-Or from CLI:
+Or from the CLI:
 
 ```bash
-xcodebuild \
-  -project HelixTradingApp.xcodeproj \
-  -scheme HelixTradingApp \
-  -configuration Debug \
-  -destination 'platform=macOS' \
-  build
+xcodebuild -project HelixTradingApp.xcodeproj -scheme HelixTradingApp \
+  -configuration Debug -destination 'platform=macOS' build
 ```
-
----
 
 ## `run.sh` flags
 
@@ -241,12 +285,9 @@ xcodebuild \
 ./run.sh --skip-deps    # don't try to install brew/npm tooling
 ```
 
-Combine freely: `./run.sh --clean --release --no-launch`.
-
-DMG output lands in `./dist/HelixTradingApp-<version>.dmg`, with the version
-read straight out of the built app's `Info.plist`. The image is ad-hoc signed
-at most — notarisation needs a Developer ID and `xcrun notarytool`, so on
-another Mac the first launch requires right-click → **Open**.
+DMG output lands in `./dist/HelixTradingApp-<version>.dmg`. The image is
+ad-hoc signed at most — on another Mac the first launch requires
+right-click → **Open**.
 
 ---
 
@@ -254,11 +295,9 @@ another Mac the first launch requires right-click → **Open**.
 
 All user-configurable values live in **one** place:
 [`GoldMonitorMac/App/DataSourceConfig.swift`](GoldMonitorMac/App/DataSourceConfig.swift),
-persisted to `UserDefaults` under `dataSourceConfig.v1`. Secrets (Anthropic
-API key, SOCKS5 password, backend password) go into the **macOS Keychain**
-via [`UI/KeychainHelper.swift`](GoldMonitorMac/UI/KeychainHelper.swift).
-
-**There are no hardcoded keys in this repo.** The open-source build ships
+persisted to `UserDefaults`. Secrets go into the **macOS Keychain** via
+[`UI/KeychainHelper.swift`](GoldMonitorMac/UI/KeychainHelper.swift).
+**There are no hardcoded keys in this repo** — the open-source build ships
 empty and asks you to fill the wizard.
 
 ---
@@ -269,19 +308,17 @@ empty and asks you to fill the wizard.
 .
 ├── GoldMonitorMac/          # Swift sources (directory kept for git history;
 │   ├── App/                 #   the bundle is "HelixTradingApp")
-│   ├── AI/                  # AIEngine protocol, Claude/Codex engines, prompts
+│   ├── AI/                  # AIEngine protocol, Claude/Codex/OpenCode engines
 │   ├── Features/            # Dashboard, AIAnalysis, AutoTrader, Journal,
 │   │                        # Alerts, Inbox, News, Portfolio, Settings,
 │   │                        # Sidebar, Wizard
-│   ├── Fetching/            # Yahoo, TwelveData, ForexFactory, cTrader, proxy
-│   ├── Models/              # Snapshot, Candle, TradingPair, MarketCalendar
-│   ├── Resources/           # AppIcon, AccentColor
-│   ├── Scheduling/          # FetchScheduler, YahooScheduler, NewsStore
+│   ├── Fetching/            # Yahoo, TwelveData, Faraz, ForexFactory, proxy
+│   ├── Models/              # Candle, TradingPair, ContractSpec, calendar
+│   ├── Scheduling/          # YahooScheduler, snapshot + news fetchers
 │   ├── Storage/             # GRDB pool, schema, repos
-│   └── UI/                  # Card, buttons, KeychainHelper, WindowConfigurator
+│   └── UI/                  # Card, buttons, KeychainHelper
 ├── GoldMonitorMacTests/     # XCTest suite (indicators, setups, sizing)
 ├── ipadapp/                 # iPad-only views (shares the Mac sources)
-├── CTraderBridge/           # cTrader cBot (C#) + setup README
 ├── Tools/                   # HelixIconGen.swift — regenerates app icons
 ├── project.yml              # xcodegen spec (source of truth for .xcodeproj)
 ├── run.sh                   # one-shot bootstrap / build / launch / package
@@ -297,28 +334,18 @@ empty and asks you to fill the wizard.
 
 ## Contributing
 
-PRs welcome. A few ground rules:
+PRs welcome. Ground rules:
 
-- **`project.yml` is the source of truth.** Don't commit `.xcodeproj/`.
-  Always run `xcodegen generate` after changing `project.yml`.
+- **`project.yml` is the source of truth.** Don't commit `.xcodeproj/`;
+  run `xcodegen generate` after changing it.
 - **No new SPM deps without discussion.** Current deps are GRDB and
   swift-markdown-ui only.
-- **macOS 13 baseline.** No `@Observable`, no `symbolEffect`, no
-  `chartScrollableAxes`, no `Stepper(value:in:step:format:)`. See
-  [`AGENTS.md`](AGENTS.md) for the full list of gotchas.
-- **`xcodebuild build` before opening a PR** — and confirm the app launches.
-- **No hardcoded secrets, ever.** Everything user-configurable goes through
-  `DataSourceConfig` + `KeychainHelper`.
-
----
-
-## Tech stack
-
-- **Swift 5.9** / **SwiftUI** / **Apple Charts** — UI
-- **GRDB 7** — SQLite persistence
-- **MarkdownUI** — rendering AI analysis output
-- **Claude Code CLI** / **OpenAI Codex CLI** — AI backends
-- **xcodegen** — declarative `.xcodeproj` generation
+- **macOS 13 / iOS 16 baseline.** No `@Observable`, no `symbolEffect`,
+  no `chartScrollableAxes`. See [`AGENTS.md`](AGENTS.md) for the full
+  gotcha list.
+- **`xcodebuild build` before opening a PR** — and confirm the app
+  launches.
+- **No hardcoded secrets, ever.**
 
 ---
 
@@ -330,10 +357,10 @@ PRs welcome. A few ground rules:
 
 ## Disclaimer
 
-This software is provided "as is" for research and educational purposes only.
-The author is not a registered financial advisor. Trade ideas generated by the
-AI engines are based on technical patterns in price data and **carry no
-guarantee of accuracy or profitability**. Past performance does not predict
-future results. Trading carries risk of loss; you can lose more than you
-deposit. Do your own research, manage your own risk, and never trade with
-money you can't afford to lose.
+This software is provided "as is" for research and educational purposes
+only. The author is not a registered financial advisor. Trade ideas
+generated by the AI engines are based on technical patterns in price data
+and **carry no guarantee of accuracy or profitability**. Past performance
+does not predict future results. Trading carries risk of loss; you can
+lose more than you deposit. Do your own research, manage your own risk,
+and never trade with money you can't afford to lose.
