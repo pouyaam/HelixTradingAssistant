@@ -74,8 +74,8 @@ targets:
       properties:
         CFBundleName: HelixTrading
         CFBundleDisplayName: Helix Trading App
-        CFBundleShortVersionString: "1.4"
-        CFBundleVersion: "7"
+        CFBundleShortVersionString: "1.5"
+        CFBundleVersion: "8"
         LSMinimumSystemVersion: "13.0"
         NSHumanReadableCopyright: "Copyright © 2026 Helix Trading Club. All rights reserved."
         NSAppTransportSecurity:
