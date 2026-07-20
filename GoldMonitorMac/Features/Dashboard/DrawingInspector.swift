@@ -25,6 +25,15 @@ struct DrawingInspector: View {
     /// as clicking empty chart space.
     let onDismiss: () -> Void
 
+    // Local edit buffers for the numeric fields. Binding the TextFields
+    // straight at the model would round-trip every keystroke through
+    // the store, and a rejected intermediate value (an empty field
+    // mid-retype) would immediately snap the text back — making the
+    // field impossible to clear. Drafts decouple what's on screen from
+    // what's committed.
+    @State private var balanceDraft: String = ""
+    @State private var riskDraft: String = ""
+
     var body: some View {
         HStack(spacing: Theme.Spacing.md) {
             kindBadge
@@ -166,7 +175,7 @@ struct DrawingInspector: View {
             Image(systemName: "dollarsign.circle")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(Theme.Color.textMuted)
-            TextField("Balance", text: balanceText)
+            TextField("Balance", text: $balanceDraft)
                 .textFieldStyle(.plain)
                 .font(.system(size: 10, weight: .medium).monospacedDigit())
                 .foregroundStyle(Theme.Color.textPrimary)
@@ -178,7 +187,7 @@ struct DrawingInspector: View {
                 )
                 .help("Account balance this position sizes against")
 
-            TextField("Risk", text: riskText)
+            TextField("Risk", text: $riskDraft)
                 .textFieldStyle(.plain)
                 .font(.system(size: 10, weight: .medium).monospacedDigit())
                 .foregroundStyle(Theme.Color.textPrimary)
@@ -193,33 +202,50 @@ struct DrawingInspector: View {
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(Theme.Color.textMuted)
         }
+        .onAppear { syncDrafts() }
+        // Only re-seed when the inspector switches drawings. Syncing on
+        // every drawing change would fight the user's typing, since each
+        // committed keystroke hands back a new drawing value.
+        .onChange(of: drawing.id) { _ in syncDrafts() }
+        .onChange(of: balanceDraft) { commitBalance($0) }
+        .onChange(of: riskDraft) { commitRisk($0) }
     }
 
-    /// Text bindings that only commit parseable numbers — a partially
-    /// typed value (empty field, lone "-") leaves the stored setting
-    /// alone rather than writing a zero that would blank the metrics.
-    private var balanceText: Binding<String> {
-        Binding<String>(
-            get: { drawing.accountBalance.map { String(format: "%.0f", $0) } ?? "" },
-            set: { raw in
-                guard let v = Double(raw.replacingOccurrences(of: ",", with: ".")), v > 0 else { return }
-                var copy = drawing
-                copy.accountBalance = v
-                onChange(copy)
-            }
-        )
+    /// Reset the drafts from the drawing. Called when the inspector
+    /// first appears and whenever it switches to a different drawing —
+    /// but never while the user is mid-edit on the same one, which is
+    /// what lets the field sit empty between clearing and retyping.
+    private func syncDrafts() {
+        balanceDraft = drawing.accountBalance.map { String(format: "%.0f", $0) } ?? ""
+        riskDraft    = drawing.riskPercent.map { Self.trim($0) } ?? ""
     }
 
-    private var riskText: Binding<String> {
-        Binding<String>(
-            get: { drawing.riskPercent.map { String(format: "%.2g", $0) } ?? "" },
-            set: { raw in
-                guard let v = Double(raw.replacingOccurrences(of: ",", with: ".")), v > 0 else { return }
-                var copy = drawing
-                copy.riskPercent = v
-                onChange(copy)
-            }
-        )
+    /// Commit a draft only when it parses to a positive number. An
+    /// empty field or a lone "-" is a legitimate intermediate state
+    /// while typing, so it leaves the stored setting untouched rather
+    /// than writing a zero that would blank the metrics.
+    private func commitBalance(_ raw: String) {
+        guard let v = Double(raw.replacingOccurrences(of: ",", with: ".")), v > 0,
+              v != drawing.accountBalance
+        else { return }
+        var copy = drawing
+        copy.accountBalance = v
+        onChange(copy)
+    }
+
+    private func commitRisk(_ raw: String) {
+        guard let v = Double(raw.replacingOccurrences(of: ",", with: ".")), v > 0,
+              v != drawing.riskPercent
+        else { return }
+        var copy = drawing
+        copy.riskPercent = v
+        onChange(copy)
+    }
+
+    /// "1" not "1.0", "1.5" stays "1.5" — `%g` without the exponent
+    /// surprises `%.2g` produces for values like 0.25.
+    private static func trim(_ v: Double) -> String {
+        v == v.rounded() ? String(format: "%.0f", v) : String(v)
     }
 
     /// Slider binding for the line width. Goes through the same

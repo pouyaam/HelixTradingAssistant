@@ -1586,7 +1586,28 @@ struct ChartView: View {
         guard let barX: Double = proxy.value(atX: xInPlot),
               let priceY: Double = proxy.value(atY: yInPlot)
         else { return nil }
-        let idx = max(0, min(candles.count - 1, Int(barX.rounded())))
+        // Past either end of the series, project the date off the bar
+        // spacing instead of clamping. Clamping pinned anything dragged
+        // into the empty right margin onto the newest candle, so a
+        // drawing could never be placed ahead of price — the usual spot
+        // for a planned position.
+        let lastIdx = candles.count - 1
+        if let step = barIntervalSeconds {
+            if barX > Double(lastIdx) {
+                let ahead = barX - Double(lastIdx)
+                return DrawingPoint(
+                    date: candles[lastIdx].bucketStart.addingTimeInterval(ahead * step),
+                    price: priceY
+                )
+            }
+            if barX < 0 {
+                return DrawingPoint(
+                    date: candles[0].bucketStart.addingTimeInterval(barX * step),
+                    price: priceY
+                )
+            }
+        }
+        let idx = max(0, min(lastIdx, Int(barX.rounded())))
         return DrawingPoint(date: candles[idx].bucketStart, price: priceY)
     }
 
@@ -1596,9 +1617,45 @@ struct ChartView: View {
     /// to 4h (it lands on whichever 4h bucket contains the same moment).
     /// Uses binary search — O(log n) instead of the prior O(n) linear scan.
     /// Returns nil for empty series.
+    /// Seconds between consecutive bars, used to project dates past
+    /// either end of the series.
+    ///
+    /// Takes the *median* of the recent spacings rather than the last
+    /// one: a weekend or session gap sits at the end of the series
+    /// often enough that the final diff is regularly 40× the true bar
+    /// width, which would fling anything placed in the right margin far
+    /// into the future.
+    private var barIntervalSeconds: TimeInterval? {
+        let n = candles.count
+        guard n >= 2 else { return nil }
+        var diffs: [TimeInterval] = []
+        diffs.reserveCapacity(min(n - 1, 20))
+        for i in max(1, n - 20)..<n {
+            let d = candles[i].bucketStart.timeIntervalSince(candles[i - 1].bucketStart)
+            if d > 0 { diffs.append(d) }
+        }
+        guard !diffs.isEmpty else { return nil }
+        diffs.sort()
+        return diffs[diffs.count / 2]
+    }
+
     private func barIndex(forDate date: Date) -> Double? {
         guard !candles.isEmpty else { return nil }
         let ts = date.timeIntervalSince1970
+        // Mirror of `drawingPoint`: a date outside the series maps to a
+        // fractional index off the end rather than snapping to the edge
+        // bar, so a drawing anchored ahead of price stays where it was
+        // put instead of collapsing onto the last candle.
+        if let step = barIntervalSeconds {
+            let lastTS = candles[candles.count - 1].bucketStart.timeIntervalSince1970
+            if ts > lastTS {
+                return Double(candles.count - 1) + (ts - lastTS) / step
+            }
+            let firstTS = candles[0].bucketStart.timeIntervalSince1970
+            if ts < firstTS {
+                return (ts - firstTS) / step
+            }
+        }
         var lo = 0
         var hi = candles.count - 1
         while lo < hi {
@@ -4236,14 +4293,14 @@ struct ChartView: View {
     @ViewBuilder
     private func positionLabel(for d: ChartDrawing) -> some View {
         let metrics = d.positionMetrics(spec: contractSpec)
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 4) {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 5) {
                 Text(d.kind.isLong ? "LONG" : "SHORT")
-                    .font(.system(size: 8, weight: .heavy))
+                    .font(.system(size: 12, weight: .heavy))
                     .foregroundStyle(d.kind.isLong ? DrawingPalette.profit : DrawingPalette.loss)
                 if let m = metrics {
                     Text(String(format: "%.3f lots", m.lots))
-                        .font(.system(size: 8, weight: .semibold).monospacedDigit())
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
                         .foregroundStyle(Theme.Color.textPrimary)
                 }
             }
@@ -4260,20 +4317,20 @@ struct ChartView: View {
                             .foregroundStyle(Theme.Color.textMuted)
                     }
                 }
-                .font(.system(size: 8, weight: .medium).monospacedDigit())
+                .font(.system(size: 11, weight: .medium).monospacedDigit())
                 // A size no broker will accept is worth saying out loud
                 // rather than leaving the trader to notice the decimals.
                 if m.belowMinLot {
                     Text("below min lot")
-                        .font(.system(size: 7, weight: .semibold))
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Theme.Color.warn)
                 }
             }
         }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 2)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
         .background(
-            RoundedRectangle(cornerRadius: 3)
+            RoundedRectangle(cornerRadius: 4)
                 .fill(Theme.Color.surfaceMax.opacity(0.85))
         )
     }

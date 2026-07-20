@@ -845,8 +845,46 @@ struct ChartViewiPad: View {
         guard let barX: Double = proxy.value(atX: xInPlot),
               let priceY: Double = proxy.value(atY: yInPlot)
         else { return nil }
-        let idx = max(0, min(candles.count - 1, Int(barX.rounded())))
+        // Past either end of the series, project the date off the bar
+        // spacing instead of clamping — otherwise anything dragged into
+        // the empty right margin pins onto the newest candle and a
+        // drawing can never sit ahead of price.
+        let lastIdx = candles.count - 1
+        if let step = barIntervalSeconds {
+            if barX > Double(lastIdx) {
+                let ahead = barX - Double(lastIdx)
+                return DrawingPoint(
+                    date: candles[lastIdx].bucketStart.addingTimeInterval(ahead * step),
+                    price: priceY
+                )
+            }
+            if barX < 0 {
+                return DrawingPoint(
+                    date: candles[0].bucketStart.addingTimeInterval(barX * step),
+                    price: priceY
+                )
+            }
+        }
+        let idx = max(0, min(lastIdx, Int(barX.rounded())))
         return DrawingPoint(date: candles[idx].bucketStart, price: priceY)
+    }
+
+    /// Seconds between consecutive bars, used to project dates past
+    /// either end of the series. Median of the recent spacings so a
+    /// trailing weekend/session gap doesn't fling right-margin
+    /// drawings far into the future.
+    private var barIntervalSeconds: TimeInterval? {
+        let n = candles.count
+        guard n >= 2 else { return nil }
+        var diffs: [TimeInterval] = []
+        diffs.reserveCapacity(min(n - 1, 20))
+        for i in max(1, n - 20)..<n {
+            let d = candles[i].bucketStart.timeIntervalSince(candles[i - 1].bucketStart)
+            if d > 0 { diffs.append(d) }
+        }
+        guard !diffs.isEmpty else { return nil }
+        diffs.sort()
+        return diffs[diffs.count / 2]
     }
 
     /// Finalise the in-flight drawing and hand it to the dashboard.
@@ -3053,14 +3091,14 @@ struct ChartViewiPad: View {
     @ViewBuilder
     private func positionLabel(for d: ChartDrawing) -> some View {
         let metrics = d.positionMetrics(spec: contractSpec)
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 4) {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
                 Text(d.kind.isLong ? "LONG" : "SHORT")
-                    .font(.system(size: 9, weight: .heavy))
+                    .font(.system(size: 13, weight: .heavy))
                     .foregroundStyle(d.kind.isLong ? DrawingPalette.profit : DrawingPalette.loss)
                 if let m = metrics {
                     Text(String(format: "%.3f lots", m.lots))
-                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
                         .foregroundStyle(Theme.Color.textPrimary)
                 }
             }
@@ -3077,18 +3115,18 @@ struct ChartViewiPad: View {
                             .foregroundStyle(Theme.Color.textMuted)
                     }
                 }
-                .font(.system(size: 9, weight: .medium).monospacedDigit())
+                .font(.system(size: 12, weight: .medium).monospacedDigit())
                 if m.belowMinLot {
                     Text("below min lot")
-                        .font(.system(size: 8, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.Color.warn)
                 }
             }
         }
-        .padding(.horizontal, 5)
-        .padding(.vertical, 3)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
         .background(
-            RoundedRectangle(cornerRadius: 4)
+            RoundedRectangle(cornerRadius: 5)
                 .fill(Theme.Color.surfaceMax.opacity(0.85))
         )
     }
@@ -3666,6 +3704,19 @@ struct ChartViewiPad: View {
     private func barIndex(forDate date: Date) -> Double? {
         guard !candles.isEmpty else { return nil }
         let ts = date.timeIntervalSince1970
+        // Mirror of `drawingPoint`: dates outside the series resolve to a
+        // fractional index off the end rather than snapping to the edge
+        // bar, so drawings placed ahead of price stay put.
+        if let step = barIntervalSeconds {
+            let lastTS = candles[candles.count - 1].bucketStart.timeIntervalSince1970
+            if ts > lastTS {
+                return Double(candles.count - 1) + (ts - lastTS) / step
+            }
+            let firstTS = candles[0].bucketStart.timeIntervalSince1970
+            if ts < firstTS {
+                return (ts - firstTS) / step
+            }
+        }
         var lo = 0
         var hi = candles.count - 1
         while lo < hi {
