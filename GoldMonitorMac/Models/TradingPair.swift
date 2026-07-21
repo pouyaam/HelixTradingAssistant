@@ -78,6 +78,10 @@ extension TradingPair {
         // Dollar index — Faraz TVC_DXY live + history, Yahoo DX-Y.NYB
         // when the source toggle is off Faraz.
         .init(id: "dxy",      name: "US Dollar Index",  symbol: "DXY",  colorHex: "#22C55E", category: .indices),
+
+        // German DAX 30 — Faraz FXCM_GER30 live + history, Yahoo ^GDAXI
+        // when the source toggle is off Faraz.
+        .init(id: "ger30",    name: "Germany 30",       symbol: "GER30", colorHex: "#A855F7", category: .indices),
     ]
 
     /// Build the runtime `TradingPair` rows from the catalog. Prices

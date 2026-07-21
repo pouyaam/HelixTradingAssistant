@@ -741,14 +741,21 @@ struct ChartPaneView: View {
         guard let db = app.database else { candles = []; return }
         let pairID = pane.pairID
         let tf = pane.timeframe
+        // Clear before suspending on the read — otherwise the pane keeps
+        // showing the outgoing pair/TF's candles until the new ones land.
+        if !candles.isEmpty { candles = [] }
         let respectsWeekend = app.pairs.first(where: { $0.id == pairID })?.category != .crypto
         let result = await OHLCCandleLoader.loadAsync(
             repo: db.ohlcRepo, pairID: pairID, tf: tf,
             since: .distantPast, until: Date(), dropClosedDays: respectsWeekend
         )
         self.candles = result
-        self.xDomain = nil
-        self.yDomain = nil
+        // `load()` is keyed on pairID|timeframe, so reaching here always
+        // means the series underfoot changed. Re-frame to the new bars
+        // rather than just clearing the domains: a nil Y auto-fits over
+        // the overlays too, which lets a far-away indicator line from
+        // the new series squash the candles.
+        self.resetChart()
         self.setDrawingTool(.none)
         self.selectedDrawingID = nil
     }

@@ -58,6 +58,15 @@ struct DashboardView: View {
     /// so a pinned scale from one symbol doesn't strand the next one's
     /// candles off-screen.
     @State private var yDomain: ClosedRange<Double>? = nil
+    /// Set when the series underfoot is about to change (pair /
+    /// timeframe switch) and consumed by the next `reloadCandles()`
+    /// that produces bars. Nil-ing the domains at switch time isn't
+    /// enough on its own: a nil Y hands the axis back to the
+    /// *overlay-inclusive* auto-fit, so a far-away indicator or target
+    /// line from the freshly-loaded series can squash the candles into
+    /// a sliver. Deferring an explicit `resetChart()` until the bars
+    /// exist frames the new data the same way the Reset action does.
+    @State private var pendingChartReset: Bool = false
     /// User-tunable parameters for the oscillators (RSI period, MACD
     /// fast/slow/signal, etc.). Loaded from UserDefaults on init so
     /// settings stick across launches.
@@ -1248,6 +1257,7 @@ struct DashboardView: View {
             replay.exit()   // a replay anchored on the old pair's bars makes no sense here
             xDomain = nil   // new pair ⇒ drop any pinned window
             yDomain = nil   // …and any manual price scale
+            pendingChartReset = true   // …and re-frame once its bars land
             if app.journalChartEntry?.pairID != app.selectedPairID { app.journalChartEntry = nil }
             srLevels = .init(support: [], resistance: [])  // overlays are per-pair
             fvgZones = []
@@ -1255,6 +1265,13 @@ struct DashboardView: View {
             taScenario = nil
             taAltScenario = nil
             selectedDrawingID = nil   // drawing belonged to the prior pair
+            // Drop the outgoing pair's bars *synchronously*, before the
+            // load below suspends. Otherwise the chart keeps rendering
+            // the previous symbol's candles for the duration of the
+            // SQLite read — the user sees the old chart, then a visible
+            // snap once the new series lands and re-frames.
+            candles = []
+            recomputeTotalVolume()
             await reloadCandles()
             warmHistory()   // backfill deep history for this pair (skeleton while it loads)
         }
@@ -1287,6 +1304,7 @@ struct DashboardView: View {
             if syncToFullscreenPane(\.timeframe, newValue) { return }
             xDomain = nil   // different bucket size ⇒ refit to data
             yDomain = nil   // drop the manual price scale too
+            pendingChartReset = true   // …and re-frame once its bars land
             alertStore.timeframeLabel = newValue.rawValue
             warmHistory()   // ensure deep series is filled, then reloads candles
         }
@@ -1891,7 +1909,12 @@ struct DashboardView: View {
                 // partial chart stays readable while deeper history
                 // fills in behind it.
                 .overlay {
-                    if isBackfillingCurrentTF && candles.isEmpty {
+                    // `isLoading` covers the gap a symbol switch opens:
+                    // its bars are cleared up front, and the SQLite read
+                    // that replaces them lands before any backfill has
+                    // been marked in-flight — without it the plot is
+                    // blank rather than skeletoned for that moment.
+                    if (isBackfillingCurrentTF || isLoading) && candles.isEmpty {
                         ChartSkeleton()
                             .padding(Theme.Spacing.sm)
                             .transition(.opacity)
@@ -3266,6 +3289,17 @@ struct DashboardView: View {
         xDomain = (center - newHalf) ... (center + newHalf)
     }
 
+    /// Fire the deferred re-frame owed to a pair / timeframe switch,
+    /// if any. No-op until bars actually exist — an empty series would
+    /// reset to a placeholder domain and leave the real data unframed
+    /// when it arrives a moment later, so the flag survives until a
+    /// load produces candles.
+    private func consumePendingChartReset() {
+        guard pendingChartReset, !candles.isEmpty else { return }
+        pendingChartReset = false
+        resetChart()
+    }
+
     /// TradingView-style reset: jump to the most-recent candles at a
     /// comfortable zoom (~150 bars) and clear any manual Y-axis pin so
     /// the price scale auto-fits the visible window.
@@ -3486,12 +3520,23 @@ struct DashboardView: View {
         // "Modifying state during view update" and unnecessary redraws.
         guard result != self.candles else {
             isLoading = false
+            // The series is already what the switch asked for (the new
+            // pair/TF happened to be cached) — still owe it a re-frame.
+            self.consumePendingChartReset()
             return
         }
         self.candles = result
         recomputeTotalVolume()
         self.isLoading = false
+        // Order matters: `followLatestIfPinned` compares against the
+        // *previous* series' bar count, which is meaningless across a
+        // pair/timeframe switch. Letting it run first means it sees the
+        // still-nil domain and bails, and only then does the reset pin
+        // a window framed to the new bars. Later (backfill) reloads
+        // find the flag already cleared and edge-track that window
+        // normally.
         self.followLatestIfPinned(priorCount: priorCount, newCount: result.count)
+        self.consumePendingChartReset()
         guard !replay.isActive else { return }
         if let r = Oscillators.rsi(result, period: oscillatorConfig.rsiPeriod).last?.value {
             let livePeek = yahoo.latestPrices[pairID]

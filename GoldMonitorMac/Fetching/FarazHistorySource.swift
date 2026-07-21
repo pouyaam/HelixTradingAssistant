@@ -24,6 +24,7 @@ enum FarazHistorySource {
         "ounce": "XAU_USD",
         "wti":   "WTICO_USD",
         "dxy":   "TVC_DXY",
+        "ger30": "FXCM_GER30",
         "btc":   "BTCUSDT",
         "sol":   "SOLUSDT",
         "eth":   "ETHUSDT",

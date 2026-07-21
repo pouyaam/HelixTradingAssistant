@@ -641,6 +641,11 @@ private struct ChartPlotiPad: View {
     @State private var htfChochZones: [ChangeOfCharacter.DatedZone] = []
     @State private var xDomain: ClosedRange<Double>? = nil
     @State private var yDomain: ClosedRange<Double>? = nil
+    /// Owed re-frame after a pair / timeframe switch, consumed by the
+    /// next `reloadCandles()` that yields bars. Mirrors the Mac
+    /// dashboard — see `DashboardView.pendingChartReset` for why the
+    /// reset is deferred rather than applied at switch time.
+    @State private var pendingChartReset: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -716,6 +721,15 @@ private struct ChartPlotiPad: View {
             }
         }
         .task(id: "\(pairID)|\(timeframe.rawValue)|\(reloadToken)") {
+            // Keyed on pair + timeframe, so every run means the series
+            // underfoot changed — owe the chart a re-frame once bars land.
+            xDomain = nil
+            yDomain = nil
+            pendingChartReset = true
+            // No pre-clear here on purpose: `loadCandles` is a synchronous
+            // read, so the swap is atomic from the view's perspective and
+            // the old symbol's bars are never shown under the new one.
+            // Clearing first would only add a blank frame at the suspension.
             await reloadCandles()
             warmHistory()
         }
@@ -755,6 +769,16 @@ private struct ChartPlotiPad: View {
         ].joined(separator: "|")
     }
 
+    /// Fire the re-frame owed to a pair / timeframe switch, if any.
+    /// Waits for a load that actually produced bars — resetting on an
+    /// empty series would frame a placeholder and leave the real data
+    /// unframed when it arrives from the backfill.
+    private func consumePendingChartReset() {
+        guard pendingChartReset, !candles.isEmpty else { return }
+        pendingChartReset = false
+        resetChart()
+    }
+
     /// Reset to the default recent-bars window with the price scale
     /// framed to the *candles* (not indicators/overlays), matching the
     /// Mac chart's Reset and the chart's own double-tap.
@@ -774,10 +798,12 @@ private struct ChartPlotiPad: View {
         // "Modifying state during view update" and unnecessary redraws.
         guard loaded != candles else {
             candleCount = loaded.count
+            consumePendingChartReset()
             return
         }
         candles = loaded
         candleCount = candles.count
+        consumePendingChartReset()
         await reloadHTFChoch()
     }
 

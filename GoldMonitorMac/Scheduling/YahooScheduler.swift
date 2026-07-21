@@ -179,6 +179,8 @@ final class YahooScheduler: ObservableObject {
               respectsWeekend: true,  goldAPIFallback: false),
         .init(pairID: "dxy",   yahooSymbol: "DX-Y.NYB", twelveDataSymbol: nil,
               respectsWeekend: true,  goldAPIFallback: false),
+        .init(pairID: "ger30", yahooSymbol: "^GDAXI",  twelveDataSymbol: nil,
+              respectsWeekend: true,  goldAPIFallback: false),
     ]
 
     /// Reverse-lookup helper: Twelve Data symbol → internal pair id.
