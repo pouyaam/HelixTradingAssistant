@@ -91,6 +91,8 @@ struct DashboardView: View {
     /// three dashed lines + a bias capsule. Pair-scoped, cleared on
     /// pair change.
     @State private var taScenario: PromptBuilder.TAScenario? = nil
+    /// Temporary hover preview scenario driven by Strategy Sentinel Radar card hovering
+    @State private var hoverRadarScenario: PromptBuilder.TAScenario? = nil
     /// Optional alternative trade plan from the same TA run. Same
     /// shape as `taScenario`; ChartView draws it with muted styling
     /// so the user can tell at a glance which lines belong to which
@@ -109,6 +111,13 @@ struct DashboardView: View {
     /// Network debug sheet open/close. Driven by the 🐞 toolbar
     /// button.
     @State private var showDebugLogSheet: Bool = false
+
+    /// Interactive Chart Trade Box state
+    @State private var showTradeBoxSheet: Bool = false
+    @State private var tradeBoxEntry: Double = 0.0
+    @State private var tradeBoxSL: Double = 0.0
+    @State private var tradeBoxTP: Double = 0.0
+    @State private var tradeBoxIsBuy: Bool = true
 
     /// Lives at the dashboard scope so AI analysis runs survive opening
     /// and closing the AnalysisSheet — the user can launch a run, dismiss
@@ -300,6 +309,21 @@ struct DashboardView: View {
             takeProfit: tp,
             stopLoss: sl
         )
+    }
+
+    private func handleRadarAlertSelection(_ alert: RadarAlert) {
+        self.taScenario = PromptBuilder.TAScenario(
+            bias: alert.direction == .buy ? .long : .short,
+            entry: alert.entryPrice,
+            takeProfit: alert.takeProfit,
+            stopLoss: alert.stopLoss
+        )
+        self.scenarioVisible = true
+        self.tradeBoxEntry = alert.entryPrice
+        self.tradeBoxSL = alert.stopLoss
+        self.tradeBoxTP = alert.takeProfit
+        self.tradeBoxIsBuy = (alert.direction == .buy)
+        self.showTradeBoxSheet = true
     }
 
     /// Refresh `nyLiveScenario`. Only mutating the @State when the plan
@@ -668,8 +692,8 @@ struct DashboardView: View {
     /// nothing selected. Cleared when the pair changes (the drawing
     /// wouldn't exist on the new pair anyway).
     @State private var selectedDrawingID: UUID? = nil
-    /// Convenience accessor — fullscreen mode is stored in AppState so
-    /// the sidebar can collapse when it flips on.
+    @AppStorage("dashboard.showSentinelRadar") private var showSentinelRadar: Bool = true
+    @State private var hoverCrosshairX: Double? = nil
     private var isChartFull: Bool { app.isChartFullscreen }
 
     /// One-word validity tag for the Layers popover. Computes
@@ -955,6 +979,18 @@ struct DashboardView: View {
             if let v = p["kijunLength"]    { oscillatorConfig.robKijunLength = Int(v.doubleValue) }
             if let v = p["senkouBLength"]  { oscillatorConfig.robSenkouBLength = Int(v.doubleValue) }
             if let v = p["displacement"]   { oscillatorConfig.robDisplacement = Int(v.doubleValue) }
+            if let v = p["stratEnabled"]     { oscillatorConfig.robStratEnabled = v.boolValue }
+            if let v = p["stratMinGrade"]    { oscillatorConfig.robStratMinGrade = v.stringValue }
+            if let v = p["stratConfirm"]     { oscillatorConfig.robStratConfirm = v.stringValue }
+            if let v = p["stratConfirmBars"] { oscillatorConfig.robStratConfirmBars = Int(v.doubleValue) }
+            if let v = p["stratEntry"]       { oscillatorConfig.robStratEntry = v.stringValue }
+            if let v = p["stratSLBuffer"]    { oscillatorConfig.robStratSLBuffer = v.doubleValue }
+            if let v = p["stratTP1R"]        { oscillatorConfig.robStratTP1R = v.doubleValue }
+            if let v = p["stratTargets"]     { oscillatorConfig.robStratTargets = v.stringValue }
+            if let v = p["stratTP2R"]        { oscillatorConfig.robStratTP2R = v.doubleValue }
+            if let v = p["stratGradeScale"]  { oscillatorConfig.robStratGradeScale = v.boolValue }
+            if let v = p["stratBreakers"]    { oscillatorConfig.robStratBreakers = v.boolValue }
+            if let v = p["stratMinRR"]       { oscillatorConfig.robStratMinRR = v.doubleValue }
         case .changeOfCharacter:
             if let v = p["swingLength"]   { oscillatorConfig.chochSwingLength = Int(v.doubleValue) }
             if let v = p["minSwingPct"]   { oscillatorConfig.chochMinSwingPct = v.doubleValue }
@@ -1166,6 +1202,27 @@ struct DashboardView: View {
                         pairHeader(pair)
                             .fixedSize(horizontal: false, vertical: true)
                             .layoutPriority(1)
+
+                        StrategyRadarHUDView(
+                            livePrice: currentLivePrice,
+                            onSelectAlert: { alert in
+                                self.handleRadarAlertSelection(alert)
+                            },
+                            onHoverAlert: { alert in
+                                let targetScenario: PromptBuilder.TAScenario? = alert.map { a in
+                                    PromptBuilder.TAScenario(
+                                        bias: a.direction == .buy ? .long : .short,
+                                        entry: a.entryPrice,
+                                        takeProfit: a.takeProfit,
+                                        stopLoss: a.stopLoss
+                                    )
+                                }
+                                if self.hoverRadarScenario != targetScenario {
+                                    self.hoverRadarScenario = targetScenario
+                                }
+                            }
+                        )
+                        .transition(.opacity)
                     }
                     // Both views stay mounted at all times — the inactive
                     // one collapses to zero frame + zero opacity instead of
@@ -1273,7 +1330,7 @@ struct DashboardView: View {
             candles = []
             recomputeTotalVolume()
             await reloadCandles()
-            warmHistory()   // backfill deep history for this pair (skeleton while it loads)
+            await warmHistoryAsync()   // backfill deep history for this pair (skeleton while it loads)
         }
         // Wire the AutoTraderEngine's headless candle loader once
         // the dashboard mounts. The engine needs this to fire
@@ -1283,6 +1340,7 @@ struct DashboardView: View {
             loadIndicators()
             loadOscillators()
             alertStore.attach(inbox: notificationInbox)
+            StrategySentinel.shared.notificationInbox = notificationInbox
             alertStore.timeframeLabel = timeframe.rawValue
             autoTrader.candleLoader = { [weak app = self.app] pairID, tf in
                 guard app != nil else { return [] }
@@ -1306,7 +1364,7 @@ struct DashboardView: View {
             yDomain = nil   // drop the manual price scale too
             pendingChartReset = true   // …and re-frame once its bars land
             alertStore.timeframeLabel = newValue.rawValue
-            warmHistory()   // ensure deep series is filled, then reloads candles
+            warmHistory()   // ensure deep series is filled, then reloads candles & evaluates sentinel
         }
         .onChange(of: userChartType) { newValue in
             _ = syncToFullscreenPane(\.chartType, newValue)
@@ -1471,6 +1529,14 @@ struct DashboardView: View {
             DispatchQueue.main.async {
                 self.recomputeTotalVolume()
                 self.refreshNYSetupScenario()
+                if let pairID = self.app.selectedPairID, let pair = self.app.pairs.first(where: { $0.id == pairID }) {
+                    StrategySentinel.shared.evaluateSymbol(
+                        pairID: pairID,
+                        symbol: pair.symbol,
+                        timeframe: self.timeframe.rawValue,
+                        candles: self.candles
+                    )
+                }
             }
         }
         .onChange(of: candles.last?.id) { _ in
@@ -1532,6 +1598,15 @@ struct DashboardView: View {
                 )
             }
         }
+        .sheet(isPresented: $showTradeBoxSheet) {
+            ChartTradeBoxOverlay(
+                isPresented: $showTradeBoxSheet,
+                entryPrice: $tradeBoxEntry,
+                stopLossPrice: $tradeBoxSL,
+                takeProfitPrice: $tradeBoxTP,
+                isBuy: $tradeBoxIsBuy
+            )
+        }
         // Outcome observer — whenever the trade store mutates, scan
         // for newly-terminal trades that carry a source history
         // entry ID and stamp the outcome back onto the entry. The
@@ -1571,47 +1646,56 @@ struct DashboardView: View {
 
     // ── Pair header ────────────────────────────────────────────────
     private func pairHeader(_ pair: TradingPair) -> some View {
-        Card(padding: Theme.Spacing.lg) {
-            HStack(alignment: .center, spacing: Theme.Spacing.lg) {
+        Card(padding: Theme.Spacing.sm) {
+            HStack(alignment: .center, spacing: Theme.Spacing.md) {
+                // Symbol Avatar Circle (TradingView style 24x24)
                 ZStack {
                     Circle().fill(pair.color.opacity(0.18))
-                    Circle().strokeBorder(pair.color.opacity(0.55), lineWidth: 1.5)
+                    Circle().strokeBorder(pair.color.opacity(0.55), lineWidth: 1.0)
                     Text(String(pair.symbol.prefix(2)))
-                        .font(.system(size: 14, weight: .bold))
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(pair.color)
                 }
-                .frame(width: 48, height: 48)
+                .frame(width: 24, height: 24)
 
-                VStack(alignment: .leading, spacing: 2) {
+                // Pair Name & Ticker (Inline)
+                HStack(spacing: 6) {
                     Text(pair.name)
-                        .font(.system(size: 20, weight: .bold))
+                        .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(Theme.Color.textPrimary)
                     Text(pair.symbol)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Theme.Color.surfaceHi)
                         .foregroundStyle(Theme.Color.textMuted)
+                        .cornerRadius(3)
+                }
+
+                // Live Price & Pct Change (Inline TradingView style)
+                HStack(spacing: 6) {
+                    Text(displayedPrice(pair))
+                        .font(.system(size: 15, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Theme.Color.textPrimary)
+
+                    Text(formatChange(pair))
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background((pair.changePercent >= 0 ? Theme.Color.success : Theme.Color.danger).opacity(0.18))
+                        .foregroundStyle(pair.changePercent >= 0 ? Theme.Color.success : Theme.Color.danger)
+                        .cornerRadius(4)
                 }
 
                 Spacer()
-
-                layoutPickerButton(pair)
 
                 fetchTimer(for: pair)
 
                 refreshButton
 
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text(displayedPrice(pair))
-                        .font(.system(size: 22, weight: .bold))
-                        .foregroundStyle(Theme.Color.textPrimary)
-                        .monospacedDigit()
-                    Text(formatChange(pair))
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(pair.changePercent >= 0
-                                          ? Theme.Color.success
-                                          : Theme.Color.danger)
-                        .monospacedDigit()
-                }
+                layoutPickerButton(pair)
             }
+            .padding(.horizontal, 4)
         }
     }
 
@@ -1703,49 +1787,39 @@ struct DashboardView: View {
     }
 
     private func chartCardContent(_ pair: TradingPair) -> some View {
-        VStack(spacing: Theme.Spacing.lg) {
+        VStack(spacing: Theme.Spacing.sm) {
             autoTraderStatusBanner(pair: pair)
             HStack(spacing: Theme.Spacing.md) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Price chart")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(Theme.Color.textPrimary)
-                        HStack(spacing: 6) {
-                            if !candles.isEmpty {
-                                Text("\(candles.count) candles · \(timeframe.label)")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(Theme.Color.textMuted)
-                            }
-                            TimeframeCountdown(timeframe: timeframe)
-                        }
-                    }
-                    Spacer()
-                    // Toolbar groups: actions · overlays/tools · format.
-                    // Zoom + reset + maximise moved out — they live on
-                    // the chart itself as a floating FAB now, freeing
-                    // the toolbar to be just selection + format.
-                    HStack(spacing: 6) {
-                        analyzeButton
-                        replayButton
-                        alertButton
-                        riskCalcButton
-                        autoTraderPill
-                        toolbarDivider
-                        indicatorMenu
-                        indicatorSettingsButton
-                        layersButton
-                        drawingToolbar
-                        toolbarDivider
-                        ChartTypeToggle(
-                            selected: $userChartType,
-                            isDisabled: false
-                        )
-                        TimeframeSelector(selected: $timeframe)
-                        toolbarDivider
-                        debugButton
-                        singleChartFullscreenButton
-                    }
+                HStack(spacing: 8) {
+                    Text("Price chart")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Theme.Color.textPrimary)
+                    TimeframeCountdown(timeframe: timeframe)
                 }
+                Spacer()
+                // Toolbar groups: actions · overlays/tools · format.
+                HStack(spacing: 6) {
+                    analyzeButton
+                    replayButton
+                    alertButton
+                    riskCalcButton
+                    autoTraderPill
+                    toolbarDivider
+                    indicatorMenu
+                    indicatorSettingsButton
+                    layersButton
+                    drawingToolbar
+                    toolbarDivider
+                    ChartTypeToggle(
+                        selected: $userChartType,
+                        isDisabled: false
+                    )
+                    TimeframeSelector(selected: $timeframe)
+                    toolbarDivider
+                    debugButton
+                    singleChartFullscreenButton
+                }
+            }
 
                 ChartView(
                     candles: candles,
@@ -1760,50 +1834,29 @@ struct DashboardView: View {
                     srLevels: srVisible ? srLevels : .init(support: [], resistance: []),
                     fvgZones: fvgVisible ? fvgZones : [],
                     supplyDemandZones: supplyDemandVisible ? supplyDemandZones : [],
-                    taScenario: scenarioVisible ? taScenario : nil,
+                    taScenario: hoverRadarScenario ?? (scenarioVisible ? taScenario : nil),
                     taAltScenario: altScenarioVisible ? taAltScenario : nil,
                     drawings: drawingStore.drawings(for: pair.id),
                     activeTool: activeDrawingTool,
                     contractSpec: .forPair(id: pair.id),
                     onCommitDrawing: { drawing in
                         drawingStore.add(drawing, for: pair.id)
-                        // TradingView-style: after a successful draw,
-                        // drop back to cursor so the next click doesn't
-                        // accidentally start another shape. The user
-                        // can re-arm the same tool from the toolbar if
-                        // they want a string of drawings.
                         activeDrawingTool = .none
-                        // Auto-select the freshly drawn shape so the
-                        // user can immediately tweak its color / line
-                        // width without hunting for it.
                         selectedDrawingID = drawing.id
                     },
                     onMoveDrawing: { drawing in
-                        // Same id ⇒ in-place replacement, no
-                        // duplication and no churn in the Layers
-                        // popover ordering.
                         drawingStore.update(drawing, for: pair.id)
                     },
                     selectedDrawingID: selectedDrawingID,
                     onSelectDrawing: { id in
                         selectedDrawingID = id
                     },
-                    // Open trades render as entry/TP/SL rules with a
-                    // fill marker. Closed trades stay in the store
-                    // (Layers popover history) but the chart drops
-                    // them — keeps active runs uncluttered.
                     trades: tradeStore.openVisibleTrades(for: pair.id),
-                    // Journal overlay — show the pinned entry's
-                    // entry/TP/SL lines when the user hit "Show on
-                    // chart" from JournalView. Scoped to the pair
-                    // so switching to a different pair hides it.
                     journalEntries: {
                         guard let je = app.journalChartEntry,
                               je.pairID == pair.id else { return [] }
                         return [je]
                     }(),
-                    // Suppress the live-price patch during replay — the
-                    // last revealed bar is historical, not "now".
                     livePrice: replay.isActive
                                ? nil
                                : (pair.usesLiveStream ? yahoo.latestPrices[pair.id] : pair.price),
@@ -1812,54 +1865,21 @@ struct DashboardView: View {
                     onPickReplayAnchor: { idx in
                         guard idx >= 0, idx < candles.count else { return }
                         replay.setAnchor(candles[idx].bucketStart)
-                        xDomain = nil   // refit to the revealed window
+                        xDomain = nil
                         Task { await reloadCandles() }
                     },
-                    // Economic-calendar flags on the bottom axis
-                    // (TradingView-style). Mirrors the News tab's
-                    // currency/impact filters; hidden when the News
-                    // layer is toggled off.
                     newsEvents: showNews ? news.chartEvents : [],
-                    newsTimeZone: news.effectiveTimeZone
+                    newsTimeZone: news.effectiveTimeZone,
+                    showSentinelRadar: showSentinelRadar,
+                    currentPairID: pair.id,
+                    hoverCrosshairX: $hoverCrosshairX
                 )
-                // Absorb parent re-renders (live ticks, unrelated yahoo
-                // @Published churn) that didn't move any drawn input, so
-                // the single chart stops re-laying-out ~1×/sec for nothing.
-                // See `ChartView`'s Equatable note.
                 .equatable()
-                // Chart expands to consume any vertical space the
-                // siblings below (volume / oscillators / stats) don't
-                // claim — `minHeight` guards against the chart being
-                // crushed when the window is short.
                 .frame(minHeight: 220, maxHeight: .infinity)
-                .padding(.trailing, Theme.Spacing.sm) // breathing room on the right
-                // Mouse-wheel / two-finger trackpad scroll zooms the
-                // chart, anchored on the cursor's X position. Attached
-                // before `.clipped()` so the modifier's GeometryReader
-                // sees the chart's actual frame in global coords.
+                .padding(.trailing, Theme.Spacing.sm)
                 .scrollZoom(xDomain: $xDomain, totalCandles: candles.count)
-                // Delete selected drawing on Backspace/Forward-Delete.
                 .drawingDeleteKey(selectedDrawingID: $selectedDrawingID, drawingStore: drawingStore, pairID: pair.id)
-                // Belt-and-braces clip at the layout container so any
-                // mark Apple Charts renders past the chart frame still
-                // can't leak past the card content. The price tag now
-                // sits inside the plot area (overlay-position annotation)
-                // so it's safe to clip here.
                 .clipped()
-                // TradingView-style indicator legend — top-left of chart.
-                // Shows every active indicator/oscillator with a per-item
-                // gear button. Applied after .clipped() so it floats freely.
-                .overlay(alignment: .topLeading) {
-                    indicatorLegendOverlay
-                        .padding(.top, 6)
-                        .padding(.leading, 8)
-                }
-                // Floating chart controls — zoom in/out, reset zoom,
-                // maximise. Lives ON the chart (bottom-right) rather
-                // than in the top toolbar so the toolbar stays tight
-                // and these controls feel contextual to the chart they
-                // act on. Applied AFTER `.clipped()` so the fan-out
-                // children animate freely without being chopped.
                 .overlay(alignment: .bottomTrailing) {
                     ChartControlsFAB(
                         isFullscreen: $app.isChartFullscreen,
@@ -1869,6 +1889,11 @@ struct DashboardView: View {
                     )
                     .padding(.trailing, Theme.Spacing.md)
                     .padding(.bottom, Theme.Spacing.md)
+                }
+                .overlay(alignment: .topLeading) {
+                    indicatorLegendOverlay
+                        .padding(.top, 6)
+                        .padding(.leading, 8)
                 }
                 // MetaTrader-style "scroll to latest" puck. Surfaces in
                 // the bottom-left only when the user has panned/zoomed
@@ -2030,7 +2055,8 @@ struct DashboardView: View {
             OscillatorPanel(
                 instance: inst,
                 candles: candles,
-                xDomain: xDomain
+                xDomain: $xDomain,
+                hoverCrosshairX: $hoverCrosshairX
             )
             .equatable()
             .padding(.trailing, Theme.Spacing.sm)
@@ -2565,6 +2591,15 @@ struct DashboardView: View {
             },
             onDelete: { alertStore.remove(id: alert.id) }
         )
+    }
+
+    private var currentLivePrice: Double? {
+        guard let pairID = app.selectedPairID else { return candles.last?.close }
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        if pair?.usesLiveStream == true {
+            return yahoo.latestPrices[pairID] ?? candles.last?.close
+        }
+        return candles.last?.close
     }
 
     /// Compose the Layers row title for a trade. Always includes
@@ -3305,7 +3340,19 @@ struct DashboardView: View {
     /// the price scale auto-fits the visible window.
     private func resetChart() {
         let n = candles.count
-        guard n > 0 else { xDomain = nil; yDomain = nil; return }
+        if n == 0 {
+            xDomain = nil
+            yDomain = nil
+            if let pairID = app.selectedPairID {
+                yahoo.clearDeepBackfilled(for: pairID)
+                pendingChartReset = true
+                Task {
+                    await reloadCandles()
+                    await warmHistoryAsync()
+                }
+            }
+            return
+        }
         let domain = ChartWindow.defaultDomain(count: n, visible: 150)
         // Pin the price scale to the *candles* in the reset window and keep
         // it there. Reverting to nil would hand the Y axis back to the
@@ -3625,6 +3672,14 @@ struct DashboardView: View {
             alertStore.evaluateRSI(r, pricePeek: yahoo.latestPrices[pairID], for: pairID)
         }
         notifyOrderBlockEvents(merged, pairID: pairID)
+        if let pair = pair {
+            StrategySentinel.shared.evaluateSymbol(
+                pairID: pairID,
+                symbol: pair.symbol,
+                timeframe: timeframe.rawValue,
+                candles: merged
+            )
+        }
     }
 
     /// Feeds the freshest Order Block / Steroid Order Block zones to
@@ -3635,8 +3690,9 @@ struct DashboardView: View {
     private func notifyOrderBlockEvents(_ candles: [Candle], pairID: String) {
         let orderBlockActive = isStrategyNotificationActive(.orderBlock)
         let steroidOrderBlockActive = isStrategyNotificationActive(.steroidOrderBlock)
+        let rankedOrderBlockActive = isStrategyNotificationActive(.rankedOrderBlock)
         let chochActive = isStrategyNotificationActive(.changeOfCharacter)
-        guard orderBlockActive || steroidOrderBlockActive || chochActive else { return }
+        guard orderBlockActive || steroidOrderBlockActive || rankedOrderBlockActive || chochActive else { return }
         let pairLabel = app.pairs.first(where: { $0.id == pairID })?.name ?? pairID
 
         // Each indicator's full-history `compute` runs on its own
@@ -3669,6 +3725,28 @@ struct DashboardView: View {
                     volumeMultiplier: config.sobVolumeMultiplier
                 )
                 await self.alertStore.evaluateSteroidOrderBlocks(zones, pairID: pairID, pairLabel: pairLabel)
+            }
+        }
+        if rankedOrderBlockActive {
+            // Force `showBreakers` on for the notify computation: with it
+            // off, a zone that flips to breaker is stripped from the
+            // result set entirely, so it would silently vanish instead of
+            // firing an invalidation. Same reasoning as CHoCH's
+            // `showMitigated: true` below. The chart layer keeps reading
+            // the user's own setting — this copy is notify-only.
+            var config = oscillatorConfig.rankedOrderBlockConfiguration
+            config.showBreakers = true
+            // The strategy layer rides the same computation — plans are
+            // derived from exactly the zones that were just evaluated, so
+            // the two notification streams can never disagree about what
+            // a zone is doing.
+            let strategyConfig = oscillatorConfig.rankedOBStrategyConfiguration
+            Task.detached(priority: .utility) {
+                let zones = RankedOrderBlocks.compute(candles, config: config)
+                await self.alertStore.evaluateRankedOrderBlocks(zones, pairID: pairID, pairLabel: pairLabel)
+                guard strategyConfig.enabled else { return }
+                let setups = RankedOBStrategy.compute(candles, zones: zones, config: strategyConfig)
+                await self.alertStore.evaluateRankedOBStrategy(setups, pairID: pairID, pairLabel: pairLabel)
             }
         }
         if chochActive {
@@ -3826,14 +3904,20 @@ struct DashboardView: View {
     /// remaining native series in the background. Each `ensureDeepHistory`
     /// is idempotent, so this is cheap to call on every pair / timeframe
     /// change — already-filled series return immediately.
-    private func warmHistory() {
+    private func warmHistoryAsync() async {
         guard let pairID = app.selectedPairID else { return }
         let currentSrc = sourceTimeframeTag(for: timeframe)
+        await yahoo.ensureDeepHistory(pairID: pairID, sourceTF: currentSrc)
+        guard app.selectedPairID == pairID, !Task.isCancelled else { return }
+        await reloadCandles()
+        await yahoo.backfillAll(pairID: pairID)
+        guard app.selectedPairID == pairID, !Task.isCancelled else { return }
+        await reloadCandles()
+    }
+
+    private func warmHistory() {
         Task {
-            await yahoo.ensureDeepHistory(pairID: pairID, sourceTF: currentSrc)
-            await reloadCandles()
-            await yahoo.backfillAll(pairID: pairID)
-            await reloadCandles()
+            await warmHistoryAsync()
         }
     }
 

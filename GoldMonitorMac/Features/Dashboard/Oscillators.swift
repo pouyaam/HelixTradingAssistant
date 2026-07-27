@@ -262,6 +262,22 @@ struct OscillatorConfig: Codable, Equatable {
     var robSenkouBLength: Int = 52
     var robDisplacement: Int = 26
 
+    // Ranked OB strategy layer (see `RankedOBStrategy`) — off by default,
+    // so the indicator keeps drawing plain graded zones until the user
+    // asks for a trade plan.
+    var robStratEnabled: Bool = false
+    var robStratMinGrade: String = "A+B"
+    var robStratConfirm: String = "Rejection"
+    var robStratConfirmBars: Int = 5
+    var robStratEntry: String = "Mid"
+    var robStratSLBuffer: Double = 0.3
+    var robStratTP1R: Double = 1.0
+    var robStratTargets: String = "FixedR"
+    var robStratTP2R: Double = 2.0
+    var robStratGradeScale: Bool = true
+    var robStratBreakers: Bool = false
+    var robStratMinRR: Double = 0
+
     // Change of Character parameters (see `ChangeOfCharacter`).
     // `chochSwingLength` is the ZigZag pivot depth used to read structure;
     // `chochMinSwingPct` filters swing noise. `chochRequireFVG` restricts
@@ -471,6 +487,18 @@ struct OscillatorConfig: Codable, Equatable {
         robKijunLength     = try c.decodeIfPresent(Int.self,    forKey: .robKijunLength)     ?? 26
         robSenkouBLength   = try c.decodeIfPresent(Int.self,    forKey: .robSenkouBLength)   ?? 52
         robDisplacement    = try c.decodeIfPresent(Int.self,    forKey: .robDisplacement)    ?? 26
+        robStratEnabled    = try c.decodeIfPresent(Bool.self,   forKey: .robStratEnabled)    ?? false
+        robStratMinGrade   = try c.decodeIfPresent(String.self, forKey: .robStratMinGrade)   ?? "A+B"
+        robStratConfirm    = try c.decodeIfPresent(String.self, forKey: .robStratConfirm)    ?? "Rejection"
+        robStratConfirmBars = try c.decodeIfPresent(Int.self,   forKey: .robStratConfirmBars) ?? 5
+        robStratEntry      = try c.decodeIfPresent(String.self, forKey: .robStratEntry)      ?? "Mid"
+        robStratSLBuffer   = try c.decodeIfPresent(Double.self, forKey: .robStratSLBuffer)   ?? 0.3
+        robStratTP1R       = try c.decodeIfPresent(Double.self, forKey: .robStratTP1R)       ?? 1.0
+        robStratTargets    = try c.decodeIfPresent(String.self, forKey: .robStratTargets)    ?? "FixedR"
+        robStratTP2R       = try c.decodeIfPresent(Double.self, forKey: .robStratTP2R)       ?? 2.0
+        robStratGradeScale = try c.decodeIfPresent(Bool.self,   forKey: .robStratGradeScale) ?? true
+        robStratBreakers   = try c.decodeIfPresent(Bool.self,   forKey: .robStratBreakers)   ?? false
+        robStratMinRR      = try c.decodeIfPresent(Double.self, forKey: .robStratMinRR)      ?? 0
         chochSwingLength   = try c.decodeIfPresent(Int.self,    forKey: .chochSwingLength)   ?? 5
         chochMinSwingPct   = try c.decodeIfPresent(Double.self, forKey: .chochMinSwingPct)   ?? 0.2
         chochShowOB        = try c.decodeIfPresent(Bool.self,   forKey: .chochShowOB)        ?? true
@@ -569,6 +597,37 @@ struct OscillatorConfig: Codable, Equatable {
         return config
     }
 
+    var rankedOBStrategyConfiguration: RankedOBStrategy.Config {
+        var config = RankedOBStrategy.Config()
+        config.enabled = robStratEnabled
+        switch robStratMinGrade {
+        case "A":   config.minGrade = .aOnly
+        case "All": config.minGrade = .any
+        default:    config.minGrade = .aOrB
+        }
+        switch robStratConfirm {
+        case "Touch":    config.confirmation = .touch
+        case "MicroBOS": config.confirmation = .microBOS
+        case "FVG":      config.confirmation = .fvg
+        default:         config.confirmation = .rejection
+        }
+        config.confirmWindow = robStratConfirmBars
+        switch robStratEntry {
+        case "Proximal":     config.entryModel = .proximal
+        case "Distal":       config.entryModel = .distal
+        case "ConfirmClose": config.entryModel = .confirmClose
+        default:             config.entryModel = .mid
+        }
+        config.slATRBuffer = robStratSLBuffer
+        config.tp1R = robStratTP1R
+        config.targetMode = robStratTargets == "Opposing" ? .opposingZone : .fixedR
+        config.tp2R = robStratTP2R
+        config.gradeScaledTargets = robStratGradeScale
+        config.tradeBreakers = robStratBreakers
+        config.minRR = robStratMinRR
+        return config
+    }
+
     var pinBarComboConfiguration: PinBarComboSetup.Configuration {
         var config = PinBarComboSetup.Configuration()
         config.enableSP2L = pinBarEnableSP2L
@@ -629,6 +688,20 @@ struct OscillatorConfig: Codable, Equatable {
         config.riskReward = mtrRiskReward
         config.maxTradeBars = mtrMaxTradeBars
         config.maxResults = mtrMaxResults
+        return config
+    }
+
+    var volumeRankedOBConfiguration: VolumeRankedOrderBlocks.Config {
+        var config = VolumeRankedOrderBlocks.Config()
+        config.swingLength = robSwingLength
+        config.maxATRMult = robMaxATRMult
+        config.atrLength = robATRLength
+        config.zonesPerSide = robZonesPerSide
+        config.showBreakers = robShowBreakers
+        config.combineOverlapping = robCombineZones
+        config.useVolumeProfile = robUseVP
+        config.vpLookback = robVPLookback
+        config.vpRows = robVPRows
         return config
     }
 }

@@ -135,6 +135,8 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     /// `rankedOBMarks`). Ported from the PineScript v6 "Ranked Order
     /// Blocks Pro [Swing + VP + Ichimoku]".
     case rankedOrderBlock
+    /// Volume-Ranked Order Blocks — graded strictly by Volume Profile + RVOL (no Ichimoku).
+    case volumeRankedOrderBlock
     /// Change of Character (CHoCH) — Smart-Money structure-break detector.
     /// Reads market structure from swing pivots (via `ZigZag`); when a
     /// close breaks the last protected swing *against* the prevailing
@@ -185,6 +187,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .fairValueGap:   return "Fair Value Gap"
         case .sonarlabOrderBlock: return "Sonarlab OB"
         case .rankedOrderBlock:   return "Ranked OB"
+        case .volumeRankedOrderBlock: return "Volume-Ranked OB"
         case .changeOfCharacter: return "CHoCH Zones"
         case .volumeProfile:     return "Volume Profile"
         case .ichimoku:          return "Ichimoku Cloud"
@@ -213,6 +216,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .fairValueGap: return Color(red: 0.30, green: 0.80, blue: 0.75)
         case .sonarlabOrderBlock: return Color(red: 0.80, green: 0.45, blue: 0.90)
         case .rankedOrderBlock:   return Color(red: 0.25, green: 0.90, blue: 0.60)
+        case .volumeRankedOrderBlock: return Color(red: 0.15, green: 0.85, blue: 0.95)
         case .changeOfCharacter: return Color(red: 0.95, green: 0.35, blue: 0.72)
         case .volumeProfile:     return Color(red: 0.20, green: 0.80, blue: 0.75)
         case .ichimoku:          return Color(red: 0.60, green: 0.70, blue: 0.95)
@@ -388,6 +392,51 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                 .double(key: "kijunLength", label: "Kijun-sen", default: 26, step: 1, range: 1...200),
                 .double(key: "senkouBLength", label: "Senkou Span B", default: 52, step: 1, range: 2...300),
                 .double(key: "displacement", label: "Displacement", default: 26, step: 1, range: 1...100),
+                // ── Strategy layer (see RankedOBStrategy) ──────────────
+                .bool(key: "stratEnabled", label: "Strategy: entry / SL / TP", default: false),
+                .enum(key: "stratMinGrade", label: "Strategy: trade grades", default: "A+B", options: [
+                    ParamOption(label: "A only", value: "A"),
+                    ParamOption(label: "A + B", value: "A+B"),
+                    ParamOption(label: "All grades", value: "All"),
+                ]),
+                .enum(key: "stratConfirm", label: "Strategy: confirmation", default: "Rejection", options: [
+                    ParamOption(label: "Touch (no confirmation)", value: "Touch"),
+                    ParamOption(label: "Rejection candle", value: "Rejection"),
+                    ParamOption(label: "Micro break of structure", value: "MicroBOS"),
+                    ParamOption(label: "Displacement FVG", value: "FVG"),
+                ]),
+                .double(key: "stratConfirmBars", label: "Strategy: confirm window (bars)", default: 5, step: 1, range: 1...50),
+                .enum(key: "stratEntry", label: "Strategy: entry at", default: "Mid", options: [
+                    ParamOption(label: "Near edge", value: "Proximal"),
+                    ParamOption(label: "Zone mid", value: "Mid"),
+                    ParamOption(label: "Far edge", value: "Distal"),
+                    ParamOption(label: "Confirmation close", value: "ConfirmClose"),
+                ]),
+                .double(key: "stratSLBuffer", label: "Strategy: SL buffer (× ATR)", default: 0.3, step: 0.1, range: 0...3),
+                .double(key: "stratTP1R", label: "Strategy: TP1 (R)", default: 1.0, step: 0.25, range: 0.25...10),
+                .enum(key: "stratTargets", label: "Strategy: final target", default: "FixedR", options: [
+                    ParamOption(label: "Fixed R multiple", value: "FixedR"),
+                    ParamOption(label: "Nearest opposing zone", value: "Opposing"),
+                ]),
+                .double(key: "stratTP2R", label: "Strategy: TP2 (R)", default: 2.0, step: 0.25, range: 0.5...20),
+                .bool(key: "stratGradeScale", label: "Strategy: A-grade targets +1R", default: true),
+                .bool(key: "stratBreakers", label: "Strategy: trade breaker retests", default: false),
+                .double(key: "stratMinRR", label: "Strategy: min R:R (0 = off)", default: 0, step: 0.25, range: 0...10),
+            ]
+        case .volumeRankedOrderBlock:
+            return [
+                .double(key: "swingLength", label: "Swing length", default: 10, step: 1, range: 3...50),
+                .enum(key: "zoneSource", label: "Zone built from", default: "wicks", options: [
+                    ParamOption(label: "Wicks", value: "wicks"),
+                    ParamOption(label: "Body", value: "body"),
+                ]),
+                .double(key: "maxATRMult", label: "Max zone size (x ATR)", default: 3.5, step: 0.5, range: 0.5...20),
+                .double(key: "minVolumeMultiplier", label: "Min impulse RVOL (x SMA)", default: 1.2, step: 0.1, range: 1.0...5.0),
+                .bool(key: "useVolumeProfile", label: "Use Volume Profile in ranking", default: true),
+                .double(key: "vpLookback", label: "VP lookback bars", default: 200, step: 10, range: 20...500),
+                .double(key: "vpRows", label: "VP rows", default: 24, step: 1, range: 5...60),
+                .bool(key: "showBreakers", label: "Show breaker zones", default: true),
+                .bool(key: "combineOverlapping", label: "Combine overlapping zones", default: true),
             ]
         case .changeOfCharacter:
             return [

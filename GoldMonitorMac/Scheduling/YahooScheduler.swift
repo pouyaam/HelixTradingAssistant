@@ -235,6 +235,19 @@ final class YahooScheduler: ObservableObject {
 
     // ── On-demand deep backfill ───────────────────────────────────────
 
+    /// Clear the session deep-backfill latch for one pair (or all pairs if nil).
+    /// Used by `resetChart` / manual re-fetch so a pair whose initial download
+    /// was interrupted or returned empty can retry fetching history.
+    func clearDeepBackfilled(for pairID: String? = nil) {
+        if let pairID {
+            deepBackfilled = deepBackfilled.filter { !$0.hasPrefix("\(pairID)|") }
+            exhaustedOlder = exhaustedOlder.filter { !$0.hasPrefix("\(pairID)|") }
+        } else {
+            deepBackfilled.removeAll()
+            exhaustedOlder.removeAll()
+        }
+    }
+
     /// Pull + store the full Yahoo depth for one pair's source series
     /// (1m / 5m / 1h / 1d). Idempotent within a session — a series
     /// already filled (by the bootstrap or a prior call) returns
@@ -247,12 +260,9 @@ final class YahooScheduler: ObservableObject {
         if deepBackfilled.contains(key) || backfilling.contains(key) { return }
         guard let cfg = pairs.first(where: { $0.pairID == pairID }) else { return }
 
-        // When Faraz is the active source, pairs it doesn't serve
-        // (e.g. US30 index) have no upstream at all — skip the
-        // deep fetch entirely rather than falling through to Yahoo.
-        if goldSource == .faraz && !usesFaraz(pairID) { return }
-
-        let faraz = usesFaraz(pairID)
+        // When Faraz is active, pairs it doesn't serve (e.g. indices) fall back
+        // to Yahoo so they don't stay empty.
+        let faraz = goldSource == .faraz && usesFaraz(pairID)
         // Each source supports its own set of timeframes — bail early on
         // an unsupported TF so we don't insert a `backfilling` flag that
         // never clears.
@@ -284,7 +294,9 @@ final class YahooScheduler: ObservableObject {
                 )
             }
             try await repo.upsertMany(bars)
-            deepBackfilled.insert(key)
+            if !bars.isEmpty {
+                deepBackfilled.insert(key)
+            }
             publishLastUpdate()
         } catch {
             self.lastError = "\(faraz ? "faraz" : "yahoo") backfill \(pairID)/\(sourceTF): \(error.localizedDescription)"
@@ -610,15 +622,19 @@ final class YahooScheduler: ObservableObject {
     /// throttled — buckets must reflect the latest tick the instant it
     /// arrives; the trailing-splice / Yahoo history sync reads from the
     /// DB, not from `latestPrices`, so they're unaffected by this gate.
+    private var lastPairUpdateAt: [String: Date] = [:]
+
     private func publishTick(price: Double, pairID: String, source: String) {
         let now = Date()
-        if let prev = lastUpdateAt, now.timeIntervalSince(prev) < 1.0 {
+        if let prev = lastPairUpdateAt[pairID], now.timeIntervalSince(prev) < 1.0 {
             return
         }
+        if latestPrices[pairID] == price {
+            return
+        }
+        lastPairUpdateAt[pairID] = now
         // Batch all @Published writes so objectWillChange fires once
-        // instead of once per property (3-4x per tick). Without this,
-        // each write re-evaluates the entire DashboardView body and
-        // dismisses any open Menu / context menu.
+        // instead of once per property (3-4x per tick).
         objectWillChange.send()
         latestPrices[pairID] = price
         activeLiveSource = "\(source)/\(pairID)"
@@ -705,9 +721,7 @@ final class YahooScheduler: ObservableObject {
         // concurrently via TaskGroup. The `deepBackfilled` /
         // `backfilling` guards inside ensureDeepHistory prevent
         // double-fetching. (Parallel-bootstrap Performance Fix.)
-        let eligiblePairs = pairs.filter { cfg in
-            !(goldSource == .faraz && !usesFaraz(cfg.pairID))
-        }
+        let eligiblePairs = pairs
 
         // Phase 1: deep history for all pairs in parallel.
         await withTaskGroup(of: Void.self) { group in
@@ -804,21 +818,20 @@ final class YahooScheduler: ObservableObject {
             }
         }
 
-        // Yahoo authoritative history sync every Nth tick. Completely
-        // skipped when Faraz is the active source — Faraz serves all
-        // the pairs it covers via its own WS + HTTP path, and pairs
-        // without a Faraz symbol (e.g. US30) go without Yahoo sync
-        // while Faraz is on. Toggle back to the default source to
-        // restore Yahoo-driven history for those pairs.
-        if tickCount % yahooEveryNTicks == 0 && goldSource != .faraz {
-            await withTaskGroup(of: Void.self) { group in
-                for cfg in activePairs {
-                    group.addTask { [self] in
-                        await syncYahoo(cfg: cfg, repo: repo)
+        // Yahoo authoritative history sync every Nth tick for non-Faraz pairs
+        // (or all active pairs when goldSource != .faraz).
+        if tickCount % yahooEveryNTicks == 0 {
+            let yahooPairs = activePairs.filter { !usesFaraz($0.pairID) || goldSource != .faraz }
+            if !yahooPairs.isEmpty {
+                await withTaskGroup(of: Void.self) { group in
+                    for cfg in yahooPairs {
+                        group.addTask { [self] in
+                            await syncYahoo(cfg: cfg, repo: repo)
+                        }
                     }
                 }
+                publishLastUpdate()
             }
-            publishLastUpdate()
         }
     }
 

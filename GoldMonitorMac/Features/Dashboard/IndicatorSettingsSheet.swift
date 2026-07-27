@@ -354,6 +354,48 @@ struct IndicatorSettingsSheet: View {
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.Color.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
+
+                Divider().background(Theme.Color.border.opacity(0.4))
+
+                robCheckbox("Strategy: draw entry / SL / TP", $config.robStratEnabled)
+                if config.robStratEnabled {
+                    Picker("Trade grades", selection: $config.robStratMinGrade) {
+                        Text("A only").tag("A")
+                        Text("A + B").tag("A+B")
+                        Text("All").tag("All")
+                    }
+                    .pickerStyle(.segmented)
+                    Picker("Confirmation", selection: $config.robStratConfirm) {
+                        Text("Touch").tag("Touch")
+                        Text("Rejection").tag("Rejection")
+                        Text("Micro-BOS").tag("MicroBOS")
+                        Text("FVG").tag("FVG")
+                    }
+                    .pickerStyle(.segmented)
+                    periodStepper(label: "Confirm window (bars)", value: $config.robStratConfirmBars, range: 1...50)
+                    Picker("Entry at", selection: $config.robStratEntry) {
+                        Text("Near edge").tag("Proximal")
+                        Text("Mid").tag("Mid")
+                        Text("Far edge").tag("Distal")
+                        Text("Confirm close").tag("ConfirmClose")
+                    }
+                    .pickerStyle(.segmented)
+                    doubleStepper(label: "SL buffer (× ATR)", value: $config.robStratSLBuffer, range: 0...3, step: 0.1)
+                    doubleStepper(label: "TP1 (R)", value: $config.robStratTP1R, range: 0.25...10, step: 0.5)
+                    Picker("Final target", selection: $config.robStratTargets) {
+                        Text("Fixed R").tag("FixedR")
+                        Text("Opposing zone").tag("Opposing")
+                    }
+                    .pickerStyle(.segmented)
+                    doubleStepper(label: "TP2 (R)", value: $config.robStratTP2R, range: 0.5...20, step: 0.5)
+                    doubleStepper(label: "Min R:R (0 = off)", value: $config.robStratMinRR, range: 0...10, step: 0.5)
+                    robCheckbox("A-grade targets get +1R", $config.robStratGradeScale)
+                    robCheckbox("Trade breaker retests", $config.robStratBreakers)
+                    Text(robStrategyDescription)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.Color.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Divider().background(Theme.Color.border)
@@ -730,6 +772,42 @@ struct IndicatorSettingsSheet: View {
         #else
         .toggleStyle(.checkbox)
         #endif
+    }
+
+    /// Reads the Ranked-OB strategy settings back as the rule they
+    /// actually encode. Six pickers don't tell you what the strategy
+    /// *is*; this sentence does, and it re-renders as they're changed.
+    private var robStrategyDescription: String {
+        let grades: String
+        switch config.robStratMinGrade {
+        case "A":   grades = "A-grade"
+        case "All": grades = "any-grade"
+        default:    grades = "A- and B-grade"
+        }
+        let confirm: String
+        switch config.robStratConfirm {
+        case "Touch":    confirm = "enter on the tap itself"
+        case "MicroBOS": confirm = "wait for a close beyond the reaction extreme"
+        case "FVG":      confirm = "wait for a displacement gap"
+        default:         confirm = "wait for a rejection candle"
+        }
+        let entry: String
+        switch config.robStratEntry {
+        case "Proximal":     entry = "the near edge"
+        case "Distal":       entry = "the far edge"
+        case "ConfirmClose": entry = "the confirmation close"
+        default:             entry = "the zone mid"
+        }
+        let target = config.robStratTargets == "Opposing"
+            ? "the nearest opposing zone"
+            : String(format: "%.1fR", config.robStratTP2R)
+        let bonus = config.robStratGradeScale ? " (+1R on A-grade)" : ""
+        let breakers = config.robStratBreakers ? " Broken zones are traded in reverse on retest." : ""
+        return "On \(grades) zones: wait for price to return, then \(confirm) "
+            + "within \(config.robStratConfirmBars) bars. Enter at \(entry), "
+            + String(format: "stop %.1f×ATR beyond the far edge, ", config.robStratSLBuffer)
+            + String(format: "TP1 at %.1fR", config.robStratTP1R)
+            + " and TP2 at \(target)\(bonus), stop to breakeven after TP1.\(breakers)"
     }
 
     /// One-line explainer under the Volume Profile settings, matching

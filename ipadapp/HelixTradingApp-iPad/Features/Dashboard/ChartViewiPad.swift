@@ -187,6 +187,19 @@ struct ChartViewiPad: View {
         )
     }
 
+
+
+    /// Trade plans derived from the zones above. Empty unless the
+    /// indicator's "Strategy" toggle is on — see `RankedOBStrategy`.
+    private var rankedOBSetups: [RankedOBStrategy.Setup] {
+        guard indicators.contains(.rankedOrderBlock) else { return [] }
+        return derived.rankedOBStrategy(
+            candles: candles,
+            zones: rankedOBZones,
+            config: indicatorConfig.rankedOBStrategyConfiguration
+        )
+    }
+
     /// Change of Character confluence zones — structure break + OB/FVG.
     private var chochZones: [ChangeOfCharacter.Zone] {
         guard indicators.contains(.changeOfCharacter) else { return [] }
@@ -384,8 +397,13 @@ struct ChartViewiPad: View {
     private var visibleRangeVP: VolumeProfile.VisibleRangeVP? {
         guard indicators.contains(.volumeProfile), indicatorConfig.vpMode == "visible" else { return nil }
         let domain = effectiveXDomain
-        let lo = max(0, Int(domain.lowerBound.rounded(.down)))
-        let hi = min(candles.count - 1, Int(domain.upperBound.rounded(.up)))
+        var lo = max(0, Int(domain.lowerBound.rounded(.down)))
+        var hi = min(candles.count - 1, Int(domain.upperBound.rounded(.up)))
+        // Quantize bounds during active touch drag gestures so panning maintains cache hits.
+        if dragStartDomain != nil || magnifyStartDomain != nil {
+            lo = (lo / 5) * 5
+            hi = min(candles.count - 1, ((hi + 4) / 5) * 5)
+        }
         guard hi > lo else { return nil }
         return derived.visibleRangeVolumeProfile(
             candles: candles,
@@ -460,6 +478,7 @@ struct ChartViewiPad: View {
                 steroidOrderBlockMarks
                 sonarlabOBMarks
                 rankedOBMarks
+                rankedOBStrategyMarks
                 volumeFilteredOBMarks
                 chochMarks
                 htfChochMarks
@@ -758,7 +777,7 @@ struct ChartViewiPad: View {
                     let half   = (startY.upperBound - startY.lowerBound) / 2
                     let factor = exp(Double(value.translation.height) / 180)
                     let newHalf = max(half * factor, 0.0000001)
-                    yDomain = (center - newHalf) ... (center + newHalf)
+                    updateDomains(y: (center - newHalf) ... (center + newHalf))
 
                 case .scaleX:
                     // Drag the time axis: left ⇒ zoom in (fewer bars),
@@ -768,7 +787,7 @@ struct ChartViewiPad: View {
                     let half   = (startX.upperBound - startX.lowerBound) / 2
                     let factor = exp(Double(value.translation.width) / 180)
                     let newHalf = max(half * factor, 1.5)
-                    xDomain = (center - newHalf) ... (center + newHalf)
+                    updateDomains(x: (center - newHalf) ... (center + newHalf))
 
                 case .pan:
                     let movedFar = abs(value.translation.width) > 3 || abs(value.translation.height) > 3
@@ -780,18 +799,19 @@ struct ChartViewiPad: View {
                     let unitsPerPoint = span / Double(plotWidth)
                     let deltaX = Double(value.translation.width) * unitsPerPoint
 
-                    // Batch xDomain + yDomain into one update to avoid double recompute
                     let newXLower = start.lowerBound - deltaX
                     let newXUpper = start.upperBound - deltaX
-                    xDomain = newXLower ... newXUpper
+                    let newX = newXLower ... newXUpper
+                    var newY: ClosedRange<Double>? = nil
 
                     if !panLockedY, abs(value.translation.height) > 2 { panLockedY = true }
                     if panLockedY, let startY = dragStartYDomain, plotHeight > 0 {
                         let ySpan = startY.upperBound - startY.lowerBound
                         let pricePerPoint = ySpan / Double(plotHeight)
                         let shift = Double(value.translation.height) * pricePerPoint
-                        yDomain = (startY.lowerBound + shift) ... (startY.upperBound + shift)
+                        newY = (startY.lowerBound + shift) ... (startY.upperBound + shift)
                     }
+                    updateDomains(x: newX, y: newY)
                 }
             }
             .onEnded { value in
@@ -962,6 +982,11 @@ struct ChartViewiPad: View {
         return stored > 0 ? stored : 1.0
     }
 
+    private func updateDomains(x: ClosedRange<Double>? = nil, y: ClosedRange<Double>? = nil) {
+        if let x = x, xDomain != x { xDomain = x }
+        if let y = y, yDomain != y { yDomain = y }
+    }
+
     // MARK: - Pinch-to-zoom (throttled)
 
     private func magnificationGesture() -> some Gesture {
@@ -972,13 +997,16 @@ struct ChartViewiPad: View {
                     magnifyStartYDomain = effectiveYDomain
                     hovered = nil
                 }
+                var newX: ClosedRange<Double>? = nil
+                var newY: ClosedRange<Double>? = nil
+
                 // X-axis zoom (horizontal pinch)
                 if let start = magnifyStartDomain {
                     let center = (start.lowerBound + start.upperBound) / 2
                     let halfSpan = (start.upperBound - start.lowerBound) / 2
                     let scale = max(0.1, min(20, Double(value)))
                     let zoomedHalf = halfSpan / scale
-                    xDomain = (center - zoomedHalf) ... (center + zoomedHalf)
+                    newX = (center - zoomedHalf) ... (center + zoomedHalf)
                 }
                 // Y-axis zoom (vertical component of pinch)
                 if let startY = magnifyStartYDomain {
@@ -986,8 +1014,9 @@ struct ChartViewiPad: View {
                     let yHalfSpan = (startY.upperBound - startY.lowerBound) / 2
                     let yScale = max(0.1, min(20, Double(value)))
                     let yZoomedHalf = yHalfSpan / yScale
-                    yDomain = (yCenter - yZoomedHalf) ... (yCenter + yZoomedHalf)
+                    newY = (yCenter - yZoomedHalf) ... (yCenter + yZoomedHalf)
                 }
+                updateDomains(x: newX, y: newY)
             }
             .onEnded { _ in
                 magnifyStartDomain = nil
@@ -2511,6 +2540,87 @@ struct ChartViewiPad: View {
         return text
     }
 
+
+
+    /// The trade plan for each qualifying zone: entry (dashed, tinted by
+    /// direction), stop (red), TP1 and TP2 (green, TP2 dashed). Pending
+    /// plans draw faint and solidify once price fills them. Mirrors the
+    /// Mac layer in `ChartView.rankedOBStrategyMarks`.
+    @ChartContentBuilder
+    private var rankedOBStrategyMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(rankedOBSetups) { setup in
+            rankedOBStrategyMark(for: setup, lastIndex: lastIndex)
+        }
+    }
+
+    @ChartContentBuilder
+    private func rankedOBStrategyMark(
+        for setup: RankedOBStrategy.Setup,
+        lastIndex: Int
+    ) -> some ChartContent {
+        let dirColor = setup.direction == .long ? Theme.Color.success : Theme.Color.danger
+        let isLive = setup.entryIndex != nil
+        let planStart = Double(min(setup.planIndex, lastIndex))
+        let planEnd   = Double(min(setup.planEnd(lastIndex: lastIndex), lastIndex))
+        let weight = isLive ? 1.0 : 0.5
+        let entryDash: [CGFloat] = isLive ? [5, 3] : [2, 4]
+
+        RuleMark(xStart: .value("ROBS entry s", planStart), xEnd: .value("ROBS entry e", planEnd),
+                 y: .value("ROBS entry", setup.entry))
+        .foregroundStyle(dirColor.opacity(0.9 * weight))
+        .lineStyle(StrokeStyle(lineWidth: 1.5, dash: entryDash))
+
+        RuleMark(xStart: .value("ROBS sl s", planStart), xEnd: .value("ROBS sl e", planEnd),
+                 y: .value("ROBS sl", setup.stopLoss))
+        .foregroundStyle(Theme.Color.danger.opacity(0.9 * weight))
+        .lineStyle(StrokeStyle(lineWidth: 1.4))
+
+        RuleMark(xStart: .value("ROBS tp1 s", planStart), xEnd: .value("ROBS tp1 e", planEnd),
+                 y: .value("ROBS tp1", setup.takeProfit1))
+        .foregroundStyle(Theme.Color.success.opacity(0.9 * weight))
+        .lineStyle(StrokeStyle(lineWidth: 1.4))
+
+        RuleMark(xStart: .value("ROBS tp2 s", planStart), xEnd: .value("ROBS tp2 e", planEnd),
+                 y: .value("ROBS tp2", setup.takeProfit2))
+        .foregroundStyle(Theme.Color.success.opacity(0.75 * weight))
+        .lineStyle(StrokeStyle(lineWidth: 1.4, dash: [5, 3]))
+
+        if indicatorConfig.robShowLabels {
+            PointMark(x: .value("ROBS lbl x", planEnd), y: .value("ROBS lbl y", setup.entry))
+                .symbolSize(0)
+                .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                    setupTag(setup.badge, color: dirColor)
+                }
+            PointMark(x: .value("ROBS sl lbl x", planEnd), y: .value("ROBS sl lbl y", setup.stopLoss))
+                .symbolSize(0)
+                .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                    setupTag("SL", color: Theme.Color.danger)
+                }
+            PointMark(x: .value("ROBS tp1 lbl x", planEnd), y: .value("ROBS tp1 lbl y", setup.takeProfit1))
+                .symbolSize(0)
+                .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                    setupTag("TP1", color: Theme.Color.success)
+                }
+            PointMark(x: .value("ROBS tp2 lbl x", planEnd), y: .value("ROBS tp2 lbl y", setup.takeProfit2))
+                .symbolSize(0)
+                .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                    setupTag("TP2", color: Theme.Color.success)
+                }
+        }
+
+        if let arm = setup.armIndex, arm <= lastIndex {
+            PointMark(x: .value("ROBS arm x", Double(arm)), y: .value("ROBS arm y", setup.entry))
+                .symbolSize(18)
+                .foregroundStyle(dirColor.opacity(0.6))
+        }
+        if let fill = setup.entryIndex, fill <= lastIndex {
+            PointMark(x: .value("ROBS fill x", Double(fill)), y: .value("ROBS fill y", setup.entry))
+                .symbolSize(45)
+                .foregroundStyle(dirColor)
+        }
+    }
+
     /// Grade → colour weight. Breakers desaturate to grey whatever grade
     /// they held; C-grade zones are grey from the start.
     private static func rankedOBStyle(
@@ -3651,6 +3761,7 @@ struct ChartViewiPad: View {
             ichimokuOutput: .empty,
             ichimokuOBZones: [],
             rankedOBZones: rankedOBZones,
+            rankedOBSetups: rankedOBSetups,
             volumeFilteredOBZones: volumeFilteredOBZones,
             chochZones: chochZones,
             htfChochZones: htfChochZones,

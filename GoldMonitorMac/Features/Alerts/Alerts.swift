@@ -123,6 +123,12 @@ private struct BlockZoneSnapshot {
     let high: Double
     let low: Double
     let stage: BlockStage
+    /// Optional indicator-specific suffix for the notification body —
+    /// e.g. Ranked Order Blocks' confluence grade ("Grade A · 4/5").
+    /// Deliberately not part of `key`: a zone that gets re-scored as
+    /// price evolves is still the *same* zone, and folding the grade
+    /// into its identity would re-fire "formed" on every re-grade.
+    var detail: String? = nil
 
     /// Stable identity for a zone, deliberately NOT `Zone.id` (which is
     /// `"<arrayIndex>-bull/bear"`). The array index is only the zone's
@@ -184,6 +190,14 @@ final class AlertStore: ObservableObject {
     /// launch would fire an "appeared" notification for every
     /// pre-existing block instead of just the new ones.
     private var blockBaselineSeeded: Set<String> = []
+
+    /// Ranked-OB *strategy* stage tracking, keyed the same way and for
+    /// the same reason (see `evaluateRankedOBStrategy`). Separate from
+    /// `lastBlockStage` because a plan's lifecycle is a different alphabet
+    /// than a zone's — a zone can only form and die, a plan arms, fills
+    /// and resolves.
+    private var lastStrategyStage: [String: RankedOBStrategy.Stage] = [:]
+    private var strategyBaselineSeeded: Set<String> = []
 
     /// Shared app-wide notification history every `notify*` call
     /// funnels through instead of posting to `UNUserNotificationCenter`
@@ -428,6 +442,127 @@ final class AlertStore: ObservableObject {
         )
     }
 
+    /// Ranked Order Block lifecycle notifications, under their own
+    /// namespace so they never collide with plain / steroid OBs.
+    ///
+    /// Two structural differences from the other block indicators:
+    ///
+    ///   - `RankedOrderBlocks.Zone` has no three-stage lifecycle, only
+    ///     `isBreaker`. So it maps to `.fresh` / `.exhausted` and the
+    ///     `.retested` event can never fire here — the indicator simply
+    ///     doesn't model a "price came back and tested it" state.
+    ///   - The grade is the whole point of the indicator, so it rides
+    ///     along as `detail` and lands in the notification body.
+    ///
+    /// Callers must compute with `showBreakers: true` or the
+    /// invalidation event is unreachable — see `notifyOrderBlockEvents`.
+    func evaluateRankedOrderBlocks(_ zones: [RankedOrderBlocks.Zone], pairID: String, pairLabel: String) {
+        evaluateBlockZones(
+            zones.map { z in
+                BlockZoneSnapshot(
+                    key: BlockZoneSnapshot.stableKey(isBullish: z.isBullish, high: z.top, low: z.bottom),
+                    isBullish: z.isBullish,
+                    high: z.top,
+                    low: z.bottom,
+                    stage: z.isBreaker ? .exhausted : .fresh,
+                    detail: z.grade == .unranked ? nil : "Grade \(z.grade.rawValue) · \(z.score)/\(z.maxScore)"
+                )
+            },
+            namespace: "rob", label: "Ranked Order Block", category: .orderBlock,
+            pairID: pairID, pairLabel: pairLabel
+        )
+    }
+
+    /// Ranked OB *strategy* notifications — the trade-plan layer rather
+    /// than the zone layer.
+    ///
+    /// Only the transitions a trader would act on fire: the zone getting
+    /// tapped (`armed`), the plan filling (`entered`), and the outcome
+    /// (`hitTP` / `hitSL`). Plan *creation* deliberately doesn't notify —
+    /// `evaluateRankedOrderBlocks` already fires when the zone forms, and
+    /// a plan is just that zone with levels attached.
+    ///
+    /// Keyed on the zone's price range + direction, never on `Setup.id`:
+    /// that folds in bar indices, which shift under the same window
+    /// changes that caused the original order-block notification flood.
+    func evaluateRankedOBStrategy(
+        _ setups: [RankedOBStrategy.Setup],
+        pairID: String,
+        pairLabel: String
+    ) {
+        let baselineKey = "robs|\(pairID)"
+        let isFirstObservation = !strategyBaselineSeeded.contains(baselineKey)
+        let keyPrefix = "\(baselineKey)|"
+        var seenKeys: Set<String> = []
+
+        for setup in setups {
+            let zoneKey = BlockZoneSnapshot.stableKey(
+                isBullish: setup.direction == .long,
+                high: setup.zoneTop,
+                low: setup.zoneBottom
+            )
+            let storageKey = keyPrefix + zoneKey
+            seenKeys.insert(storageKey)
+            let previous = lastStrategyStage[storageKey]
+            defer { lastStrategyStage[storageKey] = setup.stage }
+
+            guard !isFirstObservation, previous != setup.stage else { continue }
+
+            switch setup.stage {
+            case .armed, .entered, .hitTP, .hitSL:
+                notifyStrategyStage(setup, key: zoneKey, pairID: pairID, pairLabel: pairLabel)
+            default:
+                // .waiting / .triggered / .runningToTP2 / .invalidated /
+                // .expired are state the chart shows but nobody needs a
+                // push for.
+                break
+            }
+        }
+
+        lastStrategyStage = lastStrategyStage.filter { !$0.key.hasPrefix(keyPrefix) || seenKeys.contains($0.key) }
+        strategyBaselineSeeded.insert(baselineKey)
+    }
+
+    private func notifyStrategyStage(
+        _ setup: RankedOBStrategy.Setup,
+        key: String,
+        pairID: String,
+        pairLabel: String
+    ) {
+        let side = setup.direction == .long ? "long" : "short"
+        let grade = setup.grade == .unranked ? "" : " \(setup.grade.rawValue)-grade"
+        let title: String
+        let body: String
+        switch setup.stage {
+        case .armed:
+            title = "\(pairLabel) — Ranked OB \(side) armed"
+            body = "Price tapped the\(grade) zone at "
+                + "\(Self.formatPrice(setup.zoneBottom))–\(Self.formatPrice(setup.zoneTop)). "
+                + "Watching for confirmation. " + setup.summary
+        case .entered:
+            title = "\(pairLabel) — Ranked OB \(side) triggered"
+            body = "Confirmed\(grade) setup filled. " + setup.summary
+        case .hitTP:
+            title = "\(pairLabel) — Ranked OB \(side) hit target"
+            body = "The\(grade) plan reached its target. " + setup.summary
+        case .hitSL:
+            title = "\(pairLabel) — Ranked OB \(side) stopped out"
+            body = "The\(grade) plan was stopped. " + setup.summary
+        default:
+            return
+        }
+        inbox?.record(
+            dedupKey: "robs|\(key)|\(setup.stage.rawValue)",
+            cooldown: 60 * 60 * 6,
+            pairID: pairID,
+            pairLabel: pairLabel,
+            category: .strategy,
+            title: title,
+            body: body,
+            timeframeLabel: timeframeLabel.isEmpty ? nil : timeframeLabel
+        )
+    }
+
     private func evaluateBlockZones(
         _ zones: [BlockZoneSnapshot],
         namespace: String,
@@ -477,7 +612,7 @@ final class AlertStore: ObservableObject {
         let direction = zone.isBullish ? "Bullish" : "Bearish"
         let range = "\(Self.formatPrice(zone.low))–\(Self.formatPrice(zone.high))"
         let title: String
-        let body: String
+        var body: String
         if category == .changeOfCharacter {
             // Structure-break wording: the "appear" event is the CHoCH itself.
             switch event {
@@ -504,6 +639,7 @@ final class AlertStore: ObservableObject {
                 body = "Price closed through the \(direction.lowercased()) \(label.lowercased()) at \(range) — zone invalidated."
             }
         }
+        if let detail = zone.detail { body += " · \(detail)" }
         // Dedup key covers the namespace + zone + lifecycle event so
         // re-testing a zone later (a genuinely new event) still gets its
         // own key, while the same transition can't double-fire — and OB

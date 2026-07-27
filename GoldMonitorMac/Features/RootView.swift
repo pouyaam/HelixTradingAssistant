@@ -52,6 +52,21 @@ struct RootView: View {
         // the chrome. Equivalent to .windowStyle(.hiddenTitleBar) plus
         // a thin top inset for them.
         .overlay(alignment: .topLeading) { trafficLightSpacer }
+        .overlay {
+            if app.showCommandPalette {
+                CommandPaletteView(isPresented: $app.showCommandPalette)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
+        .animation(.easeInOut(duration: 0.15), value: app.showCommandPalette)
+        .background {
+            // Hidden button capturing Cmd+K globally across the window
+            Button("") {
+                app.showCommandPalette.toggle()
+            }
+            .keyboardShortcut("k", modifiers: .command)
+            .hidden()
+        }
         .sheet(isPresented: Binding(
             get: { app.showWizard },
             set: { app.showWizard = $0 }

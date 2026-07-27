@@ -13,7 +13,8 @@ struct OscillatorPanel: View {
     let candles: [Candle]
     /// Same bar-index domain the price chart uses; lets pan/zoom on the
     /// price chart move this panel in lock-step.
-    let xDomain: ClosedRange<Double>?
+    @Binding var xDomain: ClosedRange<Double>?
+    @Binding var hoverCrosshairX: Double?
 
     /// Memoizes this panel's oscillator computation so a pan/zoom (which
     /// only changes `xDomain`) doesn't re-run RSI/MACD/Stoch over the
@@ -51,22 +52,53 @@ struct OscillatorPanel: View {
 
                 marks(pts: pts)
                 referenceLines
+
+                if let hx = hoverCrosshairX {
+                    RuleMark(x: .value("Hover X", hx))
+                        .foregroundStyle(Color.white.opacity(0.20))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                }
             }
             .chartXScale(domain: domain)
             .chartYScale(domain: yDom)
             .chartXAxis(.hidden)
             .chartYAxis {
-                AxisMarks(position: .leading, values: yAxisValues(for: yDom)) { value in
+                AxisMarks(position: .trailing, values: yAxisValues(for: yDom)) { value in
                     AxisGridLine().foregroundStyle(Theme.Color.border.opacity(0.5))
                     AxisValueLabel {
                         if let v = value.as(Double.self) {
                             Text(yLabel(v))
                                 .font(.system(size: 8, weight: .medium).monospacedDigit())
                                 .foregroundStyle(Theme.Color.textMuted)
+                                .frame(width: 50, alignment: .trailing)
                         }
                     }
                 }
             }
+            .chartOverlay { proxy in
+                GeometryReader { geo in
+                    Rectangle()
+                        .fill(Color.clear)
+                        .contentShape(Rectangle())
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                let plotFrame = geo[proxy.plotAreaFrame]
+                                let origin = plotFrame.origin
+                                let x = location.x - origin.x
+                                if let xValue: Double = proxy.value(atX: x) {
+                                    let idx = max(0, min(candles.count - 1, Int(xValue.rounded())))
+                                    if hoverCrosshairX != Double(idx) {
+                                        hoverCrosshairX = Double(idx)
+                                    }
+                                }
+                            case .ended:
+                                hoverCrosshairX = nil
+                            }
+                        }
+                }
+            }
+            .scrollZoom(xDomain: $xDomain, totalCandles: candles.count)
             .frame(height: 90)
             .clipped()
         }
@@ -337,5 +369,6 @@ extension OscillatorPanel: Equatable {
         l.instance == r.instance
             && Candle.seriesEqual(l.candles, r.candles)
             && l.xDomain == r.xDomain
+            && l.hoverCrosshairX == r.hoverCrosshairX
     }
 }

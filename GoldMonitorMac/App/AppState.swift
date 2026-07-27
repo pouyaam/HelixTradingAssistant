@@ -27,6 +27,9 @@ final class AppState: ObservableObject {
     // ── Modals / sheets ────────────────────────────────────────────
     @Published var showSettings: Bool = false
 
+    /// When true, the command palette modal overlay is presented (Cmd+K).
+    @Published var showCommandPalette: Bool = false
+
     /// "Chart fullscreen" mode: hides the sidebar and removes outer
     /// padding so the chart can dominate the whole window. Owned at
     /// the app level rather than DashboardView so RootView can react

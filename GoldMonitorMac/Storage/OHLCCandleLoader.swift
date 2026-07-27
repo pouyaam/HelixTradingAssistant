@@ -19,9 +19,8 @@ enum OHLCCandleLoader {
     }
 
     /// Reads the native source series for `tf` and folds it up if
-    /// needed. Falls back to folding from 5m when a native 1h/1d series
-    /// is missing (older DB from before they were ingested, or the
-    /// bootstrap pull hasn't landed yet) so the chart never blanks out.
+    /// needed. Falls back to 5m or 1m when a native series is missing
+    /// so the chart never blanks out.
     static func load(
         repo: OHLCRepo,
         pairID: String,
@@ -44,12 +43,21 @@ enum OHLCCandleLoader {
                 return needsFold ? OHLCAggregator.fold(bars: bars, into: tf)
                                  : bars.map { $0.toCandle() }
             }
-            if sourceTF == "1h" || sourceTF == "1d" {
-                let fallback = try repo.read(
-                    pairID: pairID, timeframe: "5m",
+            let fallbackTFs: [String] = {
+                switch sourceTF {
+                case "5m": return ["1m"]
+                case "1h", "1d": return ["5m", "1m"]
+                default: return ["5m"]
+                }
+            }()
+            for fbTF in fallbackTFs {
+                let fbBars = try repo.read(
+                    pairID: pairID, timeframe: fbTF,
                     since: since, until: until, dropClosedDays: dropClosedDays
                 )
-                return OHLCAggregator.fold(bars: fallback, into: tf)
+                if !fbBars.isEmpty {
+                    return OHLCAggregator.fold(bars: fbBars, into: tf)
+                }
             }
             return []
         } catch {
@@ -83,12 +91,21 @@ enum OHLCCandleLoader {
                 return needsFold ? OHLCAggregator.fold(bars: bars, into: tf)
                                  : bars.map { $0.toCandle() }
             }
-            if sourceTF == "1h" || sourceTF == "1d" {
-                let fallback = try await repo.read(
-                    pairID: pairID, timeframe: "5m",
+            let fallbackTFs: [String] = {
+                switch sourceTF {
+                case "5m": return ["1m"]
+                case "1h", "1d": return ["5m", "1m"]
+                default: return ["5m"]
+                }
+            }()
+            for fbTF in fallbackTFs {
+                let fbBars = try await repo.read(
+                    pairID: pairID, timeframe: fbTF,
                     since: since, until: until, dropClosedDays: dropClosedDays
                 )
-                return OHLCAggregator.fold(bars: fallback, into: tf)
+                if !fbBars.isEmpty {
+                    return OHLCAggregator.fold(bars: fbBars, into: tf)
+                }
             }
             return []
         } catch {

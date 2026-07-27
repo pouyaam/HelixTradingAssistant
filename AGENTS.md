@@ -50,6 +50,11 @@ GRDB, and the local `claude` / `codex` / `opencode` CLIs.
   Volume-Filtered Order Blocks (swing-anchored OBs with a volumetric
   up/down split + balance %, ATR size filter, breaker/invalidation
   lifecycle, and overlapping-zone merging — PineScript v6 port).
+  Ranked OB also carries an optional **strategy layer**
+  (`RankedOBStrategy`): grade filter → zone retest → confirmation
+  (rejection candle / micro-BOS / displacement FVG / bare touch) →
+  entry, ATR-buffered stop, TP1 + TP2 with a breakeven move, drawn on
+  the chart and pushed to the Inbox as arm / fill / outcome events.
   Multi-instance: indicators/oscillators are `[IndicatorInstance]` /
   `[OscillatorInstance]` arrays with per-instance params
   (`ParamSpec`/`ParamValue`), hide/show, and floating settings panels.
@@ -402,6 +407,12 @@ leave the model to rank, narrate, and judge edge cases. All items open:
   reaches the auto-trader queue; per-type win rate visible.
 
 ### Other known follow-ups
+
+- Ranked-OB strategy plans live and die with their zone: once
+  `RankedOrderBlocks.compute` drops a fully-consumed breaker, its setup
+  vanishes from the overlay rather than persisting as history. Fine for
+  live assist; a real hit-rate-by-grade study needs the engine to retain
+  retired zones (or a separate replay path).
 
 - Track down the iPad "Modifying state during view update" warning flood
   (a pre-existing SwiftUI re-render loop; not from the CHoCH/indicator or

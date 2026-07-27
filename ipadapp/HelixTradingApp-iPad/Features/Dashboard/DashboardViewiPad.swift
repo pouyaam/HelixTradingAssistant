@@ -213,10 +213,10 @@ struct DashboardViewiPad: View {
                 AnalysisPageiPad(
                     pair: pair,
                     timeframe: timeframe,
-                    candles: ChartPlotiPad.loadCandles(pairID: pair.id, tf: timeframe, app: app),
+                    candles: [],
                     livePrice: livePrices[pair.id],
                     loadCandles: { tf in
-                        ChartPlotiPad.loadCandles(pairID: pair.id, tf: tf, app: app)
+                        await ChartPlotiPad.loadCandlesAsync(pairID: pair.id, tf: tf, app: app)
                     },
                     onApplySRLevels:      { srLevels = $0 },
                     onApplyFVGZones:      { fvgZones = $0 },
@@ -783,7 +783,17 @@ private struct ChartPlotiPad: View {
     /// framed to the *candles* (not indicators/overlays), matching the
     /// Mac chart's Reset and the chart's own double-tap.
     private func resetChart() {
-        guard candles.count > 0 else { xDomain = nil; yDomain = nil; return }
+        if candles.isEmpty {
+            xDomain = nil
+            yDomain = nil
+            yahoo.clearDeepBackfilled(for: pairID)
+            pendingChartReset = true
+            Task {
+                await reloadCandles()
+                await warmHistoryAsync()
+            }
+            return
+        }
         let domain = ChartWindow.defaultDomain(count: candles.count)
         yDomain = ChartWindow.candleYDomain(candles: candles, domain: domain)
         xDomain = domain
@@ -793,7 +803,7 @@ private struct ChartPlotiPad: View {
 
     @MainActor
     private func reloadCandles() async {
-        let loaded = Self.loadCandles(pairID: pairID, tf: timeframe, app: app)
+        let loaded = await Self.loadCandlesAsync(pairID: pairID, tf: timeframe, app: app)
         // Skip state mutation when data is unchanged — avoids
         // "Modifying state during view update" and unnecessary redraws.
         guard loaded != candles else {
@@ -844,13 +854,19 @@ private struct ChartPlotiPad: View {
         )
     }
 
-    private func warmHistory() {
+    private func warmHistoryAsync() async {
         let currentSrc = OHLCCandleLoader.sourceTimeframeTag(for: timeframe)
+        await yahoo.ensureDeepHistory(pairID: pairID, sourceTF: currentSrc)
+        guard !Task.isCancelled else { return }
+        await reloadCandles()
+        await yahoo.backfillAll(pairID: pairID)
+        guard !Task.isCancelled else { return }
+        await reloadCandles()
+    }
+
+    private func warmHistory() {
         Task {
-            await yahoo.ensureDeepHistory(pairID: pairID, sourceTF: currentSrc)
-            await reloadCandles()
-            await yahoo.backfillAll(pairID: pairID)
-            await reloadCandles()
+            await warmHistoryAsync()
         }
     }
 
@@ -862,7 +878,7 @@ private struct ChartPlotiPad: View {
         let until = Date()
         let margin = Double(max(timeframe.seconds * 3, 6 * 3600))
         let since = until.addingTimeInterval(-margin)
-        let recent = OHLCCandleLoader.load(
+        let recent = await OHLCCandleLoader.loadAsync(
             repo: db.ohlcRepo, pairID: pairID, tf: timeframe,
             since: since, until: until, dropClosedDays: respectsWeekend
         )
@@ -876,6 +892,16 @@ private struct ChartPlotiPad: View {
         guard merged != candles else { return }
         candles = merged
         candleCount = candles.count
+    }
+
+    static func loadCandlesAsync(pairID: String, tf: Timeframe, app: AppState) async -> [Candle] {
+        guard let db = app.database else { return [] }
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        let respectsWeekend = pair?.category != .crypto
+        return await OHLCCandleLoader.loadAsync(
+            repo: db.ohlcRepo, pairID: pairID, tf: tf,
+            since: Date.distantPast, until: Date(), dropClosedDays: respectsWeekend
+        )
     }
 
     static func loadCandles(pairID: String, tf: Timeframe, app: AppState) -> [Candle] {

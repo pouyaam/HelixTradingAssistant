@@ -184,6 +184,15 @@ struct ChartView: View {
     /// shows the same time the News tab does.
     var newsTimeZone: TimeZone = .current
 
+    /// Whether to render Sentinel Strategy Radar setup overlays on the chart canvas.
+    var showSentinelRadar: Bool = true
+
+    /// Selected trading pair ID for filtering active Sentinel Radar setups.
+    var currentPairID: String? = nil
+
+    /// Synced crosshair bar index shared across main chart and oscillator sub-panels.
+    @Binding var hoverCrosshairX: Double?
+
     @State private var hovered: HoverState?
 
     /// The news event whose flag the user clicked, if any — drives the
@@ -399,6 +408,17 @@ struct ChartView: View {
 
     /// Ranked Order Block zones — swing-structure OBs graded A/B/C by
     /// Volume Profile + Ichimoku confluence.
+    /// Trade plans derived from the zones above. Empty unless the
+    /// indicator's "Strategy" toggle is on — see `RankedOBStrategy`.
+    private var rankedOBSetups: [RankedOBStrategy.Setup] {
+        guard indicators.contains(.rankedOrderBlock) else { return [] }
+        return derived.rankedOBStrategy(
+            candles: candles,
+            zones: rankedOBZones,
+            config: indicatorConfig.rankedOBStrategyConfiguration
+        )
+    }
+
     private var rankedOBZones: [RankedOrderBlocks.Zone] {
         guard indicators.contains(.rankedOrderBlock) else { return [] }
         return derived.rankedOrderBlocks(
@@ -406,6 +426,16 @@ struct ChartView: View {
             config: indicatorConfig.rankedOrderBlockConfiguration
         )
     }
+
+    private var volumeRankedOBZones: [VolumeRankedOrderBlocks.Zone] {
+        guard indicators.contains(.volumeRankedOrderBlock) else { return [] }
+        return derived.volumeRankedOrderBlocks(
+            candles: candles,
+            config: indicatorConfig.volumeRankedOBConfiguration
+        )
+    }
+
+
 
     /// Change of Character confluence zones — structure break + OB/FVG.
     private var chochZones: [ChangeOfCharacter.Zone] {
@@ -810,7 +840,10 @@ struct ChartView: View {
             sonarlabOBMarks
             ichimokuOBMarks
             rankedOBMarks
+            volumeRankedOBMarks
+            rankedOBStrategyMarks
             volumeFilteredOBMarks
+            sentinelRadarMarks
             htfChochMarks
             chochMarks
             scenarioMarks
@@ -838,23 +871,22 @@ struct ChartView: View {
             ichimokuMarks(visible: indexSet)
 
             // UT Bot trailing-stop line + buy/sell labels. Rendered last
-            // so the labels sit on top of every other mark.
-            utBotMarks(indices: indices, visible: indexSet)
-
-            // Crosshair — drawn last so it overlays the data. Vertical
+             // Crosshair — drawn last so it overlays the data. Vertical
             // rule snaps to the bar column under the cursor (bars are
             // discrete, free X would land between candles). Horizontal
             // rule follows the cursor's free Y so the user can read
             // the price at any point on the chart — TradingView's
             // default Cross mode. Both rules carry pill labels at the
             // axes showing the exact price (Y) and timestamp (X).
-            if let h = hovered, h.index < displayCandles.count {
-                let dc = displayCandles[h.index]
-                RuleMark(x: .value("Hover X", Double(h.index)))
+            let activeHoverX = hovered.map { Double($0.index) } ?? hoverCrosshairX
+            if let hX = activeHoverX, Int(hX) >= 0, Int(hX) < displayCandles.count {
+                let hIndex = Int(hX)
+                let dc = displayCandles[hIndex]
+                RuleMark(x: .value("Hover X", hX))
                     .foregroundStyle(Color.white.opacity(0.18))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     .annotation(position: .bottom, alignment: .center, spacing: 2) {
-                        Text(Self.dateFormatter.string(from: h.candle.bucketStart))
+                        Text(Self.dateFormatter.string(from: dc.bucketStart))
                             .font(.system(size: 9, weight: .bold).monospacedDigit())
                             .foregroundStyle(.white)
                             .padding(.horizontal, 6)
@@ -864,55 +896,42 @@ struct ChartView: View {
                                     .fill(Theme.Color.surfaceMax)
                             )
                     }
+            }
+
+            if let h = hovered, h.index < displayCandles.count {
                 RuleMark(y: .value("Hover Y", h.cursorPrice))
                     .foregroundStyle(Color.white.opacity(0.18))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
-                        Text(Self.priceExact(h.cursorPrice))
-                            .font(.system(size: 10, weight: .bold).monospacedDigit())
+                        Text(PriceFormat.exact(h.cursorPrice))
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
                             .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1.5)
                             .background(
-                                Capsule().fill(Theme.Color.surfaceMax)
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(Theme.Color.surfaceMax)
                             )
                     }
-                // Marker on the snapped candle close so the user still
-                // sees which bar the crosshair is reading. Doesn't
-                // anchor the horizontal line any more — that follows
-                // the cursor.
-                PointMark(
-                    x: .value("Hover", Double(h.index)),
-                    y: .value("Hover", dc.close)
-                )
-                .foregroundStyle(accent)
-                .symbolSize(70)
             }
         }
-        .chartYScale(domain: effectiveYDomain)
         .chartXScale(domain: effectiveXDomain)
+        .chartYScale(domain: effectiveYDomain)
         .chartXAxis(content: xAxis)
-        .chartYAxis(content: yAxis)
-        .chartPlotStyle { plot in
-            plot
-                .background(
-                    LinearGradient(
-                        colors: [
-                            Theme.Color.surface.opacity(0.0),
-                            Theme.Color.surface.opacity(0.6),
-                        ],
-                        startPoint: .top, endPoint: .bottom
-                    )
-                )
+        .chartYAxis {
+            AxisMarks(position: .trailing, values: .automatic(desiredCount: 6)) { value in
+                AxisGridLine().foregroundStyle(Theme.Color.border.opacity(0.5))
+                AxisValueLabel {
+                    if let price = value.as(Double.self) {
+                        Text(PriceFormat.exact(price))
+                            .font(.system(size: 9, weight: .regular, design: .monospaced))
+                            .foregroundStyle(Theme.Color.textMuted)
+                            .frame(width: 50, alignment: .trailing)
+                    }
+                }
+            }
         }
         .chartOverlay { proxy in
-            // Transparent gesture catcher sized to the plot area. Maps the
-            // cursor's X position back into the data domain (Date), then
-            // snaps to the nearest candle. Set to nil on hover-end so the
-            // crosshair disappears cleanly. Also hosts the drag-to-pan
-            // and pinch-to-zoom gestures — both operate on `xDomain` and
-            // need the plot frame size to translate point-distance into
-            // time-distance, which lives on the chart proxy.
             GeometryReader { geo in
                 let plotFrame = geo[proxy.plotAreaFrame]
                 ZStack(alignment: .topLeading) {
@@ -943,8 +962,12 @@ struct ChartView: View {
                                     cursor: location,
                                     cursorPrice: yPrice
                                 )
+                                if hoverCrosshairX != Double(idx) {
+                                    hoverCrosshairX = Double(idx)
+                                }
                             case .ended:
                                 hovered = nil
+                                hoverCrosshairX = nil
                             }
                         }
                         .gesture(dragGesture(
@@ -1466,6 +1489,71 @@ struct ChartView: View {
             }
         }
         return best?.0
+    }
+
+    /// Sentinel Strategy Radar overlays: ranked live trade setups drawn
+    /// directly on the chart canvas with entry line, TP, SL, and rank badge.
+    @ChartContentBuilder
+    private var sentinelRadarMarks: some ChartContent {
+        if showSentinelRadar, let pairID = currentPairID {
+            let alerts = StrategySentinel.shared.activeRadarAlerts.filter { $0.pairID == pairID }
+            ForEach(alerts) { alert in
+                let isBuy = alert.direction == .buy
+                let dirColor = isBuy ? Color(red: 0.06, green: 0.73, blue: 0.51) : Color(red: 0.94, green: 0.27, blue: 0.27)
+                let rank = alert.volumeRank ?? 1
+                let rankMedal = rank == 1 ? "🥇 #1" : (rank == 2 ? "🥈 #2" : (rank == 3 ? "🥉 #3" : "🏅 #\(rank)"))
+
+                // Shaded Entry-TP zone
+                RectangleMark(
+                    xStart: .value("BarStart", max(0, candles.count - 35)),
+                    xEnd: .value("BarEnd", max(0, candles.count - 1)),
+                    yStart: .value("Entry", alert.entryPrice),
+                    yEnd: .value("TP", alert.takeProfit)
+                )
+                .foregroundStyle(dirColor.opacity(0.06))
+
+                // Entry RuleMark with Badge
+                RuleMark(y: .value("Sentinel Entry", alert.entryPrice))
+                    .foregroundStyle(dirColor)
+                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+                    .annotation(position: .overlay, alignment: .trailing) {
+                        HStack(spacing: 4) {
+                            Text(rankMedal)
+                                .font(.system(size: 9, weight: .heavy, design: .monospaced))
+
+                            Text(alert.direction.rawValue)
+                                .font(.system(size: 8, weight: .heavy))
+
+                            if alert.isHTFNested {
+                                Text("⚡HTF")
+                                    .font(.system(size: 7, weight: .heavy))
+                            }
+
+                            Text(PriceFormat.exact(alert.entryPrice))
+                                .font(.system(size: 9, weight: .bold, design: .monospaced))
+
+                            Text("(\(String(format: "%.1fx", alert.riskRewardRatio)))")
+                                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2.5)
+                        .background(dirColor)
+                        .foregroundStyle(.white)
+                        .cornerRadius(4)
+                        .shadow(color: .black.opacity(0.4), radius: 3)
+                    }
+
+                // Target TP Line
+                RuleMark(y: .value("Sentinel TP", alert.takeProfit))
+                    .foregroundStyle(Theme.Color.success.opacity(0.7))
+                    .lineStyle(StrokeStyle(lineWidth: 1.0, dash: [2, 3]))
+
+                // Stop Loss Line
+                RuleMark(y: .value("Sentinel SL", alert.stopLoss))
+                    .foregroundStyle(Theme.Color.danger.opacity(0.7))
+                    .lineStyle(StrokeStyle(lineWidth: 1.0, dash: [2, 3]))
+            }
+        }
     }
 
     /// Screen-space distance from `p` to a drawing's nearest pixel.
@@ -3149,8 +3237,95 @@ struct ChartView: View {
                     .fixedSize()
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
-                    .background(Capsule().fill(style.base.opacity(0.85)))
             }
+        }
+    }
+
+    // MARK: - Volume-Ranked OB Marks (Volume Profile + RVOL)
+
+    @ChartContentBuilder
+    private var volumeRankedOBMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(volumeRankedOBZones) { zone in
+            volumeRankedOBMark(for: zone, lastIndex: lastIndex)
+        }
+    }
+
+    @ChartContentBuilder
+    private func volumeRankedOBMark(for zone: VolumeRankedOrderBlocks.Zone, lastIndex: Int) -> some ChartContent {
+        let style = Self.volumeRankedOBStyle(for: zone)
+        let xStart = Double(zone.startIndex)
+        let xEnd   = Double(min(zone.endIndex, lastIndex))
+        let edge = StrokeStyle(
+            lineWidth: zone.isCombined ? 2.5 : 1.5,
+            dash: zone.isBreaker ? [4, 3] : []
+        )
+
+        RectangleMark(
+            xStart: .value("VROB start", xStart),
+            xEnd:   .value("VROB end",   xEnd),
+            yStart: .value("VROB low",   zone.bottom),
+            yEnd:   .value("VROB high",  zone.top)
+        )
+        .foregroundStyle(style.base.opacity(style.fillOpacity))
+
+        RuleMark(
+            xStart: .value("VROB start hi", xStart),
+            xEnd:   .value("VROB end hi",   xEnd),
+            y:      .value("VROB hi",       zone.top)
+        )
+        .foregroundStyle(style.base.opacity(style.borderOpacity))
+        .lineStyle(edge)
+
+        RuleMark(
+            xStart: .value("VROB start lo", xStart),
+            xEnd:   .value("VROB end lo",   xEnd),
+            y:      .value("VROB lo",       zone.bottom)
+        )
+        .foregroundStyle(style.base.opacity(style.borderOpacity))
+        .lineStyle(edge)
+
+        if indicatorConfig.robShowLabels {
+            PointMark(
+                x: .value("VROB label x", Self.rankedOBLabelX(
+                    xStart: xStart, xEnd: xEnd, domain: effectiveXDomain
+                )),
+                y: .value("VROB label y", (zone.top + zone.bottom) / 2)
+            )
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .center, spacing: 0) {
+                Text(Self.volumeRankedOBBadge(for: zone))
+                    .font(.system(size: 8, weight: .heavy))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(style.base.opacity(0.88)))
+            }
+        }
+    }
+
+    private static func volumeRankedOBBadge(for zone: VolumeRankedOrderBlocks.Zone) -> String {
+        var text = zone.badge
+        if zone.isCombined { text += " ·M" }
+        if zone.isBreaker  { text += " ·BRK" }
+        return text
+    }
+
+    private static func volumeRankedOBStyle(
+        for zone: VolumeRankedOrderBlocks.Zone
+    ) -> (base: Color, fillOpacity: Double, borderOpacity: Double) {
+        guard !zone.isBreaker else {
+            return (Theme.Color.textMuted, 0.08, 0.50)
+        }
+        let cyanBase = Color(red: 0.15, green: 0.85, blue: 0.95)
+        let directional = zone.isBullish ? Color(red: 0.10, green: 0.90, blue: 0.70) : Color(red: 0.98, green: 0.35, blue: 0.60)
+        switch zone.grade {
+        case .a:        return (directional, 0.28, 0.98)
+        case .b:        return (directional, 0.16, 0.75)
+        case .c:        return (Theme.Color.textMuted, 0.10, 0.50)
+        case .unranked: return (cyanBase, 0.16, 0.75)
         }
     }
 
@@ -3179,6 +3354,92 @@ struct ChartView: View {
         return text
     }
 
+    // MARK: - Ranked OB strategy marks
+
+    /// The trade plan for each qualifying zone: entry (dashed, tinted by
+    /// direction), stop (red), TP1 and TP2 (green, TP2 dashed). Plans that
+    /// haven't triggered yet draw faint — they're a watch item, not a
+    /// position — and solidify once price fills them. Resolved plans stop
+    /// at their resolution bar; live ones run to the chart edge.
+    @ChartContentBuilder
+    private var rankedOBStrategyMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(rankedOBSetups) { setup in
+            rankedOBStrategyMark(for: setup, lastIndex: lastIndex)
+        }
+    }
+
+    @ChartContentBuilder
+    private func rankedOBStrategyMark(
+        for setup: RankedOBStrategy.Setup,
+        lastIndex: Int
+    ) -> some ChartContent {
+        let dirColor = setup.direction == .long ? Theme.Color.success : Theme.Color.danger
+        let isLive = setup.entryIndex != nil
+        let planStart = Double(min(setup.planIndex, lastIndex))
+        let planEnd   = Double(min(setup.planEnd(lastIndex: lastIndex), lastIndex))
+        // Pending plans are hypotheses; filled ones are positions. The
+        // opacity split is the fastest way to tell them apart at a glance.
+        let weight = isLive ? 1.0 : 0.5
+        let entryDash: [CGFloat] = isLive ? [5, 3] : [2, 4]
+
+        RuleMark(xStart: .value("ROBS entry s", planStart), xEnd: .value("ROBS entry e", planEnd),
+                 y: .value("ROBS entry", setup.entry))
+        .foregroundStyle(dirColor.opacity(0.9 * weight))
+        .lineStyle(StrokeStyle(lineWidth: 1.5, dash: entryDash))
+
+        RuleMark(xStart: .value("ROBS sl s", planStart), xEnd: .value("ROBS sl e", planEnd),
+                 y: .value("ROBS sl", setup.stopLoss))
+        .foregroundStyle(Theme.Color.danger.opacity(0.9 * weight))
+        .lineStyle(StrokeStyle(lineWidth: 1.4))
+
+        RuleMark(xStart: .value("ROBS tp1 s", planStart), xEnd: .value("ROBS tp1 e", planEnd),
+                 y: .value("ROBS tp1", setup.takeProfit1))
+        .foregroundStyle(Theme.Color.success.opacity(0.9 * weight))
+        .lineStyle(StrokeStyle(lineWidth: 1.4))
+
+        RuleMark(xStart: .value("ROBS tp2 s", planStart), xEnd: .value("ROBS tp2 e", planEnd),
+                 y: .value("ROBS tp2", setup.takeProfit2))
+        .foregroundStyle(Theme.Color.success.opacity(0.75 * weight))
+        .lineStyle(StrokeStyle(lineWidth: 1.4, dash: [5, 3]))
+
+        if indicatorConfig.robShowLabels {
+            PointMark(x: .value("ROBS lbl x", planEnd), y: .value("ROBS lbl y", setup.entry))
+                .symbolSize(0)
+                .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                    setupTag(setup.badge, color: dirColor)
+                }
+            PointMark(x: .value("ROBS sl lbl x", planEnd), y: .value("ROBS sl lbl y", setup.stopLoss))
+                .symbolSize(0)
+                .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                    setupTag("SL", color: Theme.Color.danger)
+                }
+            PointMark(x: .value("ROBS tp1 lbl x", planEnd), y: .value("ROBS tp1 lbl y", setup.takeProfit1))
+                .symbolSize(0)
+                .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                    setupTag("TP1", color: Theme.Color.success)
+                }
+            PointMark(x: .value("ROBS tp2 lbl x", planEnd), y: .value("ROBS tp2 lbl y", setup.takeProfit2))
+                .symbolSize(0)
+                .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                    setupTag("TP2", color: Theme.Color.success)
+                }
+        }
+
+        // Lifecycle dots: where price tapped the zone, where the setup
+        // confirmed, and where it filled.
+        if let arm = setup.armIndex, arm <= lastIndex {
+            PointMark(x: .value("ROBS arm x", Double(arm)), y: .value("ROBS arm y", setup.entry))
+                .symbolSize(18)
+                .foregroundStyle(dirColor.opacity(0.6))
+        }
+        if let fill = setup.entryIndex, fill <= lastIndex {
+            PointMark(x: .value("ROBS fill x", Double(fill)), y: .value("ROBS fill y", setup.entry))
+                .symbolSize(45)
+                .foregroundStyle(dirColor)
+        }
+    }
+
     /// Grade → colour weight. Breakers desaturate to grey whatever grade
     /// they held; C-grade zones are grey from the start.
     private static func rankedOBStyle(
@@ -3195,6 +3456,10 @@ struct ChartView: View {
         case .unranked: return (IndicatorKind.rankedOrderBlock.color, 0.12, 0.65)
         }
     }
+
+    // MARK: - Ranked OB V2 Marks
+
+
 
     /// Change of Character overlays. For every CHoCH we always draw the
     /// broken-structure line + a "CHoCH↑/↓" capsule at the break bar; the
@@ -5464,6 +5729,8 @@ struct ChartView: View {
             ichimokuOutput: ichimokuOutput,
             ichimokuOBZones: ichimokuOBZones,
             rankedOBZones: rankedOBZones,
+            volumeRankedOBZones: volumeRankedOBZones,
+            rankedOBSetups: rankedOBSetups,
             volumeFilteredOBZones: volumeFilteredOBZones,
             chochZones: chochZones,
             htfChochZones: htfChochZones,
@@ -5605,12 +5872,13 @@ extension ChartView: Equatable {
             && l.selectedDrawingID == r.selectedDrawingID
             && l.trades == r.trades
             && l.journalEntries == r.journalEntries
-            && l.livePrice == r.livePrice
+            && (l.livePrice == r.livePrice || (l.livePrice != nil && r.livePrice != nil && abs(l.livePrice! - r.livePrice!) < 0.05))
             && l.replayActive == r.replayActive
             && l.isPickingReplayAnchor == r.isPickingReplayAnchor
             && l.showHoverTooltip == r.showHoverTooltip
             && Self.newsEqual(l.newsEvents, r.newsEvents)
             && l.newsTimeZone == r.newsTimeZone
+            && l.hoverCrosshairX == r.hoverCrosshairX
     }
 
     /// Cheap news-list comparison for the Equatable perf gate: same

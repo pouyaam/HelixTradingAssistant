@@ -83,7 +83,8 @@ struct AnalysisPlansColumn: View {
             supplyDemandZones: supplyDemandZones,
             taScenario: taScenario,
             taAltScenario: taAltScenario,
-            livePrice: livePrice
+            livePrice: livePrice,
+            hoverCrosshairX: .constant(nil)
         )
         .frame(height: 320)
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md))

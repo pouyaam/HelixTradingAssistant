@@ -85,4 +85,27 @@ extension View {
         let s = Theme.Shadow.card
         return self.shadow(color: s.color, radius: s.radius, x: s.x, y: s.y)
     }
+
+    /// Formats price/PNL figures with monospaced digits to prevent layout jitter on live updates.
+    func monospacedPrice() -> some View {
+        self.monospacedDigit()
+    }
+
+    /// Clean glassmorphic surface backdrop with subtle border and shadow.
+    func glassmorphicCard(cornerRadius: CGFloat = Theme.Radius.lg) -> some View {
+        self
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Theme.Color.surface.opacity(0.85))
+                    .background(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(Theme.Color.border, lineWidth: 1)
+            )
+            .cardShadow()
+    }
 }

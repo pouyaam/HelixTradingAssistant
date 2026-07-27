@@ -485,6 +485,63 @@ final class ChartDerivedCache: ObservableObject {
         }
     }
 
+    // ── Ranked OB strategy (entry / SL / TP plans) ─────────────────
+
+    private struct RankedOBStrategySig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastClose: Double
+        /// Zone identities + geometry. The plans are derived from these,
+        /// so a re-grade that leaves every zone where it was must not
+        /// invalidate the slot.
+        let zoneKeys: [String]
+        let config: RankedOBStrategy.Config
+    }
+    private let rankedOBStrategySlot = Slot<RankedOBStrategySig, [RankedOBStrategy.Setup]>([])
+
+    func rankedOBStrategy(
+        candles: [Candle],
+        zones: [RankedOrderBlocks.Zone],
+        config: RankedOBStrategy.Config
+    ) -> [RankedOBStrategy.Setup] {
+        guard config.enabled else { return [] }
+        let sig = RankedOBStrategySig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastClose: candles.last?.close ?? 0,
+            zoneKeys: zones.map { "\($0.id)|\($0.top)|\($0.bottom)|\($0.grade.rawValue)" },
+            config: config
+        )
+        return resolve(rankedOBStrategySlot, signature: sig) {
+            RankedOBStrategy.compute(candles, zones: zones, config: config)
+        }
+    }
+
+    // ── Volume-Ranked Order Blocks (Volume + Volume Profile) ───────────
+
+    private struct VolumeRankedOBSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastClose: Double
+        let config: VolumeRankedOrderBlocks.Config
+    }
+    private let volumeRankedOBSlot = Slot<VolumeRankedOBSig, [VolumeRankedOrderBlocks.Zone]>([])
+
+    func volumeRankedOrderBlocks(
+        candles: [Candle],
+        config: VolumeRankedOrderBlocks.Config
+    ) -> [VolumeRankedOrderBlocks.Zone] {
+        let sig = VolumeRankedOBSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastClose: candles.last?.close ?? 0,
+            config: config
+        )
+        return resolve(volumeRankedOBSlot, signature: sig) {
+            VolumeRankedOrderBlocks.compute(candles, config: config)
+        }
+    }
+
     // ── Change of Character (CHoCH + OB/FVG confluence) ────────────────
 
     private struct CHoCHSig: Equatable {
@@ -1111,6 +1168,8 @@ final class ChartDerivedCache: ObservableObject {
         let ichimokuOutput: Ichimoku.Output
         let ichimokuOBZones: [IchimokuOrderBlocks.Zone]
         let rankedOBZones: [RankedOrderBlocks.Zone]
+        let volumeRankedOBZones: [VolumeRankedOrderBlocks.Zone]
+        var rankedOBSetups: [RankedOBStrategy.Setup] = []
         let volumeFilteredOBZones: [VolumeFilteredOrderBlocks.Zone]
         let chochZones: [ChangeOfCharacter.Zone]
         let htfChochZones: [ChangeOfCharacter.DatedZone]
@@ -1147,6 +1206,8 @@ final class ChartDerivedCache: ObservableObject {
         let ichimokuLineCount: Int
         let ichimokuOBCount: Int
         let rankedOBCount: Int
+        let volumeRankedOBCount: Int
+        let rankedOBSetupKeys: [String]
         let volumeFilteredOBCount: Int
         let chochCount: Int
         let htfChochCount: Int
@@ -1190,6 +1251,13 @@ final class ChartDerivedCache: ObservableObject {
             ichimokuLineCount: data.ichimokuOutput.kijun.count,
             ichimokuOBCount: data.ichimokuOBZones.count,
             rankedOBCount: data.rankedOBZones.count,
+            volumeRankedOBCount: data.volumeRankedOBZones.count,
+            // Count alone won't do here: a plan's levels move when it
+            // re-bases on a confirmation close, without the set changing
+            // size, and the Y-domain has to follow.
+            rankedOBSetupKeys: data.rankedOBSetups.map {
+                "\($0.id)|\($0.stopLoss)|\($0.takeProfit2)"
+            },
             volumeFilteredOBCount: data.volumeFilteredOBZones.count,
             chochCount: data.chochZones.count,
             htfChochCount: data.htfChochZones.count,
@@ -1277,6 +1345,16 @@ final class ChartDerivedCache: ObservableObject {
             for zone in data.rankedOBZones {
                 if zone.bottom < lo { lo = zone.bottom }
                 if zone.top > hi { hi = zone.top }
+            }
+            for zone in data.volumeRankedOBZones {
+                if zone.bottom < lo { lo = zone.bottom }
+                if zone.top > hi { hi = zone.top }
+            }
+            for setup in data.rankedOBSetups {
+                for v in [setup.entry, setup.stopLoss, setup.takeProfit1, setup.takeProfit2] {
+                    if v < lo { lo = v }
+                    if v > hi { hi = v }
+                }
             }
             for zone in data.volumeFilteredOBZones {
                 if zone.bottom < lo { lo = zone.bottom }

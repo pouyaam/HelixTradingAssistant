@@ -60,7 +60,7 @@ struct VolumeBarsView: View {
         .chartYAxis {
             // Compact "K/M/B" labels matching the main chart's style. Two
             // marks is plenty for a strip this thin.
-            AxisMarks(position: .leading, values: .automatic(desiredCount: 2)) { value in
+            AxisMarks(position: .trailing, values: .automatic(desiredCount: 2)) { value in
                 AxisGridLine()
                     .foregroundStyle(Theme.Color.border)
                 AxisValueLabel {
@@ -68,6 +68,7 @@ struct VolumeBarsView: View {
                         Text(Self.compact(v))
                             .font(.system(size: 9, weight: .medium))
                             .foregroundStyle(Theme.Color.textMuted)
+                            .frame(width: 50, alignment: .trailing)
                     }
                 }
             }

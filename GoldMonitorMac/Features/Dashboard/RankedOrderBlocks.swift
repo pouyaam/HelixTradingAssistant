@@ -97,6 +97,14 @@ enum RankedOrderBlocks {
         let startIndex: Int
         /// Right edge — the break bar for a breaker, else the last bar.
         let endIndex: Int
+        /// Bar whose close broke the protected swing and *created* this
+        /// zone — always ≥ `startIndex`, usually a few bars later. The
+        /// order block itself is the impulse's extreme candle, so every
+        /// bar between the two sits inside or beside the zone by
+        /// construction. Anything that wants to watch for price
+        /// *returning* to the zone (see `RankedOBStrategy`) must start
+        /// its scan here, not at `startIndex`.
+        let confirmIndex: Int
         let top: Double
         let bottom: Double
         let isBullish: Bool
@@ -107,6 +115,10 @@ enum RankedOrderBlocks {
         let grade: Grade
         let score: Int
         let maxScore: Int
+        /// Wilder ATR at `confirmIndex` — the volatility the zone was
+        /// born into. Exposed so stop placement can be scaled off it
+        /// without recomputing the series.
+        let atr: Double
 
         var id: String {
             "rob-\(startIndex)-\(endIndex)-\(isBullish ? "bull" : "bear")-\(isCombined ? "m" : "s")"
@@ -125,6 +137,8 @@ enum RankedOrderBlocks {
         var bottom: Double
         var isBullish: Bool
         var startIndex: Int
+        var confirmIndex: Int
+        var atr: Double
         var isBreaker: Bool = false
         var breakIndex: Int? = nil
         var isCombined: Bool = false
@@ -235,7 +249,8 @@ enum RankedOrderBlocks {
                     }
                 }
                 if zoneTop > zoneBottom, maxWidth <= 0 || (zoneTop - zoneBottom) <= maxWidth {
-                    var z = WorkingZone(top: zoneTop, bottom: zoneBottom, isBullish: true, startIndex: zoneIdx)
+                    var z = WorkingZone(top: zoneTop, bottom: zoneBottom, isBullish: true,
+                                        startIndex: zoneIdx, confirmIndex: i, atr: atrHere)
                     let scored = score(
                         top: zoneTop, bottom: zoneBottom, isBullish: true,
                         at: i, candles: candles, ichi: ichi, cfg: cfg
@@ -262,7 +277,8 @@ enum RankedOrderBlocks {
                     }
                 }
                 if zoneTop > zoneBottom, maxWidth <= 0 || (zoneTop - zoneBottom) <= maxWidth {
-                    var z = WorkingZone(top: zoneTop, bottom: zoneBottom, isBullish: false, startIndex: zoneIdx)
+                    var z = WorkingZone(top: zoneTop, bottom: zoneBottom, isBullish: false,
+                                        startIndex: zoneIdx, confirmIndex: i, atr: atrHere)
                     let scored = score(
                         top: zoneTop, bottom: zoneBottom, isBullish: false,
                         at: i, candles: candles, ichi: ichi, cfg: cfg
@@ -289,6 +305,7 @@ enum RankedOrderBlocks {
             Zone(
                 startIndex: z.startIndex,
                 endIndex: z.isBreaker ? (z.breakIndex ?? n - 1) : n - 1,
+                confirmIndex: z.confirmIndex,
                 top: z.top,
                 bottom: z.bottom,
                 isBullish: z.isBullish,
@@ -296,7 +313,8 @@ enum RankedOrderBlocks {
                 isCombined: z.isCombined,
                 grade: grade(score: z.score, maxScore: z.maxScore),
                 score: z.score,
-                maxScore: z.maxScore
+                maxScore: z.maxScore,
+                atr: z.atr
             )
         }
     }
@@ -326,11 +344,17 @@ enum RankedOrderBlocks {
                     guard overlaps(work[i], work[j], lastIndex: lastIndex, threshold: cfg.mergeThreshold) else { continue }
 
                     let a = work[i], b = work[j]
+                    // The merged zone is "created" when its later half
+                    // was, and inherits that half's ATR — a retest scan
+                    // must not start before both halves exist.
+                    let later = a.confirmIndex >= b.confirmIndex ? a : b
                     var m = WorkingZone(
                         top: max(a.top, b.top),
                         bottom: min(a.bottom, b.bottom),
                         isBullish: a.isBullish,
-                        startIndex: min(a.startIndex, b.startIndex)
+                        startIndex: min(a.startIndex, b.startIndex),
+                        confirmIndex: later.confirmIndex,
+                        atr: later.atr
                     )
                     m.isBreaker = a.isBreaker || b.isBreaker
                     m.breakIndex = [a.breakIndex, b.breakIndex].compactMap { $0 }.max()

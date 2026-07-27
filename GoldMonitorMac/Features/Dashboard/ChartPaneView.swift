@@ -67,6 +67,7 @@ struct ChartPaneView: View {
     @State private var candles: [Candle] = []
     @State private var xDomain: ClosedRange<Double>?
     @State private var yDomain: ClosedRange<Double>?
+    @State private var hoverCrosshairX: Double? = nil
     /// Armed drawing tool for this pane's next drag gesture on the
     /// chart. `.none` = normal pan/zoom cursor. Mirrors
     /// `DashboardView.activeDrawingTool`, just scoped per pane instead
@@ -214,7 +215,8 @@ struct ChartPaneView: View {
                         livePrice: yahoo.latestPrices[pane.pairID],
                         showHoverTooltip: isFullscreen,
                         newsEvents: showNews ? news.chartEvents : [],
-                        newsTimeZone: news.effectiveTimeZone
+                        newsTimeZone: news.effectiveTimeZone,
+                        hoverCrosshairX: $hoverCrosshairX
                     )
                     // Skip re-laying-out the price chart when a parent
                     // re-render (a live tick, a sibling pane, an unrelated
@@ -309,7 +311,7 @@ struct ChartPaneView: View {
                         .frame(height: isCompact ? 28 : 36)
                 }
                 ForEach(visibleOscillatorInstances) { inst in
-                    OscillatorPanel(instance: inst, candles: candles, xDomain: xDomain)
+                    OscillatorPanel(instance: inst, candles: candles, xDomain: $xDomain, hoverCrosshairX: $hoverCrosshairX)
                         .equatable()
                         .frame(height: isCompact ? 56 : 80)
                 }
@@ -745,10 +747,18 @@ struct ChartPaneView: View {
         // showing the outgoing pair/TF's candles until the new ones land.
         if !candles.isEmpty { candles = [] }
         let respectsWeekend = app.pairs.first(where: { $0.id == pairID })?.category != .crypto
-        let result = await OHLCCandleLoader.loadAsync(
+        var result = await OHLCCandleLoader.loadAsync(
             repo: db.ohlcRepo, pairID: pairID, tf: tf,
             since: .distantPast, until: Date(), dropClosedDays: respectsWeekend
         )
+        if result.isEmpty {
+            let srcTF = OHLCCandleLoader.sourceTimeframeTag(for: tf)
+            await yahoo.ensureDeepHistory(pairID: pairID, sourceTF: srcTF)
+            result = await OHLCCandleLoader.loadAsync(
+                repo: db.ohlcRepo, pairID: pairID, tf: tf,
+                since: .distantPast, until: Date(), dropClosedDays: respectsWeekend
+            )
+        }
         self.candles = result
         // `load()` is keyed on pairID|timeframe, so reaching here always
         // means the series underfoot changed. Re-frame to the new bars
@@ -815,7 +825,13 @@ struct ChartPaneView: View {
     /// scale framed to the *candles* (not indicators/overlays). Mirrors
     /// `DashboardView.resetChart()` so every Reset behaves the same.
     private func resetChart() {
-        guard candles.count > 0 else { xDomain = nil; yDomain = nil; return }
+        if candles.isEmpty {
+            xDomain = nil
+            yDomain = nil
+            yahoo.clearDeepBackfilled(for: pane.pairID)
+            Task { await load() }
+            return
+        }
         let domain = ChartWindow.defaultDomain(count: candles.count)
         yDomain = ChartWindow.candleYDomain(candles: candles, domain: domain)
         withAnimation(.easeInOut(duration: 0.25)) {
