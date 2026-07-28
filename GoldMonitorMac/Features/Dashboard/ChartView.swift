@@ -184,12 +184,6 @@ struct ChartView: View {
     /// shows the same time the News tab does.
     var newsTimeZone: TimeZone = .current
 
-    /// Whether to render Sentinel Strategy Radar setup overlays on the chart canvas.
-    var showSentinelRadar: Bool = true
-
-    /// Selected trading pair ID for filtering active Sentinel Radar setups.
-    var currentPairID: String? = nil
-
     /// Synced crosshair bar index shared across main chart and oscillator sub-panels.
     @Binding var hoverCrosshairX: Double?
 
@@ -843,7 +837,6 @@ struct ChartView: View {
             volumeRankedOBMarks
             rankedOBStrategyMarks
             volumeFilteredOBMarks
-            sentinelRadarMarks
             htfChochMarks
             chochMarks
             scenarioMarks
@@ -1489,71 +1482,6 @@ struct ChartView: View {
             }
         }
         return best?.0
-    }
-
-    /// Sentinel Strategy Radar overlays: ranked live trade setups drawn
-    /// directly on the chart canvas with entry line, TP, SL, and rank badge.
-    @ChartContentBuilder
-    private var sentinelRadarMarks: some ChartContent {
-        if showSentinelRadar, let pairID = currentPairID {
-            let alerts = StrategySentinel.shared.activeRadarAlerts.filter { $0.pairID == pairID }
-            ForEach(alerts) { alert in
-                let isBuy = alert.direction == .buy
-                let dirColor = isBuy ? Color(red: 0.06, green: 0.73, blue: 0.51) : Color(red: 0.94, green: 0.27, blue: 0.27)
-                let rank = alert.volumeRank ?? 1
-                let rankMedal = rank == 1 ? "🥇 #1" : (rank == 2 ? "🥈 #2" : (rank == 3 ? "🥉 #3" : "🏅 #\(rank)"))
-
-                // Shaded Entry-TP zone
-                RectangleMark(
-                    xStart: .value("BarStart", max(0, candles.count - 35)),
-                    xEnd: .value("BarEnd", max(0, candles.count - 1)),
-                    yStart: .value("Entry", alert.entryPrice),
-                    yEnd: .value("TP", alert.takeProfit)
-                )
-                .foregroundStyle(dirColor.opacity(0.06))
-
-                // Entry RuleMark with Badge
-                RuleMark(y: .value("Sentinel Entry", alert.entryPrice))
-                    .foregroundStyle(dirColor)
-                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
-                    .annotation(position: .overlay, alignment: .trailing) {
-                        HStack(spacing: 4) {
-                            Text(rankMedal)
-                                .font(.system(size: 9, weight: .heavy, design: .monospaced))
-
-                            Text(alert.direction.rawValue)
-                                .font(.system(size: 8, weight: .heavy))
-
-                            if alert.isHTFNested {
-                                Text("⚡HTF")
-                                    .font(.system(size: 7, weight: .heavy))
-                            }
-
-                            Text(PriceFormat.exact(alert.entryPrice))
-                                .font(.system(size: 9, weight: .bold, design: .monospaced))
-
-                            Text("(\(String(format: "%.1fx", alert.riskRewardRatio)))")
-                                .font(.system(size: 8, weight: .bold, design: .monospaced))
-                        }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2.5)
-                        .background(dirColor)
-                        .foregroundStyle(.white)
-                        .cornerRadius(4)
-                        .shadow(color: .black.opacity(0.4), radius: 3)
-                    }
-
-                // Target TP Line
-                RuleMark(y: .value("Sentinel TP", alert.takeProfit))
-                    .foregroundStyle(Theme.Color.success.opacity(0.7))
-                    .lineStyle(StrokeStyle(lineWidth: 1.0, dash: [2, 3]))
-
-                // Stop Loss Line
-                RuleMark(y: .value("Sentinel SL", alert.stopLoss))
-                    .foregroundStyle(Theme.Color.danger.opacity(0.7))
-                    .lineStyle(StrokeStyle(lineWidth: 1.0, dash: [2, 3]))
-            }
-        }
     }
 
     /// Screen-space distance from `p` to a drawing's nearest pixel.

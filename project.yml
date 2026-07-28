@@ -137,6 +137,7 @@ targets:
           - "**/AnalysisHistoryView.swift"
           - "**/AnalysisPlansColumn.swift"
           - "**/AnalysisReportColumn.swift"
+          - "**/CommandPaletteView.swift"
           - "**/Info.plist"
       - path: ipadapp/HelixTradingApp-iPad
     resources:

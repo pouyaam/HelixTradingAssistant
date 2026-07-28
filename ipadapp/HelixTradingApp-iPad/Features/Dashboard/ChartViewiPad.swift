@@ -3761,6 +3761,9 @@ struct ChartViewiPad: View {
             ichimokuOutput: .empty,
             ichimokuOBZones: [],
             rankedOBZones: rankedOBZones,
+            // Volume-Ranked OB is not wired into the iPad chart yet
+            // (Mac-only) — empty keeps the yDomain scan correct.
+            volumeRankedOBZones: [],
             rankedOBSetups: rankedOBSetups,
             volumeFilteredOBZones: volumeFilteredOBZones,
             chochZones: chochZones,

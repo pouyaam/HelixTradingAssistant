@@ -646,6 +646,10 @@ private struct ChartPlotiPad: View {
     /// dashboard — see `DashboardView.pendingChartReset` for why the
     /// reset is deferred rather than applied at switch time.
     @State private var pendingChartReset: Bool = false
+    /// Hovered bar index shared with the oscillator sub-panels (shared
+    /// `OscillatorPanel` requires the binding; crosshair sync between
+    /// the price chart and panels isn't wired on iPad yet).
+    @State private var hoverCrosshairX: Double? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -701,7 +705,8 @@ private struct ChartPlotiPad: View {
                     OscillatorPanel(
                         instance: Self.makeOscillatorInstance(kind: kind, config: indicatorConfig),
                         candles: candles,
-                        xDomain: xDomain
+                        xDomain: $xDomain,
+                        hoverCrosshairX: $hoverCrosshairX
                     )
                     .equatable()
                     .padding(.horizontal, Theme.Spacing.lg)

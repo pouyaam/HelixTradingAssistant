@@ -98,7 +98,9 @@ struct OscillatorPanel: View {
                         }
                 }
             }
+            #if os(macOS)
             .scrollZoom(xDomain: $xDomain, totalCandles: candles.count)
+            #endif
             .frame(height: 90)
             .clipped()
         }

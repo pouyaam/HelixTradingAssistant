@@ -91,7 +91,8 @@ struct DashboardView: View {
     /// three dashed lines + a bias capsule. Pair-scoped, cleared on
     /// pair change.
     @State private var taScenario: PromptBuilder.TAScenario? = nil
-    /// Temporary hover preview scenario driven by Strategy Sentinel Radar card hovering
+    /// Temporary hover preview scenario driven by Strategy Sentinel drawer
+    /// row hovering — shows the hovered setup's entry/TP/SL on the chart.
     @State private var hoverRadarScenario: PromptBuilder.TAScenario? = nil
     /// Optional alternative trade plan from the same TA run. Same
     /// shape as `taScenario`; ChartView draws it with muted styling
@@ -692,7 +693,6 @@ struct DashboardView: View {
     /// nothing selected. Cleared when the pair changes (the drawing
     /// wouldn't exist on the new pair anyway).
     @State private var selectedDrawingID: UUID? = nil
-    @AppStorage("dashboard.showSentinelRadar") private var showSentinelRadar: Bool = true
     @State private var hoverCrosshairX: Double? = nil
     private var isChartFull: Bool { app.isChartFullscreen }
 
@@ -1202,27 +1202,6 @@ struct DashboardView: View {
                         pairHeader(pair)
                             .fixedSize(horizontal: false, vertical: true)
                             .layoutPriority(1)
-
-                        StrategyRadarHUDView(
-                            livePrice: currentLivePrice,
-                            onSelectAlert: { alert in
-                                self.handleRadarAlertSelection(alert)
-                            },
-                            onHoverAlert: { alert in
-                                let targetScenario: PromptBuilder.TAScenario? = alert.map { a in
-                                    PromptBuilder.TAScenario(
-                                        bias: a.direction == .buy ? .long : .short,
-                                        entry: a.entryPrice,
-                                        takeProfit: a.takeProfit,
-                                        stopLoss: a.stopLoss
-                                    )
-                                }
-                                if self.hoverRadarScenario != targetScenario {
-                                    self.hoverRadarScenario = targetScenario
-                                }
-                            }
-                        )
-                        .transition(.opacity)
                     }
                     // Both views stay mounted at all times — the inactive
                     // one collapses to zero frame + zero opacity instead of
@@ -1870,8 +1849,6 @@ struct DashboardView: View {
                     },
                     newsEvents: showNews ? news.chartEvents : [],
                     newsTimeZone: news.effectiveTimeZone,
-                    showSentinelRadar: showSentinelRadar,
-                    currentPairID: pair.id,
                     hoverCrosshairX: $hoverCrosshairX
                 )
                 .equatable()
@@ -2028,6 +2005,31 @@ struct DashboardView: View {
                         .padding(.leading, Theme.Spacing.md)
                         .padding(.top, Theme.Spacing.md)
                     }
+                }
+                // Strategy Sentinel drawer — a collapsible rail pinned to
+                // the chart's right edge. Expands into a panel listing the
+                // sentinel's ranked setups, filterable by direction / HTF /
+                // volume and sorted nearest-first by distance to live price.
+                .overlay(alignment: .trailing) {
+                    SentinelRadarDrawer(
+                        livePrice: currentLivePrice,
+                        onSelectAlert: { alert in
+                            self.handleRadarAlertSelection(alert)
+                        },
+                        onHoverAlert: { alert in
+                            let targetScenario: PromptBuilder.TAScenario? = alert.map { a in
+                                PromptBuilder.TAScenario(
+                                    bias: a.direction == .buy ? .long : .short,
+                                    entry: a.entryPrice,
+                                    takeProfit: a.takeProfit,
+                                    stopLoss: a.stopLoss
+                                )
+                            }
+                            if self.hoverRadarScenario != targetScenario {
+                                self.hoverRadarScenario = targetScenario
+                            }
+                        }
+                    )
                 }
 
                 volumeStrip(pair)
