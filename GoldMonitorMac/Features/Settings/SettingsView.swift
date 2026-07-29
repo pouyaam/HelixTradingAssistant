@@ -32,6 +32,7 @@ struct SettingsView: View {
     @AppStorage("markets.forex.enabled")   private var forexEnabled: Bool = true
     @AppStorage("markets.crypto.enabled")  private var cryptoEnabled: Bool = true
     @AppStorage("markets.indices.enabled") private var indicesEnabled: Bool = true
+    @AppStorage("dashboard.chartTheme")    private var chartThemeRaw: String = ChartTheme.greenRed.rawValue
 
     // Strategy formation alerts. DashboardView reads the same key and
     // suppresses both inbox records and macOS banners when disabled.
@@ -191,6 +192,7 @@ struct SettingsView: View {
 
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            chartThemeCard
             wizardCard
             marketsCard
         }
@@ -242,6 +244,25 @@ struct SettingsView: View {
                             : Theme.Color.accentStart
                     )
                 }
+            }
+        }
+    }
+
+    private var chartThemeCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                sectionTitle(
+                    icon: "paintpalette.fill",
+                    title: "Chart appearance & theme",
+                    subtitle: "Choose the color scheme for candles and volume bars on all price charts."
+                )
+
+                Picker("Chart Theme", selection: $chartThemeRaw) {
+                    ForEach(ChartTheme.allCases) { theme in
+                        Text(theme.label).tag(theme.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
             }
         }
     }

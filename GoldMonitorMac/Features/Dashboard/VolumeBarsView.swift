@@ -9,6 +9,7 @@ import Charts
 struct VolumeBarsView: View {
     let candles: [Candle]
     let accent: Color
+    var chartTheme: ChartTheme = .greenRed
     /// Same X window the price chart is rendering, expressed as bar
     /// indices (Double). Keeps the two charts horizontally aligned when
     /// the user pans or zooms — both views render against an index-based
@@ -88,7 +89,7 @@ struct VolumeBarsView: View {
     }
 
     private func barColor(_ c: Candle) -> Color {
-        c.close >= c.open ? Theme.Color.success : Theme.Color.danger
+        c.close >= c.open ? chartTheme.upColor : chartTheme.downColor
     }
 
     /// Same K/M/B formatter the main chart uses for its Y axis. Inlined
@@ -117,6 +118,7 @@ extension VolumeBarsView: Equatable {
     static func == (l: VolumeBarsView, r: VolumeBarsView) -> Bool {
         Candle.seriesEqual(l.candles, r.candles)
             && l.accent == r.accent
+            && l.chartTheme == r.chartTheme
             && l.xDomain == r.xDomain
     }
 }

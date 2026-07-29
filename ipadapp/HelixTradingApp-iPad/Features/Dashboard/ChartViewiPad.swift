@@ -12,6 +12,7 @@ struct ChartViewiPad: View {
     let indicators: Set<IndicatorKind>
     let indicatorConfig: OscillatorConfig
 
+    var chartTheme: ChartTheme = .greenRed
     /// Higher-timeframe CHoCH zones (dated so they re-anchor onto the
     /// current, lower timeframe via `barIndex(forDate:)`). Computed
     /// upstream in `ChartPlotiPad`; empty unless the CHoCH HTF option is on.
@@ -3549,7 +3550,7 @@ struct ChartViewiPad: View {
                 yStart: .value("Low", c.low),
                 yEnd: .value("High", c.high)
             )
-            .foregroundStyle(c.close >= c.open ? Theme.Color.success : Theme.Color.danger)
+            .foregroundStyle(c.close >= c.open ? chartTheme.upColor : chartTheme.downColor)
             .lineStyle(StrokeStyle(lineWidth: 1))
 
             RectangleMark(
@@ -3558,7 +3559,7 @@ struct ChartViewiPad: View {
                 yEnd: .value("Body hi", max(c.open, c.close)),
                 width: .fixed(candleBodyWidth)
             )
-            .foregroundStyle(c.close >= c.open ? Theme.Color.success : Theme.Color.danger)
+            .foregroundStyle(c.close >= c.open ? chartTheme.upColor : chartTheme.downColor)
             .cornerRadius(1)
         }
     }
@@ -4134,6 +4135,7 @@ extension ChartViewiPad: Equatable {
         Candle.seriesEqual(l.candles, r.candles)
             && l.chartType == r.chartType
             && l.accent == r.accent
+            && l.chartTheme == r.chartTheme
             && l.xDomain == r.xDomain
             && l.yDomain == r.yDomain
             && l.indicators == r.indicators

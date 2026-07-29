@@ -20,7 +20,9 @@ struct ChartPaneView: View {
 
     /// News-flag layer toggle — the same `dashboard.showNews` key the
     /// primary chart uses, so hiding news there hides it in every pane.
-    @AppStorage("dashboard.showNews") private var showNews: Bool = true
+    @AppStorage("dashboard.showNews")   private var showNews: Bool = true
+    @AppStorage("dashboard.chartTheme") private var chartThemeRaw: String = ChartTheme.greenRed.rawValue
+    private var chartTheme: ChartTheme { ChartTheme(rawValue: chartThemeRaw) ?? .greenRed }
 
     let pane: ChartPane
     /// Indicator-parameter config (RSI period, UT Bot key value, etc.)
@@ -192,6 +194,7 @@ struct ChartPaneView: View {
                         candles: candles,
                         chartType: pane.chartType,
                         accent: pair.color,
+                        chartTheme: chartTheme,
                         xDomain: $xDomain,
                         yDomain: $yDomain,
                         indicators: Set(visibleIndicatorInstances.map(\.kind)),
@@ -306,7 +309,7 @@ struct ChartPaneView: View {
                 .animation(.easeOut(duration: 0.15), value: isViewingLatest)
 
                 if pane.showVolume {
-                    VolumeBarsView(candles: candles, accent: pair.color, xDomain: xDomain)
+                    VolumeBarsView(candles: candles, accent: pair.color, chartTheme: chartTheme, xDomain: xDomain)
                         .equatable()
                         .frame(height: isCompact ? 28 : 36)
                 }

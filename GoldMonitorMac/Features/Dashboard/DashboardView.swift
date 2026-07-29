@@ -18,6 +18,8 @@ struct DashboardView: View {
     /// from the Layers popover. Shared key with the grid panes so the
     /// toggle governs every chart at once.
     @AppStorage("dashboard.showNews")   private var showNews: Bool = true
+    @AppStorage("dashboard.chartTheme") private var chartThemeRaw: String = ChartTheme.greenRed.rawValue
+    private var chartTheme: ChartTheme { ChartTheme(rawValue: chartThemeRaw) ?? .greenRed }
     @AppStorage("notifications.strategySignals.enabled")
     private var strategyNotificationsEnabled: Bool = true
     /// Multi-instance indicator/oscillator storage — JSON-encoded arrays
@@ -325,6 +327,21 @@ struct DashboardView: View {
         self.tradeBoxTP = alert.takeProfit
         self.tradeBoxIsBuy = (alert.direction == .buy)
         self.showTradeBoxSheet = true
+    }
+
+    private func focusOnRadarAlert(_ alert: RadarAlert) {
+        let minP = min(alert.stopLoss, alert.entryPrice, alert.takeProfit)
+        let maxP = max(alert.stopLoss, alert.entryPrice, alert.takeProfit)
+        let span = max(0.5, maxP - minP)
+        let pad = span * 0.25
+
+        yDomain = (minP - pad)...(maxP + pad)
+
+        if candles.count > 0 {
+            let rightIndex = Double(candles.count - 1) + 0.5
+            let windowSpan = min(100.0, Double(candles.count))
+            xDomain = max(-0.5, rightIndex - windowSpan)...(rightIndex + 5.0)
+        }
     }
 
     /// Refresh `nyLiveScenario`. Only mutating the @State when the plan
@@ -1804,6 +1821,7 @@ struct DashboardView: View {
                     candles: candles,
                     chartType: effectiveChartType,
                     accent: pair.color,
+                    chartTheme: chartTheme,
                     xDomain: $xDomain,
                     yDomain: $yDomain,
                     indicators: Set(visibleIndicatorInstances.map(\.kind)),
@@ -2028,6 +2046,9 @@ struct DashboardView: View {
                             if self.hoverRadarScenario != targetScenario {
                                 self.hoverRadarScenario = targetScenario
                             }
+                        },
+                        onFocusAlert: { alert in
+                            self.focusOnRadarAlert(alert)
                         }
                     )
                 }
@@ -2388,6 +2409,19 @@ struct DashboardView: View {
                 .font(.system(size: 9, weight: .bold))
                 .tracking(0.8)
                 .foregroundStyle(Theme.Color.textMuted)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("THEME")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textMuted)
+                Picker("Theme", selection: $chartThemeRaw) {
+                    ForEach(ChartTheme.allCases) { theme in
+                        Text(theme.label).tag(theme.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+            .padding(.bottom, Theme.Spacing.xs)
 
             if activeLayerCount == 0 {
                 Text("Nothing on the chart yet. Add indicators or run an AI analysis to see layers here.")
@@ -3225,7 +3259,7 @@ struct DashboardView: View {
         // check — hide the strip anyway when the visible series has no
         // volume data, even if the toggle is on, so non-ounce pairs
         // don't show an empty bar.
-        let bars = VolumeBarsView(candles: candles, accent: pair.color, xDomain: xDomain)
+        let bars = VolumeBarsView(candles: candles, accent: pair.color, chartTheme: chartTheme, xDomain: xDomain)
         if showVolume && bars.hasVolume {
             bars
                 .equatable()
@@ -3389,6 +3423,15 @@ struct DashboardView: View {
                     userChartType = ct
                 } label: {
                     Label(ct.label, systemImage: ct == userChartType ? "checkmark.circle.fill" : "circle")
+                }
+            }
+        }
+        Menu("Chart Theme") {
+            ForEach(ChartTheme.allCases) { theme in
+                Button {
+                    chartThemeRaw = theme.rawValue
+                } label: {
+                    Label(theme.label, systemImage: theme == chartTheme ? "checkmark.circle.fill" : "circle")
                 }
             }
         }

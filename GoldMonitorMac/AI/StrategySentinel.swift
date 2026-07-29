@@ -17,10 +17,31 @@ struct RadarAlert: Identifiable, Equatable, Codable {
     var tradedVolume: Double? = nil
     var htfLabel: String? = nil
     var isHTFNested: Bool = false
+    var status: SetupStatus = .pending
+    var breakdown: ConfluenceBreakdown? = nil
 
     enum SetupDirection: String, Codable {
         case buy = "BUY"
         case sell = "SELL"
+    }
+
+    enum SetupStatus: String, Codable {
+        case pending = "PENDING"
+        case inZone = "IN ZONE"
+        case reaction = "REACTION"
+    }
+
+    struct ConfluenceBreakdown: Codable, Equatable {
+        let baseScore: Int
+        let rankBonus: Int
+        let htfBonus: Int
+        let trendBonus: Int
+        let targetBonus: Int
+        let htfLabel: String?
+        let volumeRank: Int?
+        let volumeFormatted: String
+        let isTrendAligned: Bool
+        let hasOpposingTarget: Bool
     }
 
     var isFresh: Bool {
@@ -189,11 +210,18 @@ final class StrategySentinel: ObservableObject {
                 ))
             }
 
-            // Filter candidates that are within relevant market structure (≤ 15.0x ATR or 5% of price from current price)
+            let emaVal = Self.calculateEMA(candles: candles, period: min(200, max(20, candles.count / 2)))
+
+            // Filter candidates within market structure (≤ 15.0x ATR or 5% price) and not heavily retested (>3 touches)
             candidateZones = candidateZones.filter { z in
                 let entry = z.isBullish ? z.top : z.bottom
                 let dist = abs(currentPrice - entry)
-                return dist <= max(15.0 * z.atr, currentPrice * 0.05)
+                guard dist <= max(15.0 * z.atr, currentPrice * 0.05) else { return false }
+
+                let retestTouches = window.filter { c in
+                    c.low <= z.top && c.high >= z.bottom
+                }.count
+                return retestTouches <= 3
             }
 
             // 2. Rank ALL Candidate Zones strictly by Traded Volume (Rank #1 = highest volume)
@@ -234,10 +262,66 @@ final class StrategySentinel: ObservableObject {
                 let rr = rewardAmount / riskAmount
                 guard rr >= 1.0 else { continue }
 
-                // Score boost based on Traded Volume Rank + HTF Nesting (+20 bonus)
+                // 3a. Signal Invalidation Checks: Discard setups where TP or SL has already been touched/breached
+                let recentWindow = Array(candles.suffix(40))
+                if isBuy {
+                    // BUY Setup Invalidation:
+                    // 1) Target already hit (current price or recent high >= takeProfit)
+                    if currentPrice >= takeProfit || latestCandle.high >= takeProfit || recentWindow.contains(where: { $0.high >= takeProfit }) {
+                        continue
+                    }
+                    // 2) Stop loss breached (current price or recent low <= stopLoss)
+                    if currentPrice <= stopLoss || latestCandle.low <= stopLoss || recentWindow.contains(where: { $0.low <= stopLoss }) {
+                        continue
+                    }
+                } else {
+                    // SELL Setup Invalidation:
+                    // 1) Target already hit (current price or recent low <= takeProfit)
+                    if currentPrice <= takeProfit || latestCandle.low <= takeProfit || recentWindow.contains(where: { $0.low <= takeProfit }) {
+                        continue
+                    }
+                    // 2) Stop loss breached (current price or recent high >= stopLoss)
+                    if currentPrice >= stopLoss || latestCandle.high >= stopLoss || recentWindow.contains(where: { $0.high >= stopLoss }) {
+                        continue
+                    }
+                }
+
+                // 3b. Setup Lifecycle Status & Remaining R:R Filter
+                let isInZone = currentPrice >= zone.bottom && currentPrice <= zone.top
+                let isMovingToTP = isBuy ? (currentPrice > zone.top) : (currentPrice < zone.bottom)
+
+                let setupStatus: RadarAlert.SetupStatus
+                if isInZone {
+                    setupStatus = .inZone
+                } else if isMovingToTP {
+                    setupStatus = .reaction
+                } else {
+                    setupStatus = .pending
+                }
+
+                if isMovingToTP {
+                    let totalSpan = abs(takeProfit - entry)
+                    if totalSpan > 0 {
+                        let distanceMoved = abs(currentPrice - entry)
+                        let progress = distanceMoved / totalSpan
+
+                        let remainingReward = abs(takeProfit - currentPrice)
+                        let remainingRisk = abs(currentPrice - stopLoss)
+                        let effectiveRR = remainingRisk > 0 ? (remainingReward / remainingRisk) : 0.0
+
+                        // Discard if price already moved > 70% toward TP, or effective remaining R:R < 0.8
+                        if progress > 0.70 || effectiveRR < 0.8 {
+                            continue
+                        }
+                    }
+                }
+
+                // Score boost based on Traded Volume Rank + HTF Nesting + Trend EMA Alignment
+                let isTrendAligned = isBuy ? (currentPrice >= emaVal) : (currentPrice <= emaVal)
+                let trendBonus = isTrendAligned ? 15 : 0
                 let rankBonus = max(5, 25 - ((rank - 1) * 5))
                 let htfBonus = zone.isHTFNested ? 20 : 0
-                let score = min(100, 60 + rankBonus + htfBonus + (opposingZone != nil ? 10 : 0))
+                let score = min(100, 45 + rankBonus + htfBonus + trendBonus + (opposingZone != nil ? 10 : 0))
 
                 let formattedVol = Self.formatVolume(zone.tradedVolume)
                 let htfTag = zone.isHTFNested ? "⚡ HTF \(zone.htfLabel ?? "Zone") · " : ""
@@ -245,6 +329,19 @@ final class StrategySentinel: ObservableObject {
 
                 let alertSeed = "\(pairID)|\(timeframe)|\(isBuy ? "BUY" : "SELL")|\(zone.engineName)|\(PriceFormat.exact(entry))"
                 let alertID = Self.deterministicUUID(from: alertSeed)
+
+                let confluenceBreakdown = RadarAlert.ConfluenceBreakdown(
+                    baseScore: 45,
+                    rankBonus: rankBonus,
+                    htfBonus: htfBonus,
+                    trendBonus: trendBonus,
+                    targetBonus: opposingZone != nil ? 10 : 0,
+                    htfLabel: zone.htfLabel,
+                    volumeRank: rank,
+                    volumeFormatted: formattedVol,
+                    isTrendAligned: isTrendAligned,
+                    hasOpposingTarget: opposingZone != nil
+                )
 
                 let alert = RadarAlert(
                     id: alertID,
@@ -262,7 +359,9 @@ final class StrategySentinel: ObservableObject {
                     volumeRank: rank,
                     tradedVolume: zone.tradedVolume,
                     htfLabel: zone.htfLabel,
-                    isHTFNested: zone.isHTFNested
+                    isHTFNested: zone.isHTFNested,
+                    status: setupStatus,
+                    breakdown: confluenceBreakdown
                 )
                 newAlerts.append(alert)
             }
@@ -398,6 +497,16 @@ final class StrategySentinel: ObservableObject {
         }
         let tail = trs.suffix(period)
         return tail.reduce(0.0, +) / Double(tail.count)
+    }
+
+    nonisolated private static func calculateEMA(candles: [Candle], period: Int) -> Double {
+        guard !candles.isEmpty else { return 0.0 }
+        let k = 2.0 / Double(period + 1)
+        var ema = candles[0].close
+        for i in 1..<candles.count {
+            ema = (candles[i].close * k) + (ema * (1.0 - k))
+        }
+        return ema
     }
 
     nonisolated private static func formatVolume(_ vol: Double) -> String {

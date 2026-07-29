@@ -35,6 +35,19 @@ struct ReleaseNotes {
     let highlights: [ReleaseHighlight]
 
     static let latest = ReleaseNotes(
+        version: "1.6",
+        tagline: "Chart color theming with Green & Red, Blue & Red, and Black & White institutional modes.",
+        highlights: [
+            .init(icon: "paintpalette.fill",
+                  title: "Chart color themes",
+                  detail: "Switch between Green & Red (classic), Blue & Red (TradingView style), and Black & White (monochrome institutional contrast) for candle bodies, wicks, and volume bars across all single and multi-chart grid views."),
+            .init(icon: "macwindow.on.rectangle",
+                  title: "Multi-chart & iPad sync",
+                  detail: "Theme selections apply seamlessly across all multi-chart grid panes and iPad layout views, with full persistence in settings."),
+        ]
+    )
+
+    static let v1_5 = ReleaseNotes(
         version: "1.5",
         tagline: "On-chart position planning, four new order-block indicators, news markers, and a corrected risk calculator.",
         highlights: [

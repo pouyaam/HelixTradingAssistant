@@ -24,6 +24,8 @@ struct DashboardViewiPad: View {
     @AppStorage("dashboard.oscillators") private var oscillatorsRaw: String = ""
     @AppStorage("dashboard.hiddenIndicators")  private var hiddenIndicatorsRaw: String = ""
     @AppStorage("dashboard.hiddenOscillators") private var hiddenOscillatorsRaw: String = ""
+    @AppStorage("dashboard.chartTheme") private var chartThemeRaw: String = ChartTheme.greenRed.rawValue
+    private var chartTheme: ChartTheme { ChartTheme(rawValue: chartThemeRaw) ?? .greenRed }
 
     @State private var candleCount: Int = 0
     @State private var reloadToken: Int = 0
@@ -657,6 +659,7 @@ private struct ChartPlotiPad: View {
                 candles: candles,
                 chartType: chartType,
                 accent: accent,
+                chartTheme: chartTheme,
                 xDomain: $xDomain,
                 yDomain: $yDomain,
                 indicators: indicators,
@@ -715,7 +718,7 @@ private struct ChartPlotiPad: View {
 
             // Volume bars
             if showVolume {
-                let volView = VolumeBarsView(candles: candles, accent: accent, xDomain: xDomain)
+                let volView = VolumeBarsView(candles: candles, accent: accent, chartTheme: chartTheme, xDomain: xDomain)
                 if volView.hasVolume {
                     Divider().background(Theme.Color.border)
                     volView

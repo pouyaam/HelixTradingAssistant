@@ -72,6 +72,13 @@ struct ScrollZoomModifier: ViewModifier {
         // top-left-origin coords via the window's content view.
         let posInWindow = event.locationInWindow
         guard let contentView = window.contentView else { return false }
+
+        // If the cursor is over an enclosing NSScrollView (e.g. Sentinel drawer list or popovers),
+        // let the native scroll view handle the scroll event instead of zooming the chart.
+        if let hitView = contentView.hitTest(posInWindow), hitView.enclosingScrollView != nil {
+            return false
+        }
+
         let posInContent = contentView.convert(posInWindow, from: nil)
         // contentView uses AppKit coords (origin bottom-left); SwiftUI
         // `.global` frames use top-left origin. Flip Y manually.

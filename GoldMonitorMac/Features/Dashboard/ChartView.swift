@@ -21,6 +21,7 @@ struct ChartView: View {
     let candles: [Candle]
     let chartType: ChartType
     let accent: Color
+    var chartTheme: ChartTheme = .greenRed
 
     /// Visible X-axis window expressed in *bar indices* (Double for
     /// fractional pan/zoom precision). nil ⇒ auto-fit to the full series.
@@ -5241,7 +5242,7 @@ struct ChartView: View {
                 yStart: .value("Low", c.low),
                 yEnd: .value("High", c.high)
             )
-            .foregroundStyle(c.close >= c.open ? Theme.Color.success : Theme.Color.danger)
+            .foregroundStyle(c.close >= c.open ? chartTheme.upColor : chartTheme.downColor)
             .lineStyle(StrokeStyle(lineWidth: 1))
 
             // Body — open to close. Width scales inversely with bar
@@ -5253,7 +5254,7 @@ struct ChartView: View {
                 yEnd: .value("Body hi", max(c.open, c.close)),
                 width: .fixed(candleBodyWidth)
             )
-            .foregroundStyle(c.close >= c.open ? Theme.Color.success : Theme.Color.danger)
+            .foregroundStyle(c.close >= c.open ? chartTheme.upColor : chartTheme.downColor)
             .cornerRadius(1)
         }
     }
@@ -5784,6 +5785,7 @@ extension ChartView: Equatable {
         Candle.seriesEqual(l.candles, r.candles)
             && l.chartType == r.chartType
             && l.accent == r.accent
+            && l.chartTheme == r.chartTheme
             && l.xDomain == r.xDomain
             && l.yDomain == r.yDomain
             && l.indicators == r.indicators
