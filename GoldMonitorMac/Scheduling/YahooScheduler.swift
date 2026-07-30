@@ -281,9 +281,24 @@ final class YahooScheduler: ObservableObject {
                 // cap), so a large bar count here just widens `from` — giving
                 // deep history per TF (~8d of 1m, ~41d of 5m, ~1.4y of 1h,
                 // decades of 1d), comparable to Yahoo's per-interval ceilings.
+                let to = Date()
+                var countback = 12000
+                // If the newest stored bar sits OLDER than that default
+                // window (the Faraz session expired, or the app was offline,
+                // for longer than the window covers), reach `from` all the
+                // way back to it so this fetch bridges the gap instead of
+                // leaving a permanent hole in the series.
+                if let latest = try? await repo.latestBucket(pairID: pairID, timeframe: sourceTF) {
+                    let tfSecs = Double(FarazHistorySource.tfSeconds(sourceTF))
+                    let defaultFrom = to.addingTimeInterval(-Double(countback) * tfSecs)
+                    if latest < defaultFrom {
+                        let needed = Int(to.timeIntervalSince(latest) / tfSecs) + 10
+                        countback = min(max(countback, needed), 200_000)
+                    }
+                }
                 bars = try await fetchFarazWindow(
                     pairID: pairID, sourceTF: sourceTF, cfg: cfg,
-                    to: Date(), countback: 12000, firstDataRequest: true
+                    to: to, countback: countback, firstDataRequest: true
                 )
             } else {
                 let spec = deepFetchSpec(forSourceTF: sourceTF)!
@@ -490,9 +505,15 @@ final class YahooScheduler: ObservableObject {
     /// re-login). Unlike `switchGoldSource` this does NOT wipe stored bars —
     /// the source is unchanged, only the credential — so we just restart the
     /// live WS and backfill each Faraz pair, then nudge the dashboard.
+    /// The session latches are cleared first: without that, every series
+    /// filled earlier this session would skip its deep refetch and the bars
+    /// missed while the session was expired would stay lost (the periodic
+    /// sync only reaches ~30 bars back). `ensureDeepHistory` anchors the
+    /// refetch at the last stored bar, so the expiry gap gets filled.
     @MainActor
     private func reloadFarazAfterAuth(repo: OHLCRepo) async {
         startFarazStream(repo: repo)
+        clearDeepBackfilled()
         for pairID in farazPairIDs {
             await backfillAll(pairID: pairID)
         }
@@ -696,6 +717,32 @@ final class YahooScheduler: ObservableObject {
             }
         }
 
+        dataResetToken &+= 1
+        publishLastUpdate()
+    }
+
+    /// Wipe every stored OHLC series and refetch from the active
+    /// source(s). Bound to the "Clear all data & refetch" button in
+    /// Settings → Data sources. Unlike `switchGoldSource` this covers ALL
+    /// managed pairs (not just the Faraz-capable ones) and leaves the live
+    /// streams alone — the source selection itself is unchanged.
+    /// No-op until `start(database:)` has cached the repo.
+    func resetAllData() async {
+        guard let repo = cachedRepo else { return }
+        objectWillChange.send()
+        // Forget every series' fetch state so the refetch starts fresh.
+        clearDeepBackfilled()
+        for cfg in pairs {
+            try? await repo.deleteAll(pairID: cfg.pairID)
+            latestPrices[cfg.pairID] = nil
+        }
+        // Refetch every native series per pair; the routing inside
+        // ensureDeepHistory picks Faraz vs Yahoo for each one.
+        await withTaskGroup(of: Void.self) { group in
+            for cfg in pairs {
+                group.addTask { [self] in await self.backfillAll(pairID: cfg.pairID) }
+            }
+        }
         dataResetToken &+= 1
         publishLastUpdate()
     }

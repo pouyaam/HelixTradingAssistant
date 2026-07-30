@@ -639,6 +639,9 @@ private struct ChartPlotiPad: View {
     @EnvironmentObject private var news: NewsStore
     /// News-flag layer toggle (shared key with the Mac chart).
     @AppStorage("dashboard.showNews") private var showNews: Bool = true
+    /// Candle/volume palette (shared key with the Mac chart).
+    @AppStorage("dashboard.chartTheme") private var chartThemeRaw: String = ChartTheme.greenRed.rawValue
+    private var chartTheme: ChartTheme { ChartTheme(rawValue: chartThemeRaw) ?? .greenRed }
     @State private var candles: [Candle] = []
     @State private var htfChochZones: [ChangeOfCharacter.DatedZone] = []
     @State private var xDomain: ClosedRange<Double>? = nil
@@ -655,48 +658,7 @@ private struct ChartPlotiPad: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ChartViewiPad(
-                candles: candles,
-                chartType: chartType,
-                accent: accent,
-                chartTheme: chartTheme,
-                xDomain: $xDomain,
-                yDomain: $yDomain,
-                indicators: indicators,
-                indicatorConfig: indicatorConfig,
-                htfChochZones: htfChochZones,
-                srLevels: srLevels,
-                fvgZones: fvgZones,
-                supplyDemandZones: supplyDemandZones,
-                taScenario: taScenario,
-                taAltScenario: taAltScenario,
-                drawings: drawings,
-                activeTool: activeTool,
-                contractSpec: contractSpec,
-                onCommitDrawing: onCommitDrawing,
-                onMoveDrawing: onMoveDrawing,
-                selectedDrawingID: selectedDrawingID,
-                onSelectDrawing: onSelectDrawing,
-                trades: trades,
-                journalEntries: journalEntries,
-                livePrice: livePrice,
-                replayActive: replayActive,
-                newsEvents: showNews ? news.chartEvents : [],
-                newsTimeZone: news.effectiveTimeZone
-            )
-            .equatable()
-            .frame(maxHeight: .infinity)
-            .clipped()
-            // Tap-and-hold to rescale — mirrors the double-tap reset, but
-            // discoverable. Frames the recent bars with the price scale fit
-            // to the *candles* (not indicators/overlays).
-            .contextMenu {
-                Button {
-                    resetChart()
-                } label: {
-                    Label("Reset Zoom", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
-                }
-            }
+            chartSection
 
             // Oscillator panels — follow the same xDomain so they scroll in
             // lockstep with the price chart.
@@ -759,6 +721,54 @@ private struct ChartPlotiPad: View {
         // config-only changes).
         .onChange(of: htfChochInputKey) { _ in
             Task { await reloadHTFChoch() }
+        }
+    }
+
+    /// The price chart itself, extracted from `body` — the full mark
+    /// chain plus the oscillator/volume stacks in one expression pushed
+    /// the compiler past its type-check budget.
+    private var chartSection: some View {
+        ChartViewiPad(
+            candles: candles,
+            chartType: chartType,
+            accent: accent,
+            xDomain: $xDomain,
+            yDomain: $yDomain,
+            indicators: indicators,
+            indicatorConfig: indicatorConfig,
+            chartTheme: chartTheme,
+            htfChochZones: htfChochZones,
+            srLevels: srLevels,
+            fvgZones: fvgZones,
+            supplyDemandZones: supplyDemandZones,
+            taScenario: taScenario,
+            taAltScenario: taAltScenario,
+            drawings: drawings,
+            activeTool: activeTool,
+            contractSpec: contractSpec,
+            onCommitDrawing: onCommitDrawing,
+            onMoveDrawing: onMoveDrawing,
+            selectedDrawingID: selectedDrawingID,
+            onSelectDrawing: onSelectDrawing,
+            trades: trades,
+            journalEntries: journalEntries,
+            livePrice: livePrice,
+            replayActive: replayActive,
+            newsEvents: showNews ? news.chartEvents : [],
+            newsTimeZone: news.effectiveTimeZone
+        )
+        .equatable()
+        .frame(maxHeight: .infinity)
+        .clipped()
+        // Tap-and-hold to rescale — mirrors the double-tap reset, but
+        // discoverable. Frames the recent bars with the price scale fit
+        // to the *candles* (not indicators/overlays).
+        .contextMenu {
+            Button {
+                resetChart()
+            } label: {
+                Label("Reset Zoom", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
+            }
         }
     }
 

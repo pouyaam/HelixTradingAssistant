@@ -7,6 +7,7 @@ import SwiftUI
 /// settings surface.
 struct DataSourcesCard: View {
     @EnvironmentObject private var dataConfig: DataSourceConfig
+    @EnvironmentObject private var yahoo: YahooScheduler
 
     @State private var twelveDataKeyDraft: String = ""
     @State private var forexURLDraft: String = ""
@@ -18,6 +19,8 @@ struct DataSourcesCard: View {
     @State private var savedFlash: Bool = false
     @State private var showTwelveDataKey: Bool = false
     @State private var showFarazCookie: Bool = false
+    @State private var showClearConfirm: Bool = false
+    @State private var isClearing: Bool = false
 
     var body: some View {
         Card {
@@ -29,6 +32,8 @@ struct DataSourcesCard: View {
                 twelveDataField
                 forexField
                 claudeField
+                Divider().background(Theme.Color.border.opacity(0.4))
+                storedDataField
 
                 actionRow
             }
@@ -213,6 +218,60 @@ struct DataSourcesCard: View {
             Text("Auto-detection walks a list of common install paths (Homebrew, npm-global, ~/.claude/local/, …). Override here only if your install is in an unusual place.")
                 .font(.system(size: 10))
                 .foregroundStyle(Theme.Color.textMuted)
+        }
+    }
+
+    /// Nuclear option for the local candle store: wipe every pair's OHLC
+    /// series and download fresh history from the active source. Useful
+    /// when a feed outage (e.g. an expired Faraz session) left gaps the
+    /// regular backfill couldn't close, or the stored data looks wrong.
+    private var storedDataField: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("STORED MARKET DATA")
+                .font(.system(size: 9, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Color.textMuted)
+            HStack(spacing: 10) {
+                Button {
+                    showClearConfirm = true
+                } label: {
+                    Group {
+                        if isClearing {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Label("Clear all data & refetch", systemImage: "arrow.clockwise.icloud")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(Theme.Color.danger))
+                }
+                .buttonStyle(.plain)
+                .disabled(isClearing)
+                if isClearing {
+                    Text("Refetching history…")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.Color.textMuted)
+                }
+            }
+            Text("Deletes every stored candle for all pairs and downloads fresh history from the active source. Journals, trades and drawings are not affected.")
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.Color.textMuted)
+        }
+        .alert("Clear all market data?", isPresented: $showClearConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear & Refetch", role: .destructive) {
+                Task {
+                    isClearing = true
+                    await yahoo.resetAllData()
+                    isClearing = false
+                }
+            }
+        } message: {
+            Text("Every stored candle for all pairs will be deleted and re-downloaded from the active data source. This cannot be undone.")
         }
     }
 

@@ -29,7 +29,10 @@ GRDB, and the local `claude` / `codex` / `opencode` CLIs.
 **Feature surface (macOS):**
 - **Live multi-source price feed** — Yahoo Finance for XAU/USD (10s ticks),
   TwelveData WebSocket for BTC/ETH/SOL, Faraz WebSocket feed (gold + crypto,
-  with automatic in-app re-login on HTTP 401 via WKWebView cookie capture),
+  with automatic in-app re-login on HTTP 401 via WKWebView cookie capture;
+  after a re-login the scheduler clears its session backfill latches and
+  refetches anchored at the last stored bar, so bars missed while the
+  session was expired are backfilled instead of lost),
   and a gold-api fallback. WTI symbol also supported.
 - **Interactive charts** — line / candle / Heikin Ashi; pan + zoom; vertical
   price-axis scaling; replay mode; "scroll to latest"; infinite-scroll

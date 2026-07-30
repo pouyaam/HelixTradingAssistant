@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsViewiPad: View {
     @EnvironmentObject private var app: AppState
     @EnvironmentObject private var dataConfig: DataSourceConfig
+    @EnvironmentObject private var yahoo: YahooScheduler
 
     @AppStorage("ai.opencode.model") private var opencodeModel: String = OpenCodeModelCatalog.defaultModelID
     @AppStorage("ai.opencode.useRemote") private var opencodeUseRemote: Bool = true
@@ -23,6 +24,8 @@ struct SettingsViewiPad: View {
     @State private var farazTokenDraft: String = ""
     @State private var farazAPIURLDraft: String = ""
     @State private var dataDirty: Bool = false
+    @State private var showClearConfirm: Bool = false
+    @State private var isClearing: Bool = false
 
     var body: some View {
         ScrollView {
@@ -169,6 +172,50 @@ struct SettingsViewiPad: View {
                         )
                     }
                     .buttonStyle(.plain)
+                }
+
+                Divider().background(Theme.Color.border.opacity(0.4))
+
+                // Wipe + refetch the local candle store
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("STORED MARKET DATA")
+                        .font(.system(size: 9, weight: .bold))
+                        .tracking(0.8)
+                        .foregroundStyle(Theme.Color.textMuted)
+                    Button {
+                        showClearConfirm = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            if isClearing {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "arrow.clockwise.icloud")
+                                Text("Clear all data & refetch")
+                            }
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .frame(height: 40)
+                        .background(Capsule().fill(Theme.Color.danger))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isClearing)
+                    Text("Deletes every stored candle for all pairs and downloads fresh history from the active source. Journals, trades and drawings are not affected.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.Color.textMuted)
+                }
+                .alert("Clear all market data?", isPresented: $showClearConfirm) {
+                    Button("Cancel", role: .cancel) {}
+                    Button("Clear & Refetch", role: .destructive) {
+                        Task {
+                            isClearing = true
+                            await yahoo.resetAllData()
+                            isClearing = false
+                        }
+                    }
+                } message: {
+                    Text("Every stored candle for all pairs will be deleted and re-downloaded from the active data source. This cannot be undone.")
                 }
             }
         }
