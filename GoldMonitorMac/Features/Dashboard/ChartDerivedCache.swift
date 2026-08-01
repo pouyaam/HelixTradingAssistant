@@ -460,6 +460,64 @@ final class ChartDerivedCache: ObservableObject {
         }
     }
 
+    // ── Enhanced Sonarlab Order Blocks ─────────────────────────────
+
+    private struct EnhancedSonarlabOBSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let sensitivity: Double
+        let mitigationType: String
+        let requireVolumeSpike: Bool
+        let minVolumeMult: Double
+        let minDisplacementATR: Double
+        let requireFVG: Bool
+        let trendFilter: String
+        let minGradeFilter: String
+        let maxZones: Int
+    }
+    private let enhancedSonarlabOBSlot = Slot<EnhancedSonarlabOBSig, [EnhancedSonarlabOrderBlocks.Zone]>([])
+
+    func enhancedSonarlabOrderBlocks(
+        candles: [Candle],
+        sensitivity: Double,
+        mitigationType: EnhancedSonarlabOrderBlocks.MitigationType,
+        requireVolumeSpike: Bool,
+        minVolumeMult: Double,
+        minDisplacementATR: Double,
+        requireFVG: Bool,
+        trendFilter: String,
+        minGradeFilter: String,
+        maxZones: Int
+    ) -> [EnhancedSonarlabOrderBlocks.Zone] {
+        let sig = EnhancedSonarlabOBSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            sensitivity: sensitivity,
+            mitigationType: mitigationType.rawValue,
+            requireVolumeSpike: requireVolumeSpike,
+            minVolumeMult: minVolumeMult,
+            minDisplacementATR: minDisplacementATR,
+            requireFVG: requireFVG,
+            trendFilter: trendFilter,
+            minGradeFilter: minGradeFilter,
+            maxZones: maxZones
+        )
+        return resolve(enhancedSonarlabOBSlot, signature: sig) {
+            EnhancedSonarlabOrderBlocks.compute(
+                candles,
+                sensitivity: sensitivity,
+                mitigationType: mitigationType,
+                requireVolumeSpike: requireVolumeSpike,
+                minVolumeMult: minVolumeMult,
+                minDisplacementATR: minDisplacementATR,
+                requireFVG: requireFVG,
+                trendFilter: trendFilter,
+                minGradeFilter: minGradeFilter,
+                maxZones: maxZones
+            )
+        }
+    }
+
     // ── Ranked Order Blocks (swing + VP + Ichimoku) ────────────────
 
     private struct RankedOBSig: Equatable {
@@ -733,6 +791,35 @@ final class ChartDerivedCache: ObservableObject {
                 showHistoric: showHistoric,
                 combine: combine
             )
+        }
+    }
+
+    private struct HelixOBComboSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let lastClose: Double
+        let lastHigh: Double
+        let lastLow: Double
+        let lastVolume: Double
+        let params: [String: ParamValue]
+    }
+    private let helixOBComboSlot = Slot<HelixOBComboSig, HelixOBCombo.Output>(.empty)
+
+    func helixOBCombo(candles: [Candle], params: [String: ParamValue]) -> HelixOBCombo.Output {
+        let last = candles.last
+        let sig = HelixOBComboSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: last?.id.timeIntervalSince1970 ?? 0,
+            lastClose: last?.close ?? 0,
+            lastHigh: last?.high ?? 0,
+            lastLow: last?.low ?? 0,
+            lastVolume: last?.volume ?? 0,
+            params: params
+        )
+        return resolve(helixOBComboSlot, signature: sig) {
+            HelixOBCombo.compute(candles, params: params)
         }
     }
 
@@ -1165,12 +1252,14 @@ final class ChartDerivedCache: ObservableObject {
         let orderBlockZones: [OrderBlocks.Zone]
         let steroidOrderBlockZones: [SteroidOrderBlocks.Zone]
         let sonarlabOBZones: [SonarlabOrderBlocks.Zone]
+        let enhancedSonarlabOBZones: [EnhancedSonarlabOrderBlocks.Zone]
         let ichimokuOutput: Ichimoku.Output
         let ichimokuOBZones: [IchimokuOrderBlocks.Zone]
         let rankedOBZones: [RankedOrderBlocks.Zone]
         let volumeRankedOBZones: [VolumeRankedOrderBlocks.Zone]
         var rankedOBSetups: [RankedOBStrategy.Setup] = []
         let volumeFilteredOBZones: [VolumeFilteredOrderBlocks.Zone]
+        let helixOBComboOutput: HelixOBCombo.Output
         let chochZones: [ChangeOfCharacter.Zone]
         let htfChochZones: [ChangeOfCharacter.DatedZone]
         let sessionRuns: [TradingSessions.SessionRun]
@@ -1203,12 +1292,14 @@ final class ChartDerivedCache: ObservableObject {
         let obCount: Int
         let sobCount: Int
         let sonarlabCount: Int
+        let enhancedSonarlabCount: Int
         let ichimokuLineCount: Int
         let ichimokuOBCount: Int
         let rankedOBCount: Int
         let volumeRankedOBCount: Int
         let rankedOBSetupKeys: [String]
         let volumeFilteredOBCount: Int
+        let helixOBComboCount: Int
         let chochCount: Int
         let htfChochCount: Int
         let sessionCount: Int
@@ -1248,6 +1339,7 @@ final class ChartDerivedCache: ObservableObject {
             obCount: data.orderBlockZones.count,
             sobCount: data.steroidOrderBlockZones.count,
             sonarlabCount: data.sonarlabOBZones.count,
+            enhancedSonarlabCount: data.enhancedSonarlabOBZones.count,
             ichimokuLineCount: data.ichimokuOutput.kijun.count,
             ichimokuOBCount: data.ichimokuOBZones.count,
             rankedOBCount: data.rankedOBZones.count,
@@ -1259,6 +1351,7 @@ final class ChartDerivedCache: ObservableObject {
                 "\($0.id)|\($0.stopLoss)|\($0.takeProfit2)"
             },
             volumeFilteredOBCount: data.volumeFilteredOBZones.count,
+            helixOBComboCount: data.helixOBComboOutput.bullishOBs.count + data.helixOBComboOutput.bearishOBs.count,
             chochCount: data.chochZones.count,
             htfChochCount: data.htfChochZones.count,
             sessionCount: data.sessionRuns.count,
@@ -1338,6 +1431,10 @@ final class ChartDerivedCache: ObservableObject {
                 if zone.low < lo { lo = zone.low }
                 if zone.high > hi { hi = zone.high }
             }
+            for zone in data.enhancedSonarlabOBZones {
+                if zone.low < lo { lo = zone.low }
+                if zone.high > hi { hi = zone.high }
+            }
             for zone in data.ichimokuOBZones {
                 if zone.low < lo { lo = zone.low }
                 if zone.high > hi { hi = zone.high }
@@ -1359,6 +1456,14 @@ final class ChartDerivedCache: ObservableObject {
             for zone in data.volumeFilteredOBZones {
                 if zone.bottom < lo { lo = zone.bottom }
                 if zone.top > hi { hi = zone.top }
+            }
+            for ob in data.helixOBComboOutput.bullishOBs + data.helixOBComboOutput.bearishOBs {
+                if ob.btm < lo { lo = ob.btm }
+                if ob.top > hi { hi = ob.top }
+            }
+            for pt in data.helixOBComboOutput.points {
+                if let ls = pt.longStop { if ls < lo { lo = ls }; if ls > hi { hi = ls } }
+                if let ss = pt.shortStop { if ss < lo { lo = ss }; if ss > hi { hi = ss } }
             }
             // Ichimoku lines — Span B (widest window) and Kijun bound the
             // system; scanning both spans covers the cloud extremes too.
@@ -1531,6 +1636,8 @@ final class ChartDerivedCache: ObservableObject {
                                          slow: config.macdSlow, signal: config.macdSignal)
             case .stochastic:
                 return Oscillators.stochastic(candles, kPeriod: config.stochK, dPeriod: config.stochD)
+            case .helixOBCombo:
+                return []
             }
         }
     }

@@ -401,6 +401,41 @@ struct ChartView: View {
     }
     private static let maxSonarlabOBs = 20
 
+    /// Enhanced Sonarlab Order Block zones — momentum OBs with multi-factor filters.
+    private var enhancedSonarlabOBZones: [EnhancedSonarlabOrderBlocks.Zone] {
+        guard indicators.contains(.enhancedSonarlabOrderBlock) else { return [] }
+
+        let inst = indicatorInstances.first(where: { $0.kind == .enhancedSonarlabOrderBlock && !$0.hidden })
+        let sens = inst?.params["sensitivity"]?.doubleValue ?? 35.0
+        let mitStr = inst?.params["mitigationType"]?.stringValue ?? "Wick"
+        let mitType: EnhancedSonarlabOrderBlocks.MitigationType
+        switch mitStr {
+        case "Close": mitType = .close
+        case "Unmitigated Only": mitType = .unmitigatedOnly
+        default: mitType = .wick
+        }
+        let reqVol = inst?.params["requireVolumeSpike"]?.boolValue ?? true
+        let minVol = inst?.params["minVolumeMult"]?.doubleValue ?? 1.3
+        let minDisp = inst?.params["minDisplacementATR"]?.doubleValue ?? 1.0
+        let reqFVG = inst?.params["requireFVG"]?.boolValue ?? false
+        let trend = inst?.params["trendFilter"]?.stringValue ?? "Off"
+        let minGrade = inst?.params["minGradeFilter"]?.stringValue ?? "Grade B+"
+        let maxZ = Int(inst?.params["maxZones"]?.doubleValue ?? 15.0)
+
+        return derived.enhancedSonarlabOrderBlocks(
+            candles: candles,
+            sensitivity: sens,
+            mitigationType: mitType,
+            requireVolumeSpike: reqVol,
+            minVolumeMult: minVol,
+            minDisplacementATR: minDisp,
+            requireFVG: reqFVG,
+            trendFilter: trend,
+            minGradeFilter: minGrade,
+            maxZones: maxZ
+        )
+    }
+
     /// Ranked Order Block zones — swing-structure OBs graded A/B/C by
     /// Volume Profile + Ichimoku confluence.
     /// Trade plans derived from the zones above. Empty unless the
@@ -491,6 +526,13 @@ struct ChartView: View {
             showHistoric: cfg.vfobShowHistoric,
             combine: true
         ).zones
+    }
+
+    /// Helix + Volumetric OB Combo output.
+    private var helixOBComboOutput: HelixOBCombo.Output {
+        guard indicators.contains(.helixOBCombo) else { return .empty }
+        let params = indicatorInstances.first(where: { $0.kind == .helixOBCombo })?.params ?? [:]
+        return derived.helixOBCombo(candles: candles, params: params)
     }
 
     /// Zone-count preset → zones rendered per side (matches the Pine
@@ -833,11 +875,13 @@ struct ChartView: View {
             orderBlockMarks
             steroidOrderBlockMarks
             sonarlabOBMarks
+            enhancedSonarlabOBMarks
             ichimokuOBMarks
             rankedOBMarks
             volumeRankedOBMarks
             rankedOBStrategyMarks
             volumeFilteredOBMarks
+            helixOBComboMarks
             htfChochMarks
             chochMarks
             scenarioMarks
@@ -1222,7 +1266,7 @@ struct ChartView: View {
     private func handleAnchors(for d: ChartDrawing) -> [ChartDrawing.Handle] {
         switch d.kind {
         case .horizontalLine: return [.start]
-        case .trendLine:      return [.start, .end]
+        case .trendLine, .regressionChannel: return [.start, .end]
         case .rectangle:      return [.topLeft, .topRight, .bottomLeft, .bottomRight]
         case .volumeProfile:  return [.topLeft, .topRight, .bottomLeft, .bottomRight]
         // Must stay positionally in step with `handlePositions(for:)`,
@@ -1341,6 +1385,9 @@ struct ChartView: View {
         case .trendLine:
             guard hasDrag else { return }
             onCommitDrawing?(ChartDrawing(kind: .trendLine, start: start, end: end))
+        case .regressionChannel:
+            guard hasDrag else { return }
+            onCommitDrawing?(ChartDrawing(kind: .regressionChannel, start: start, end: end))
         case .rectangle:
             guard hasDrag else { return }
             onCommitDrawing?(ChartDrawing(kind: .rectangle, start: start, end: end))
@@ -1571,6 +1618,32 @@ struct ChartView: View {
             let dx = max(rect.minX - p.x, 0, p.x - rect.maxX)
             let dy = max(rect.minY - p.y, 0, p.y - rect.maxY)
             return hypot(dx, dy)
+        case .regressionChannel:
+            guard let end = d.end,
+                  let xs = barIndex(forDate: d.start.date),
+                  let xe = barIndex(forDate: end.date)
+            else { return nil }
+            let x0 = min(xs, xe), x1 = max(xs, xe)
+            guard let res = RegressionCalculator.calculate(candles: candles, startIndex: Int(x0), endIndex: Int(x1)) else { return nil }
+            let dev = d.effectiveDevMult
+            let endBarIdx = d.isExtendedRight ? max(Int(x1), candles.count - 1) : Int(x1)
+            let startBarIdx = Int(x0)
+
+            guard let xsScr = proxy.position(forX: Double(startBarIdx)),
+                  let xeScr = proxy.position(forX: Double(endBarIdx)),
+                  let yMidStartScr = proxy.position(forY: res.price(at: startBarIdx)),
+                  let yMidEndScr   = proxy.position(forY: res.price(at: endBarIdx)),
+                  let yUpStartScr  = proxy.position(forY: res.upperPrice(at: startBarIdx, multiplier: dev)),
+                  let yUpEndScr    = proxy.position(forY: res.upperPrice(at: endBarIdx, multiplier: dev)),
+                  let yLoStartScr  = proxy.position(forY: res.lowerPrice(at: startBarIdx, multiplier: dev)),
+                  let yLoEndScr    = proxy.position(forY: res.lowerPrice(at: endBarIdx, multiplier: dev))
+            else { return nil }
+
+            let midDist = Self.distanceToSegment(p, CGPoint(x: xsScr, y: yMidStartScr), CGPoint(x: xeScr, y: yMidEndScr))
+            let upDist  = Self.distanceToSegment(p, CGPoint(x: xsScr, y: yUpStartScr),  CGPoint(x: xeScr, y: yUpEndScr))
+            let loDist  = Self.distanceToSegment(p, CGPoint(x: xsScr, y: yLoStartScr),  CGPoint(x: xeScr, y: yLoEndScr))
+
+            return min(midDist, min(upDist, loDist))
         }
     }
 
@@ -3042,6 +3115,77 @@ struct ChartView: View {
         }
     }
 
+    /// Enhanced Sonarlab Order Block zones — graded momentum OB rectangles
+    /// with quality badges and displacement/volume tags.
+    @ChartContentBuilder
+    private var enhancedSonarlabOBMarks: some ChartContent {
+        let lastIndex = candles.count - 1
+        ForEach(enhancedSonarlabOBZones) { zone in
+            enhancedSonarlabOBMark(for: zone, lastIndex: lastIndex)
+        }
+    }
+
+    @ChartContentBuilder
+    private func enhancedSonarlabOBMark(for zone: EnhancedSonarlabOrderBlocks.Zone, lastIndex: Int) -> some ChartContent {
+        let baseColor: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
+        let accentColor = IndicatorKind.enhancedSonarlabOrderBlock.color
+        let xStart = Double(zone.index)
+        let xEnd   = Double(lastIndex)
+        let opacityMult = zone.isMitigated ? 0.05 : 0.15
+
+        // Fill
+        RectangleMark(
+            xStart: .value("ESOB start", xStart),
+            xEnd:   .value("ESOB end",   xEnd),
+            yStart: .value("ESOB low",   zone.low),
+            yEnd:   .value("ESOB high",  zone.high)
+        )
+        .foregroundStyle(baseColor.opacity(opacityMult))
+
+        // Top edge
+        RuleMark(
+            xStart: .value("ESOB start hi", xStart),
+            xEnd:   .value("ESOB end hi",   xEnd),
+            y:      .value("ESOB hi",       zone.high)
+        )
+        .foregroundStyle(baseColor.opacity(zone.isMitigated ? 0.40 : 0.85))
+        .lineStyle(StrokeStyle(lineWidth: 1.0, dash: zone.isMitigated ? [4, 3] : []))
+
+        // Bottom edge
+        RuleMark(
+            xStart: .value("ESOB start lo", xStart),
+            xEnd:   .value("ESOB end lo",   xEnd),
+            y:      .value("ESOB lo",       zone.low)
+        )
+        .foregroundStyle(baseColor.opacity(zone.isMitigated ? 0.40 : 0.85))
+        .lineStyle(StrokeStyle(lineWidth: 1.0, dash: zone.isMitigated ? [4, 3] : []))
+
+        // Direction & Quality tag at the right edge
+        let dirArrow = zone.isBullish ? "↑" : "↓"
+        let volBadge = zone.hasVolumeSpike ? "⚡" : ""
+        let dispBadge = zone.hasDisplacement ? "🚀" : ""
+        let fvgBadge = zone.hasFVG ? "🌐" : ""
+        let tagText = "[\(zone.grade.rawValue)] E-SOB\(dirArrow) \(volBadge)\(dispBadge)\(fvgBadge)".trimmingCharacters(in: .whitespaces)
+
+        PointMark(
+            x: .value("ESOB label", xEnd),
+            y: .value("ESOB hi",    zone.high)
+        )
+        .symbolSize(0)
+        .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+            Text(tagText)
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(accentColor.opacity(zone.isMitigated ? 0.5 : 0.9))
+                )
+                .offset(x: -2, y: -9)
+        }
+    }
+
     @ChartContentBuilder
     private func sonarlabOBMark(for zone: SonarlabOrderBlocks.Zone, lastIndex: Int) -> some ChartContent {
         let baseColor: Color = zone.isBullish ? Theme.Color.success : Theme.Color.danger
@@ -4422,6 +4566,13 @@ struct ChartView: View {
                 {
                     positionMarks(for: d, xs: xs, xe: xe)
                 }
+            case .regressionChannel:
+                if let end = d.end,
+                   let xs = barIndex(forDate: d.start.date),
+                   let xe = barIndex(forDate: end.date)
+                {
+                    regressionChannelMarks(for: d, end: end, xs: xs, xe: xe, stroke: stroke, lw: lw)
+                }
             }
         }
 
@@ -4429,6 +4580,79 @@ struct ChartView: View {
         // committed mark. Only the selected drawing gets handles; click
         // anywhere else to deselect.
         selectionHandleMarks
+    }
+
+    // MARK: - Regression Channel
+
+    @ChartContentBuilder
+    private func regressionChannelMarks(
+        for d: ChartDrawing,
+        end: DrawingPoint,
+        xs: Double,
+        xe: Double,
+        stroke: Color,
+        lw: CGFloat
+    ) -> some ChartContent {
+        let x0 = min(xs, xe), x1 = max(xs, xe)
+        if let res = RegressionCalculator.calculate(candles: candles, startIndex: Int(x0), endIndex: Int(x1)) {
+            let dev = d.effectiveDevMult
+            let startIdx = Int(x0)
+            let endIdx = d.isExtendedRight ? max(Int(x1), candles.count - 1) : Int(x1)
+            let xStart = Double(startIdx)
+            let xEnd = Double(endIdx)
+
+            let midStart = res.price(at: startIdx)
+            let midEnd = res.price(at: endIdx)
+
+            let upStart = res.upperPrice(at: startIdx, multiplier: dev)
+            let upEnd = res.upperPrice(at: endIdx, multiplier: dev)
+
+            let loStart = res.lowerPrice(at: startIdx, multiplier: dev)
+            let loEnd = res.lowerPrice(at: endIdx, multiplier: dev)
+
+            let seriesId = d.id.uuidString
+
+            let fillColor = res.slope >= 0
+                ? Color(red: 0.16, green: 0.80, blue: 0.40).opacity(0.12)
+                : Color(red: 0.95, green: 0.28, blue: 0.28).opacity(0.12)
+
+            AreaMark(
+                x: .value("X", xStart),
+                yStart: .value("Y0", loStart),
+                yEnd: .value("Y1", upStart),
+                series: .value("Series", seriesId + "-fill")
+            )
+            .foregroundStyle(fillColor)
+
+            AreaMark(
+                x: .value("X", xEnd),
+                yStart: .value("Y0", loEnd),
+                yEnd: .value("Y1", upEnd),
+                series: .value("Series", seriesId + "-fill")
+            )
+            .foregroundStyle(fillColor)
+
+            LineMark(x: .value("X", xStart), y: .value("Mid", midStart), series: .value("Series", seriesId + "-mid"))
+                .foregroundStyle(stroke)
+                .lineStyle(StrokeStyle(lineWidth: lw, dash: [4, 4]))
+            LineMark(x: .value("X", xEnd), y: .value("Mid", midEnd), series: .value("Series", seriesId + "-mid"))
+                .foregroundStyle(stroke)
+                .lineStyle(StrokeStyle(lineWidth: lw, dash: [4, 4]))
+
+            LineMark(x: .value("X", xStart), y: .value("Up", upStart), series: .value("Series", seriesId + "-up"))
+                .foregroundStyle(stroke)
+                .lineStyle(StrokeStyle(lineWidth: lw))
+            LineMark(x: .value("X", xEnd), y: .value("Up", upEnd), series: .value("Series", seriesId + "-up"))
+                .foregroundStyle(stroke)
+                .lineStyle(StrokeStyle(lineWidth: lw))
+
+            LineMark(x: .value("X", xStart), y: .value("Lo", loStart), series: .value("Series", seriesId + "-lo"))
+                .foregroundStyle(stroke)
+                .lineStyle(StrokeStyle(lineWidth: lw))
+            LineMark(x: .value("X", xEnd), y: .value("Lo", loEnd), series: .value("Series", seriesId + "-lo"))
+                .foregroundStyle(stroke)
+                .lineStyle(StrokeStyle(lineWidth: lw))
+        }
     }
 
     // MARK: - Position tool
@@ -4602,7 +4826,7 @@ struct ChartView: View {
             // Single handle pinned to the right edge of the visible
             // window so the user always has something to grab.
             return [HandlePoint(x: effectiveXDomain.upperBound - 0.5, y: d.start.price)]
-        case .trendLine:
+        case .trendLine, .regressionChannel:
             guard let end = d.end,
                   let xs = barIndex(forDate: d.start.date),
                   let xe = barIndex(forDate: end.date)
@@ -4694,6 +4918,20 @@ struct ChartView: View {
                     )
                     .foregroundStyle(DrawingPalette.preview)
                     .lineStyle(StrokeStyle(lineWidth: 1.4, dash: [3, 3]))
+                }
+            case .regressionChannel:
+                if let e = drawingEnd,
+                   let xs = barIndex(forDate: s.date),
+                   let xe = barIndex(forDate: e.date)
+                {
+                    regressionChannelMarks(
+                        for: ChartDrawing(kind: .regressionChannel, start: s, end: e),
+                        end: e,
+                        xs: xs,
+                        xe: xe,
+                        stroke: DrawingPalette.preview,
+                        lw: 1.2
+                    )
                 }
             case .rectangle:
                 if let e = drawingEnd,
@@ -5122,6 +5360,159 @@ struct ChartView: View {
                         .padding(.vertical, 1)
                         .background(Capsule().fill(base.opacity(0.9)))
                 }
+        }
+    }
+
+    // MARK: - Helix + Price Action Volumetric OB Combo Marks
+
+    @ChartContentBuilder
+    private var helixOBComboMarks: some ChartContent {
+        let out = helixOBComboOutput
+        if !out.bullishOBs.isEmpty || !out.bearishOBs.isEmpty || !out.signals.isEmpty || !out.points.isEmpty || !out.structures.isEmpty {
+            let lastIndex = max(0, candles.count - 1)
+            let cs = displayCandles
+
+            // 1. Volumetric Order Blocks
+            ForEach(out.bullishOBs + out.bearishOBs) { ob in
+                let baseColor: Color = ob.isBullish ? Theme.Color.success : Theme.Color.danger
+                let xStart = Double(ob.barStart)
+                let xEnd = Double(lastIndex)
+
+                // Main Translucent Rectangle
+                RectangleMark(
+                    xStart: .value("HelixOB x0", xStart), xEnd: .value("HelixOB x1", xEnd),
+                    yStart: .value("HelixOB y0", ob.btm), yEnd: .value("HelixOB y1", ob.top)
+                )
+                .foregroundStyle(baseColor.opacity(0.18))
+
+                // Top & Bottom Border Lines
+                RuleMark(xStart: .value("HelixOB t0", xStart), xEnd: .value("HelixOB t1", xEnd), y: .value("HelixOB top", ob.top))
+                    .foregroundStyle(baseColor.opacity(0.70))
+                RuleMark(xStart: .value("HelixOB b0", xStart), xEnd: .value("HelixOB b1", xEnd), y: .value("HelixOB bot", ob.btm))
+                    .foregroundStyle(baseColor.opacity(0.70))
+
+                // Mid Dashed Line
+                RuleMark(xStart: .value("HelixOB m0", xStart), xEnd: .value("HelixOB m1", xEnd), y: .value("HelixOB mid", ob.mid))
+                    .foregroundStyle(Color.gray.opacity(0.50))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+
+                // Volumetric Inner Bars
+                let totalStr = ob.bullishStr + ob.bearishStr
+                if totalStr > 0 {
+                    let span = max(1.0, xEnd - xStart)
+                    let maxW = min(span * 0.5, 12.0)
+                    let bullW = maxW * (ob.bullishStr / totalStr)
+                    let bearW = maxW * (ob.bearishStr / totalStr)
+
+                    RectangleMark(
+                        xStart: .value("HelixOB uv0", xStart), xEnd: .value("HelixOB uv1", xStart + bullW),
+                        yStart: .value("HelixOB uvy0", ob.mid), yEnd: .value("HelixOB uvy1", ob.top)
+                    )
+                    .foregroundStyle(Theme.Color.success.opacity(0.45))
+
+                    RectangleMark(
+                        xStart: .value("HelixOB dv0", xStart), xEnd: .value("HelixOB dv1", xStart + bearW),
+                        yStart: .value("HelixOB dvy0", ob.btm), yEnd: .value("HelixOB dvy1", ob.mid)
+                    )
+                    .foregroundStyle(Theme.Color.danger.opacity(0.45))
+
+                    let sepX = xStart + max(bullW, bearW)
+                    RuleMark(
+                        x: .value("HelixOB sepX", sepX),
+                        yStart: .value("HelixOB sepY0", ob.btm),
+                        yEnd: .value("HelixOB sepY1", ob.top)
+                    )
+                    .foregroundStyle(Color.gray.opacity(0.60))
+                }
+            }
+
+            // 2. MSB / BOS Structure Lines
+            ForEach(out.structures) { s in
+                let color: Color = s.isBullish ? Theme.Color.success : Theme.Color.danger
+                RuleMark(
+                    xStart: .value("HelixMSB x0", Double(s.x1)),
+                    xEnd: .value("HelixMSB x1", Double(s.x2)),
+                    y: .value("HelixMSB y", s.y1)
+                )
+                .foregroundStyle(color)
+                .lineStyle(StrokeStyle(lineWidth: 1))
+
+                PointMark(x: .value("HelixMSB midX", Double(s.x1 + s.x2) / 2.0), y: .value("HelixMSB midY", s.y1))
+                    .symbolSize(0)
+                    .annotation(position: s.isBullish ? .bottom : .top, alignment: .center, spacing: 2) {
+                        Text(s.label)
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(color)
+                    }
+            }
+
+            // 3. Long / Short Stop lines (if plotLongShortStop param is enabled)
+            let params = indicatorInstances.first(where: { $0.kind == .helixOBCombo })?.params ?? [:]
+            let plotStops = params["plotLongShortStop"]?.boolValue ?? false
+
+            if plotStops {
+                ForEach(out.points) { pt in
+                    if let ls = pt.longStop {
+                        LineMark(
+                            x: .value("Bar", Double(pt.index)),
+                            y: .value("Helix Long Stop", ls),
+                            series: .value("Series", "helix-longstop")
+                        )
+                        .foregroundStyle(Theme.Color.success)
+                        .lineStyle(StrokeStyle(lineWidth: 1.5))
+                        .interpolationMethod(.stepStart)
+                    }
+                    if let ss = pt.shortStop {
+                        LineMark(
+                            x: .value("Bar", Double(pt.index)),
+                            y: .value("Helix Short Stop", ss),
+                            series: .value("Series", "helix-shortstop")
+                        )
+                        .foregroundStyle(Theme.Color.danger)
+                        .lineStyle(StrokeStyle(lineWidth: 1.5))
+                        .interpolationMethod(.stepStart)
+                    }
+                }
+            }
+
+            // 4. EMA Filter Line
+            ForEach(out.emaPoints) { p in
+                LineMark(
+                    x: .value("Bar", Double(p.index)),
+                    y: .value("Helix EMA", p.value),
+                    series: .value("Series", "helix-ema")
+                )
+                .foregroundStyle(Color.orange.opacity(0.85))
+                .lineStyle(StrokeStyle(lineWidth: 1.2))
+            }
+
+            // 5. Buy / Sell Labels & MACD Signals
+            ForEach(out.signals) { sig in
+                if sig.index >= 0 && sig.index < cs.count {
+                    let c = cs[sig.index]
+                    PointMark(
+                        x: .value("Bar", Double(sig.index)),
+                        y: .value("Helix Signal", sig.isBuy ? c.low : c.high)
+                    )
+                    .symbol(.circle)
+                    .symbolSize(sig.isMACD ? 20 : 0)
+                    .foregroundStyle(sig.isBuy ? Theme.Color.success : Theme.Color.danger)
+                    .annotation(
+                        position: sig.isBuy ? .bottom : .top,
+                        alignment: .center,
+                        spacing: 2
+                    ) {
+                        if !sig.isMACD {
+                            Text(sig.isBuy ? "Buy" : "Sell")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(sig.isBuy ? Theme.Color.success : Theme.Color.danger))
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -5655,12 +6046,14 @@ struct ChartView: View {
             orderBlockZones: orderBlockZones,
             steroidOrderBlockZones: steroidOrderBlockZones,
             sonarlabOBZones: sonarlabOBZones,
+            enhancedSonarlabOBZones: enhancedSonarlabOBZones,
             ichimokuOutput: ichimokuOutput,
             ichimokuOBZones: ichimokuOBZones,
             rankedOBZones: rankedOBZones,
             volumeRankedOBZones: volumeRankedOBZones,
             rankedOBSetups: rankedOBSetups,
             volumeFilteredOBZones: volumeFilteredOBZones,
+            helixOBComboOutput: helixOBComboOutput,
             chochZones: chochZones,
             htfChochZones: htfChochZones,
             sessionRuns: sessionRuns,

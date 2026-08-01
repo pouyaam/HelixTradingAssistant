@@ -198,6 +198,28 @@ final class StrategySentinel: ObservableObject {
                 ))
             }
 
+            // C2. Enhanced Sonarlab OB
+            let enhSonarZones = EnhancedSonarlabOrderBlocks.compute(
+                candles,
+                sensitivity: isLTF ? 26 : 35,
+                mitigationType: .wick,
+                requireVolumeSpike: true,
+                minVolumeMult: 1.2,
+                minDisplacementATR: 0.8,
+                requireFVG: false,
+                trendFilter: "Off",
+                minGradeFilter: "Grade B+"
+            )
+            for z in enhSonarZones where !z.isMitigated {
+                let vol = Self.computeTradedVolume(bottom: z.low, top: z.high, window: window)
+                let (nested, label) = checkHTFNesting(z.high, z.low, z.isBullish)
+                candidateZones.append(UnifiedCandidateZone(
+                    id: z.id, engineName: "Enhanced Sonarlab OB", top: z.high, bottom: z.low,
+                    isBullish: z.isBullish, gradeLabel: "Grade \(z.grade.rawValue)", atr: atrVal, tradedVolume: vol,
+                    isHTFNested: nested, htfLabel: label
+                ))
+            }
+
             // D. Standard Order Blocks
             let stdOBZones = OrderBlocks.compute(candles, periods: isLTF ? 3 : 5, threshold: 0.0, useWicks: false)
             for z in stdOBZones where z.status != .exhausted {

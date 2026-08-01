@@ -82,6 +82,7 @@ struct ChartDrawing: Identifiable, Codable, Equatable {
         case volumeProfile
         case longPosition
         case shortPosition
+        case regressionChannel
 
         /// Position tools carry stop/target levels and risk settings the
         /// other shapes don't, and are rendered and hit-tested as a
@@ -115,6 +116,17 @@ struct ChartDrawing: Identifiable, Codable, Equatable {
     /// Percent of `accountBalance` risked if the stop fills.
     var riskPercent: Double?
 
+    // ── Regression Channel fields ──────────────────────────────────
+    //
+    // Standard deviation multiplier (default 2.0) and extension toggles.
+    var devMult: Double?
+    var extendRight: Bool?
+    var extendLeft: Bool?
+
+    var effectiveDevMult: Double { devMult ?? 2.0 }
+    var isExtendedRight: Bool { extendRight ?? false }
+    var isExtendedLeft: Bool { extendLeft ?? false }
+
     init(
         id: UUID = UUID(),
         kind: Kind,
@@ -126,7 +138,10 @@ struct ChartDrawing: Identifiable, Codable, Equatable {
         stopPrice: Double? = nil,
         targetPrice: Double? = nil,
         accountBalance: Double? = nil,
-        riskPercent: Double? = nil
+        riskPercent: Double? = nil,
+        devMult: Double? = nil,
+        extendRight: Bool? = nil,
+        extendLeft: Bool? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -139,6 +154,9 @@ struct ChartDrawing: Identifiable, Codable, Equatable {
         self.targetPrice = targetPrice
         self.accountBalance = accountBalance
         self.riskPercent = riskPercent
+        self.devMult = devMult
+        self.extendRight = extendRight
+        self.extendLeft = extendLeft
     }
 
     // ── Back-compat decoding ────────────────────────────────────────
@@ -150,6 +168,7 @@ struct ChartDrawing: Identifiable, Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, kind, start, end, visible, color, lineWidth
         case stopPrice, targetPrice, accountBalance, riskPercent
+        case devMult, extendRight, extendLeft
     }
 
     init(from decoder: Decoder) throws {
@@ -167,6 +186,9 @@ struct ChartDrawing: Identifiable, Codable, Equatable {
         targetPrice    = try c.decodeIfPresent(Double.self, forKey: .targetPrice)
         accountBalance = try c.decodeIfPresent(Double.self, forKey: .accountBalance)
         riskPercent    = try c.decodeIfPresent(Double.self, forKey: .riskPercent)
+        devMult        = try c.decodeIfPresent(Double.self, forKey: .devMult)
+        extendRight    = try c.decodeIfPresent(Bool.self, forKey: .extendRight)
+        extendLeft     = try c.decodeIfPresent(Bool.self, forKey: .extendLeft)
     }
 
     /// Identifies which endpoint of a drawing a handle represents.
@@ -238,14 +260,14 @@ struct ChartDrawing: Identifiable, Codable, Equatable {
             // price actually changes. The date stays whatever it was
             // so the persisted anchor doesn't drift.
             copy.start = DrawingPoint(date: copy.start.date, price: cursor.price)
-        case .trendLine:
+        case .trendLine, .regressionChannel:
             switch anchor {
             case .start:
                 copy.start = cursor
             case .end:
                 copy.end = cursor
             default:
-                break   // rectangle anchors don't apply to trend lines
+                break   // rectangle anchors don't apply to trend lines / regression channels
             }
         case .rectangle:
             guard let oldEnd = copy.end else { return copy }
@@ -342,30 +364,33 @@ enum DrawingTool: String, CaseIterable, Identifiable, Equatable {
     case volumeProfile
     case longPosition
     case shortPosition
+    case regressionChannel
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .none:           return "Cursor"
-        case .horizontalLine: return "Horizontal line"
-        case .trendLine:      return "Trend line"
-        case .rectangle:      return "Rectangle"
-        case .volumeProfile:  return "Volume Profile"
-        case .longPosition:   return "Long position"
-        case .shortPosition:  return "Short position"
+        case .none:              return "Cursor"
+        case .horizontalLine:    return "Horizontal line"
+        case .trendLine:         return "Trend line"
+        case .rectangle:         return "Rectangle"
+        case .volumeProfile:     return "Volume Profile"
+        case .longPosition:      return "Long position"
+        case .shortPosition:     return "Short position"
+        case .regressionChannel: return "Regression Channel"
         }
     }
 
     var systemImage: String {
         switch self {
-        case .none:           return "cursorarrow"
-        case .horizontalLine: return "minus"
-        case .trendLine:      return "line.diagonal"
-        case .rectangle:      return "rectangle"
-        case .volumeProfile:  return "chart.bar.xaxis.ascending"
-        case .longPosition:   return "arrow.up.right.square"
-        case .shortPosition:  return "arrow.down.right.square"
+        case .none:              return "cursorarrow"
+        case .horizontalLine:    return "minus"
+        case .trendLine:         return "line.diagonal"
+        case .rectangle:         return "rectangle"
+        case .volumeProfile:     return "chart.bar.xaxis.ascending"
+        case .longPosition:      return "arrow.up.right.square"
+        case .shortPosition:     return "arrow.down.right.square"
+        case .regressionChannel: return "line.diagonal.chart"
         }
     }
 
@@ -376,6 +401,90 @@ enum DrawingTool: String, CaseIterable, Identifiable, Equatable {
         case .shortPosition: return .shortPosition
         default:             return nil
         }
+    }
+}
+
+// MARK: - Regression Calculator
+
+/// Output of a least-squares linear regression fit over a candle slice.
+struct RegressionResult {
+    /// Slope m (price change per bar unit)
+    let slope: Double
+    /// Intercept c (y-value at sample start bar)
+    let intercept: Double
+    /// Standard deviation of residuals (sigma)
+    let stdDev: Double
+    /// Starting bar index of sample
+    let startIndex: Int
+    /// Ending bar index of sample
+    let endIndex: Int
+
+    /// Predicted midline price at absolute bar index x
+    func price(at barIndex: Int) -> Double {
+        let x = Double(barIndex - startIndex)
+        return slope * x + intercept
+    }
+
+    /// Predicted upper band price at absolute bar index x
+    func upperPrice(at barIndex: Int, multiplier: Double) -> Double {
+        return price(at: barIndex) + (multiplier * stdDev)
+    }
+
+    /// Predicted lower band price at absolute bar index x
+    func lowerPrice(at barIndex: Int, multiplier: Double) -> Double {
+        return price(at: barIndex) - (multiplier * stdDev)
+    }
+}
+
+enum RegressionCalculator {
+    /// Compute linear regression over candles between startIndex and endIndex.
+    static func calculate(candles: [Candle], startIndex: Int, endIndex: Int) -> RegressionResult? {
+        let minIdx = max(0, min(startIndex, endIndex))
+        let maxIdx = min(candles.count - 1, max(startIndex, endIndex))
+        let n = Double(maxIdx - minIdx + 1)
+        guard n >= 2 else { return nil }
+
+        var sumX: Double = 0
+        var sumY: Double = 0
+        var sumXY: Double = 0
+        var sumX2: Double = 0
+
+        var yValues: [Double] = []
+        yValues.reserveCapacity(Int(n))
+
+        for i in 0..<Int(n) {
+            let x = Double(i)
+            let y = candles[minIdx + i].close
+            yValues.append(y)
+
+            sumX += x
+            sumY += y
+            sumXY += x * y
+            sumX2 += x * x
+        }
+
+        let denominator = (n * sumX2) - (sumX * sumX)
+        guard abs(denominator) > 1e-9 else { return nil }
+
+        let slope = ((n * sumXY) - (sumX * sumY)) / denominator
+        let intercept = (sumY - (slope * sumX)) / n
+
+        var sumResidualsSq: Double = 0
+        for i in 0..<Int(n) {
+            let x = Double(i)
+            let predictedY = slope * x + intercept
+            let residual = yValues[i] - predictedY
+            sumResidualsSq += residual * residual
+        }
+        let stdDev = sqrt(sumResidualsSq / n)
+
+        return RegressionResult(
+            slope: slope,
+            intercept: intercept,
+            stdDev: stdDev,
+            startIndex: minIdx,
+            endIndex: maxIdx
+        )
     }
 }
 

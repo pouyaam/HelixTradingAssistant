@@ -153,6 +153,12 @@ struct ChartPaneView: View {
         Card(padding: isFullscreen ? 0 : (isCompact ? Theme.Spacing.md : Theme.Spacing.xl), chromeless: isFullscreen) {
             chartStack.padding(isFullscreen ? 0 : Theme.Spacing.md)
         }
+        .background {
+            if let bg = chartTheme.effectiveBackgroundColor {
+                RoundedRectangle(cornerRadius: isFullscreen ? 0 : Theme.Radius.lg, style: .continuous)
+                    .fill(bg)
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 

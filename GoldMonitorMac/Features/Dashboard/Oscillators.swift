@@ -9,14 +9,16 @@ enum OscillatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     case rsi
     case macd
     case stochastic
+    case helixOBCombo
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .rsi:        return "RSI"
-        case .macd:       return "MACD"
-        case .stochastic: return "Stochastic"
+        case .rsi:          return "RSI"
+        case .macd:         return "MACD"
+        case .stochastic:   return "Stochastic"
+        case .helixOBCombo: return "Helix+OB Combo"
         }
     }
 
@@ -34,6 +36,29 @@ enum OscillatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
             return [
                 .double(key: "k", label: "%K Period", default: 14, step: 1, range: 2...50),
                 .double(key: "d", label: "%D Period", default: 3, step: 1, range: 1...20),
+            ]
+        case .helixOBCombo:
+            return [
+                .double(key: "atrLength", label: "ATR Period", default: 1, step: 1, range: 1...50),
+                .double(key: "atrMult", label: "ATR Multiplier", default: 1.85, step: 0.05, range: 0.1...10.0),
+                .double(key: "emaLength", label: "EMA Length for Filter", default: 50, step: 1, range: 2...200),
+                .bool(key: "useEMAFilter", label: "Enable EMA Filter", default: true),
+                .bool(key: "useVolumeFilter", label: "Enable Session Volume Filter", default: true),
+                .bool(key: "useExtraVolumeFilter", label: "Enable Extra Volume Condition", default: true),
+                .double(key: "lookBackPeriod", label: "Extra Volume LookBack", default: 20, step: 1, range: 1...100),
+                .bool(key: "useMACDSignal", label: "Enable MACD Signal", default: true),
+                .bool(key: "plotLongShortStop", label: "Plot Long/Short ATR Stop", default: false),
+                .bool(key: "heikenAshi", label: "Using Heikin Ashi Candles", default: false),
+                .double(key: "swingLength", label: "Swing Length", default: 8, step: 1, range: 2...50),
+                .double(key: "showLastXOb", label: "Show Last X Order Blocks", default: 4, step: 1, range: 1...10),
+                .enum(key: "violationType", label: "Violation Check", default: "Wick", options: [
+                    ParamOption(label: "Wick", value: "Wick"),
+                    ParamOption(label: "Close", value: "Close"),
+                ]),
+                .enum(key: "hideOverlap", label: "Hide Overlap", default: "True", options: [
+                    ParamOption(label: "True", value: "True"),
+                    ParamOption(label: "False", value: "False"),
+                ]),
             ]
         }
     }
@@ -69,6 +94,9 @@ struct OscillatorInstance: Identifiable, Hashable, Codable {
             let k = Int(params["k"]?.doubleValue ?? 14)
             let d = Int(params["d"]?.doubleValue ?? 3)
             return "Stochastic (\(k), \(d))"
+        case .helixOBCombo:
+            let isHA = params["heikenAshi"]?.boolValue ?? false
+            return "Helix+OB Combo (\(isHA ? "HA" : "Normal"))"
         }
     }
 }

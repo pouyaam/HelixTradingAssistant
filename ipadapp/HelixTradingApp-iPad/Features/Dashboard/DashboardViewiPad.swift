@@ -955,6 +955,8 @@ private struct ChartPlotiPad: View {
                 "k": .double(Double(config.stochK)),
                 "d": .double(Double(config.stochD)),
             ])
+        case .helixOBCombo:
+            return OscillatorInstance(id: stableID, kind: .helixOBCombo)
         }
     }
 }

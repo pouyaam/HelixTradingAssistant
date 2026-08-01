@@ -19,6 +19,31 @@ struct DashboardView: View {
     /// toggle governs every chart at once.
     @AppStorage("dashboard.showNews")   private var showNews: Bool = true
     @AppStorage("dashboard.chartTheme") private var chartThemeRaw: String = ChartTheme.greenRed.rawValue
+    @AppStorage("dashboard.customUpColorHex")   private var customUpHex: String = "#21C768"
+    @AppStorage("dashboard.customDownColorHex") private var customDownHex: String = "#F04545"
+    @AppStorage("dashboard.customBgColorHex")   private var customBgHex: String = "#12151C"
+
+    private var customUpColorBinding: Binding<Color> {
+        Binding(
+            get: { Color(hex: customUpHex) ?? Theme.Color.success },
+            set: { customUpHex = $0.toHex() }
+        )
+    }
+
+    private var customDownColorBinding: Binding<Color> {
+        Binding(
+            get: { Color(hex: customDownHex) ?? Theme.Color.danger },
+            set: { customDownHex = $0.toHex() }
+        )
+    }
+
+    private var customBgColorBinding: Binding<Color> {
+        Binding(
+            get: { Color(hex: customBgHex) ?? Color(red: 0.07, green: 0.08, blue: 0.11) },
+            set: { customBgHex = $0.toHex() }
+        )
+    }
+
     private var chartTheme: ChartTheme { ChartTheme(rawValue: chartThemeRaw) ?? .greenRed }
     @AppStorage("notifications.strategySignals.enabled")
     private var strategyNotificationsEnabled: Bool = true
@@ -111,6 +136,7 @@ struct DashboardView: View {
     @State private var altScenarioVisible: Bool = true
     /// Layers popover open/close.
     @State private var showLayersPopover: Bool = false
+    @State private var showCustomThemeSheet: Bool = false
     /// Network debug sheet open/close. Driven by the 🐞 toolbar
     /// button.
     @State private var showDebugLogSheet: Bool = false
@@ -1075,6 +1101,8 @@ struct DashboardView: View {
         case .stochastic:
             if let v = p["k"] { oscillatorConfig.stochK = Int(v.doubleValue) }
             if let v = p["d"] { oscillatorConfig.stochD = Int(v.doubleValue) }
+        case .helixOBCombo:
+            break
         }
         oscillatorConfig.save()
     }
@@ -1093,6 +1121,8 @@ struct DashboardView: View {
             case .stochastic:
                 oscillatorInstances[i].params["k"] = .double(Double(oscillatorConfig.stochK))
                 oscillatorInstances[i].params["d"] = .double(Double(oscillatorConfig.stochD))
+            case .helixOBCombo:
+                break
             }
         }
         saveOscillators()
@@ -1426,6 +1456,9 @@ struct DashboardView: View {
                 }
                 _loadingOlderFlag.isLoading = false
             }
+        }
+        .sheet(isPresented: $showCustomThemeSheet) {
+            CustomThemeSheet()
         }
         .sheet(isPresented: $showAlertSheet) {
             if let cur = pair {
@@ -1779,6 +1812,12 @@ struct DashboardView: View {
         // on every fullscreen toggle — see `Card.chromeless`.
         Card(padding: isChartFull ? Theme.Spacing.md : Theme.Spacing.xl, chromeless: isChartFull) {
             chartCardContent(pair)
+        }
+        .background {
+            if let bg = chartTheme.effectiveBackgroundColor {
+                RoundedRectangle(cornerRadius: isChartFull ? 0 : Theme.Radius.lg, style: .continuous)
+                    .fill(bg)
+            }
         }
     }
 
@@ -2420,6 +2459,31 @@ struct DashboardView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+
+                if chartThemeRaw == ChartTheme.custom.rawValue {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("CUSTOM PALETTE")
+                                .font(.system(size: 8, weight: .semibold))
+                                .foregroundStyle(Theme.Color.textMuted)
+                            Spacer()
+                            Button("Edit Colors...") {
+                                showCustomThemeSheet = true
+                            }
+                            .font(.system(size: 10, weight: .semibold))
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Theme.Color.accentStart)
+                        }
+
+                        ColorPicker("Up Candle", selection: customUpColorBinding)
+                            .font(.system(size: 11, weight: .medium))
+                        ColorPicker("Down Candle", selection: customDownColorBinding)
+                            .font(.system(size: 11, weight: .medium))
+                        ColorPicker("Chart Background", selection: customBgColorBinding)
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .padding(.top, 4)
+                }
             }
             .padding(.bottom, Theme.Spacing.xs)
 
@@ -2717,6 +2781,8 @@ struct DashboardView: View {
             return "Long · \(ChartView.priceShort(d.start.price))"
         case .shortPosition:
             return "Short · \(ChartView.priceShort(d.start.price))"
+        case .regressionChannel:
+            return "Regression Channel"
         }
     }
 
@@ -3430,9 +3496,18 @@ struct DashboardView: View {
             ForEach(ChartTheme.allCases) { theme in
                 Button {
                     chartThemeRaw = theme.rawValue
+                    if theme == .custom {
+                        showCustomThemeSheet = true
+                    }
                 } label: {
                     Label(theme.label, systemImage: theme == chartTheme ? "checkmark.circle.fill" : "circle")
                 }
+            }
+            Divider()
+            Button {
+                showCustomThemeSheet = true
+            } label: {
+                Label("Customize Colors...", systemImage: "paintpalette")
             }
         }
         Menu("Indicators") {

@@ -127,6 +127,10 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     /// block. Ported from ClayeWeight's PineScript v5 "Sonarlab -
     /// Order Blocks" (MPL 2.0).
     case sonarlabOrderBlock
+    /// Enhanced Sonarlab Order Blocks — momentum-based OB detection with
+    /// institutional volume spike validation, ATR displacement, Fair Value
+    /// Gap (FVG) requirement, EMA trend filtering, and quality grading.
+    case enhancedSonarlabOrderBlock
     /// Ranked Order Blocks — swing-structure order blocks graded A/B/C
     /// by Volume Profile + Ichimoku confluence. Invalidated zones flip
     /// into breakers rather than disappearing, and overlapping zones on
@@ -164,6 +168,10 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     /// PineScript v6 indicator (see `VolumeFilteredOrderBlocks` +
     /// ChartView's `volumeFilteredOBMarks`).
     case volumeFilteredOrderBlock
+    /// Helix + Price Action Volumetric Order Blocks [Combo] — ATR trailing stop trend
+    /// indicator combined with session volume filter, EMA filter, MACD crossover signals,
+    /// and UAlgo Volumetric Order Blocks with MSB/BOS structure lines.
+    case helixOBCombo
 
     var id: String { rawValue }
 
@@ -186,6 +194,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .mtrStrategy:    return "MTR · Major Trend Reversal"
         case .fairValueGap:   return "Fair Value Gap"
         case .sonarlabOrderBlock: return "Sonarlab OB"
+        case .enhancedSonarlabOrderBlock: return "Enhanced Sonarlab OB"
         case .rankedOrderBlock:   return "Ranked OB"
         case .volumeRankedOrderBlock: return "Volume-Ranked OB"
         case .changeOfCharacter: return "CHoCH Zones"
@@ -193,6 +202,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .ichimoku:          return "Ichimoku Cloud"
         case .ichimokuOrderBlock: return "Ichimoku OB"
         case .volumeFilteredOrderBlock: return "Volume-Filtered OB"
+        case .helixOBCombo:   return "Helix+OB Combo"
         }
     }
 
@@ -215,6 +225,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .mtrStrategy: return Color(red: 0.66, green: 0.48, blue: 1.00)
         case .fairValueGap: return Color(red: 0.30, green: 0.80, blue: 0.75)
         case .sonarlabOrderBlock: return Color(red: 0.80, green: 0.45, blue: 0.90)
+        case .enhancedSonarlabOrderBlock: return Color(red: 0.62, green: 0.35, blue: 0.98)
         case .rankedOrderBlock:   return Color(red: 0.25, green: 0.90, blue: 0.60)
         case .volumeRankedOrderBlock: return Color(red: 0.15, green: 0.85, blue: 0.95)
         case .changeOfCharacter: return Color(red: 0.95, green: 0.35, blue: 0.72)
@@ -222,6 +233,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .ichimoku:          return Color(red: 0.60, green: 0.70, blue: 0.95)
         case .ichimokuOrderBlock: return Color(red: 0.50, green: 0.80, blue: 0.70)
         case .volumeFilteredOrderBlock: return Color(red: 0.34, green: 0.84, blue: 0.42)
+        case .helixOBCombo:   return Color(red: 0.15, green: 0.78, blue: 0.85)
         }
     }
 
@@ -366,6 +378,30 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                     ParamOption(label: "Wick", value: "Wick"),
                 ]),
             ]
+        case .enhancedSonarlabOrderBlock:
+            return [
+                .double(key: "sensitivity", label: "Sensitivity (ROC threshold)", default: 35.0, step: 1, range: 1...100),
+                .enum(key: "mitigationType", label: "Mitigation type", default: "Wick", options: [
+                    ParamOption(label: "Wick", value: "Wick"),
+                    ParamOption(label: "Close", value: "Close"),
+                    ParamOption(label: "Unmitigated Only", value: "Unmitigated Only"),
+                ]),
+                .bool(key: "requireVolumeSpike", label: "Require Volume Spike", default: true),
+                .double(key: "minVolumeMult", label: "Min Volume Multiplier (x SMA20)", default: 1.3, step: 0.1, range: 0.5...5.0),
+                .double(key: "minDisplacementATR", label: "Min Displacement (x ATR14)", default: 1.0, step: 0.1, range: 0.0...5.0),
+                .bool(key: "requireFVG", label: "Require FVG Imbalance", default: false),
+                .enum(key: "trendFilter", label: "Trend Alignment", default: "Off", options: [
+                    ParamOption(label: "Off", value: "Off"),
+                    ParamOption(label: "EMA 50", value: "EMA 50"),
+                    ParamOption(label: "EMA 200", value: "EMA 200"),
+                ]),
+                .enum(key: "minGradeFilter", label: "Min Zone Quality Filter", default: "Grade B+", options: [
+                    ParamOption(label: "All Zones", value: "All Zones"),
+                    ParamOption(label: "Grade B+", value: "Grade B+"),
+                    ParamOption(label: "Grade A Only", value: "Grade A Only"),
+                ]),
+                .double(key: "maxZones", label: "Max Displayed Zones", default: 15.0, step: 1, range: 1...50),
+            ]
         case .rankedOrderBlock:
             return [
                 .double(key: "swingLength", label: "Swing length", default: 10, step: 1, range: 3...50),
@@ -506,6 +542,29 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                     ParamOption(label: "Medium", value: "Medium"),
                     ParamOption(label: "Low", value: "Low"),
                     ParamOption(label: "One", value: "One"),
+                ]),
+            ]
+        case .helixOBCombo:
+            return [
+                .double(key: "atrLength", label: "ATR Period", default: 1, step: 1, range: 1...50),
+                .double(key: "atrMult", label: "ATR Multiplier", default: 1.85, step: 0.05, range: 0.1...10.0),
+                .double(key: "emaLength", label: "EMA Length for Filter", default: 50, step: 1, range: 2...200),
+                .bool(key: "useEMAFilter", label: "Enable EMA Filter", default: true),
+                .bool(key: "useVolumeFilter", label: "Enable Session Volume Filter", default: true),
+                .bool(key: "useExtraVolumeFilter", label: "Enable Extra Volume Condition", default: true),
+                .double(key: "lookBackPeriod", label: "Extra Volume LookBack", default: 20, step: 1, range: 1...100),
+                .bool(key: "useMACDSignal", label: "Enable MACD Signal", default: true),
+                .bool(key: "plotLongShortStop", label: "Plot Long/Short ATR Stop", default: false),
+                .bool(key: "heikenAshi", label: "Using Heikin Ashi Candles", default: false),
+                .double(key: "swingLength", label: "Swing Length", default: 8, step: 1, range: 2...50),
+                .double(key: "showLastXOb", label: "Show Last X Order Blocks", default: 4, step: 1, range: 1...10),
+                .enum(key: "violationType", label: "Violation Check", default: "Wick", options: [
+                    ParamOption(label: "Wick", value: "Wick"),
+                    ParamOption(label: "Close", value: "Close"),
+                ]),
+                .enum(key: "hideOverlap", label: "Hide Overlap", default: "True", options: [
+                    ParamOption(label: "True", value: "True"),
+                    ParamOption(label: "False", value: "False"),
                 ]),
             ]
         }
