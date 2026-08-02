@@ -24,15 +24,27 @@ struct OscillatorPanel: View {
     /// `ChartDerivedCache`.
     @StateObject private var derived = ChartDerivedCache()
 
+    @State private var manualYDomain: ClosedRange<Double>? = nil
+    @State private var yScaleStartDomain: ClosedRange<Double>? = nil
+    @State private var customHeight: CGFloat? = nil
+    @State private var startHeight: CGFloat? = nil
+
+    private var defaultHeight: CGFloat {
+        instance.kind == .helixOBCombo ? 150 : 90
+    }
+
+    private var currentHeight: CGFloat {
+        customHeight ?? defaultHeight
+    }
+
     var body: some View {
-        // Compute visible points ONCE — both `marks` and `yDomain`
-        // previously triggered independent `visiblePoints` evaluations,
-        // each building a fresh `Set(renderIndices)`.
         let pts = visiblePoints
         let domain = effectiveDomain
-        let yDom = yDomainForPoints(pts)
+        let yDom = effectiveYDomain(pts: pts)
 
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 2) {
+            resizeDividerBar
+
             HStack(spacing: 6) {
                 Text(instance.label)
                     .font(.system(size: 10, weight: .semibold))
@@ -40,6 +52,8 @@ struct OscillatorPanel: View {
                 Spacer()
                 latestReadout
             }
+            .padding(.top, 2)
+
             Chart {
                 ForEach(
                     ChartWindow.dayBoundaryPositions(candles: candles, domain: domain),
@@ -75,6 +89,9 @@ struct OscillatorPanel: View {
                     }
                 }
             }
+            .overlay(alignment: .trailing) {
+                yAxisScaleStrip(plotHeight: currentHeight)
+            }
             .chartOverlay { proxy in
                 GeometryReader { geo in
                     Rectangle()
@@ -101,12 +118,85 @@ struct OscillatorPanel: View {
             #if os(macOS)
             .scrollZoom(xDomain: $xDomain, totalCandles: candles.count)
             #endif
-            #if os(macOS)
-            .scrollZoom(xDomain: $xDomain, totalCandles: candles.count)
-            #endif
-            .frame(height: instance.kind == .helixOBCombo ? 150 : 90)
+            .frame(height: currentHeight)
             .clipped()
         }
+    }
+
+    // MARK: - Panel Height Resize Splitter Bar
+
+    private var resizeDividerBar: some View {
+        ZStack {
+            Rectangle()
+                .fill(Theme.Color.border.opacity(0.35))
+                .frame(height: 1)
+            Rectangle()
+                .fill(Color.clear)
+                .frame(height: 8)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 1)
+                        .onChanged { value in
+                            if startHeight == nil {
+                                startHeight = currentHeight
+                            }
+                            guard let start = startHeight else { return }
+                            let newH = start - value.translation.height
+                            customHeight = min(max(newH, 60), 450)
+                        }
+                        .onEnded { _ in startHeight = nil }
+                )
+                .onTapGesture(count: 2) { customHeight = nil }
+                #if os(macOS)
+                .onHover { inside in
+                    if inside { NSCursor.resizeUpDown.push() }
+                    else      { NSCursor.pop() }
+                }
+                #endif
+        }
+    }
+
+    // MARK: - Y-Axis Scale Strip & Gesture
+
+    private func yAxisScaleStrip(plotHeight: CGFloat) -> some View {
+        GeometryReader { geo in
+            Rectangle()
+                .fill(Color.clear)
+                .contentShape(Rectangle())
+                .gesture(priceScaleDrag(plotHeight: plotHeight))
+                .onTapGesture(count: 2) { manualYDomain = nil }
+                #if os(macOS)
+                .onHover { inside in
+                    if inside { NSCursor.resizeUpDown.push() }
+                    else      { NSCursor.pop() }
+                }
+                #endif
+        }
+        .frame(width: 50)
+    }
+
+    private func priceScaleDrag(plotHeight: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { value in
+                if yScaleStartDomain == nil {
+                    let pts = visiblePoints
+                    yScaleStartDomain = effectiveYDomain(pts: pts)
+                }
+                guard let start = yScaleStartDomain, plotHeight > 0 else { return }
+                let center = (start.lowerBound + start.upperBound) / 2
+                let halfSpan = (start.upperBound - start.lowerBound) / 2
+                guard halfSpan > 0 else { return }
+                let raw = exp(Double(value.translation.height) / Double(plotHeight) * 1.6)
+                let factor = min(max(raw, 0.1), 10)
+                let newHalf = halfSpan * factor
+                manualYDomain = (center - newHalf) ... (center + newHalf)
+            }
+            .onEnded { _ in yScaleStartDomain = nil }
+    }
+
+    private func effectiveYDomain(pts: [IndicatorPoint]) -> ClosedRange<Double> {
+        if let manual = manualYDomain { return manual }
+        return yDomainForPoints(pts)
     }
 
     // MARK: - Marks dispatch
@@ -257,10 +347,15 @@ struct OscillatorPanel: View {
                     }
             }
 
+            let visibleSet = Set(visibleIndices)
+            let visiblePoints = out.points.filter { visibleSet.contains($0.index) }
+            let visibleEMAPoints = out.emaPoints.filter { visibleSet.contains($0.index) }
+            let visibleSignals = out.signals.filter { visibleSet.contains($0.index) }
+
             // D) Long / Short ATR Stop lines
             let plotStops = instance.params["plotLongShortStop"]?.boolValue ?? false
             if plotStops {
-                ForEach(out.points) { pt in
+                ForEach(visiblePoints) { pt in
                     if let ls = pt.longStop {
                         LineMark(
                             x: .value("Bar", Double(pt.index)),
@@ -285,7 +380,7 @@ struct OscillatorPanel: View {
             }
 
             // E) EMA Filter Line
-            ForEach(out.emaPoints) { p in
+            ForEach(visibleEMAPoints) { p in
                 LineMark(
                     x: .value("Bar", Double(p.index)),
                     y: .value("Helix EMA", p.value),
@@ -296,7 +391,7 @@ struct OscillatorPanel: View {
             }
 
             // F) Buy / Sell / MACD Signals
-            ForEach(out.signals) { sig in
+            ForEach(visibleSignals) { sig in
                 if sig.index >= 0 && sig.index < subCandles.count {
                     let c = subCandles[sig.index]
                     PointMark(

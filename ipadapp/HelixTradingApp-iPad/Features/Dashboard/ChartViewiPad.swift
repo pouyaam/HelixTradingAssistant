@@ -4,6 +4,7 @@ import Charts
 struct ChartViewiPad: View {
     let candles: [Candle]
     let chartType: ChartType
+    var renkoConfig: RenkoConfig = .default
     let accent: Color
 
     @Binding var xDomain: ClosedRange<Double>?
@@ -99,7 +100,8 @@ struct ChartViewiPad: View {
     private var displayCandles: [Candle] {
         derived.displayCandles(
             candles: candles,
-            heikinAshi: chartType == .heikinAshi,
+            chartType: chartType,
+            renkoConfig: renkoConfig,
             livePrice: livePrice
         )
     }
@@ -170,6 +172,13 @@ struct ChartViewiPad: View {
         guard indicators.contains(.helixOBCombo) else { return .empty }
         let params = indicatorInstances.first(where: { $0.kind == .helixOBCombo })?.params ?? [:]
         return derived.helixOBCombo(candles: candles, params: params)
+    }
+
+    /// AlgoSmart Assist v2 output.
+    private var algoSmartAssistOutput: AlgoSmartAssist.Output {
+        guard indicators.contains(.algoSmartAssist) else { return .empty }
+        let params = indicatorInstances.first(where: { $0.kind == .algoSmartAssist })?.params ?? [:]
+        return derived.algoSmartAssist(candles: candles, params: params)
     }
 
     private var sonarlabOBZones: [SonarlabOrderBlocks.Zone] {
@@ -524,6 +533,7 @@ struct ChartViewiPad: View {
                 rankedOBStrategyMarks
                 volumeFilteredOBMarks
                 helixOBComboMarks
+                algoSmartAssistMarks
                 chochMarks
                 htfChochMarks
                 scenarioMarks
@@ -534,7 +544,7 @@ struct ChartViewiPad: View {
 
                 switch chartType {
                 case .line:                  lineMarks(indices: indices)
-                case .candle, .heikinAshi:   candleMarks(indices: indices)
+                case .candle, .heikinAshi, .renko: candleMarks(indices: indices)
                 }
 
                 indicatorMarks(visLo: visLo, visHi: visHi)
@@ -1073,9 +1083,23 @@ struct ChartViewiPad: View {
 
     // MARK: - Effective domains
 
+    /// Bars in the series actually drawn — `candles.count` for line/
+    /// candle/Heikin-Ashi (1:1), the brick count for Renko. The X axis
+    /// plots at bar index, so the window has to be measured in the same
+    /// index space as the drawn series or the visible range lands past
+    /// the end of the brick array and nothing renders. (See
+    /// `ChartView.drawnBarCount`.)
+    private var drawnBarCount: Int { displayCandles.count }
+
     private var effectiveXDomain: ClosedRange<Double> {
-        if let d = xDomain { return d }
-        return ChartWindow.defaultDomain(count: candles.count)
+        let count = drawnBarCount
+        // Only reuse a pinned window if it still intersects the drawn
+        // series — after a switch into/out of Renko the index space
+        // changes underneath it and it would otherwise frame nothing.
+        if let d = xDomain, ChartWindow.visibleBounds(domain: d, count: count) != nil {
+            return d
+        }
+        return ChartWindow.defaultDomain(count: count)
     }
 
     /// Reset to the default recent-bars window with the price scale
@@ -1083,14 +1107,32 @@ struct ChartViewiPad: View {
     /// Mac chart's Reset. Pins an explicit Y so the double-tap doesn't
     /// hand the axis back to the overlay-inclusive auto-fit.
     private func resetChart() {
-        guard candles.count > 0 else { xDomain = nil; yDomain = nil; return }
-        let domain = ChartWindow.defaultDomain(count: candles.count)
-        yDomain = ChartWindow.candleYDomain(candles: candles, domain: domain)
+        // Frame the DRAWN series (bricks in Renko mode), so Reset can't
+        // pin a window in an index space the chart isn't plotting in.
+        let drawn = displayCandles
+        guard drawn.count > 0 else { xDomain = nil; yDomain = nil; return }
+        let domain = ChartWindow.defaultDomain(count: drawn.count)
+        yDomain = ChartWindow.candleYDomain(candles: drawn, domain: domain)
         xDomain = domain
     }
 
     private var renderIndices: [Int] {
-        ChartWindow.renderIndices(domain: effectiveXDomain, count: candles.count)
+        // Sized to the DRAWN series (see `drawnBarCount`).
+        ChartWindow.renderIndices(domain: effectiveXDomain, count: drawnBarCount)
+    }
+
+    /// Clamp a render-window index list (sized to raw `candles.count`) to a
+    /// series of `count` bars actually being drawn. `renderIndices` yields
+    /// ascending, non-negative, in-bounds-for-`candles` indices, so when its
+    /// last element already fits the drawn series every index does — that
+    /// common case (line/candle/Heikin-Ashi, no mid-render mutation) returns
+    /// the array untouched with no allocation. Only a genuine length
+    /// mismatch (Renko bricks, or a live backfill/replay shrinking the array
+    /// mid-update) pays for a filter. Guards the `displayCandles` subscript
+    /// in `candleMarks`/`lineMarks` against going out of range.
+    private func renderSafeIndices(_ indices: [Int], count: Int) -> [Int] {
+        guard (indices.last ?? -1) >= count else { return indices }
+        return indices.filter { $0 >= 0 && $0 < count }
     }
 
     /// News events resolved to bar indices and clipped to the visible
@@ -1119,7 +1161,8 @@ struct ChartViewiPad: View {
     @ChartContentBuilder
     private func lineMarks(indices: [Int]) -> some ChartContent {
         let cs = displayCandles
-        ForEach(indices, id: \.self) { i in
+        let safe = renderSafeIndices(indices, count: cs.count)
+        ForEach(safe, id: \.self) { i in
             let c = cs[i]
             AreaMark(
                 x: .value("Bar", Double(i)),
@@ -3730,12 +3773,17 @@ struct ChartViewiPad: View {
                     }
             }
 
+            let renderSet = Set(renderIndices)
+            let visiblePoints = out.points.filter { renderSet.contains($0.index) }
+            let visibleEMAPoints = out.emaPoints.filter { renderSet.contains($0.index) }
+            let visibleSignals = out.signals.filter { renderSet.contains($0.index) }
+
             // 3. Long / Short Stop lines (if plotLongShortStop param is enabled)
             let params = indicatorInstances.first(where: { $0.kind == .helixOBCombo })?.params ?? [:]
             let plotStops = params["plotLongShortStop"]?.boolValue ?? false
 
             if plotStops {
-                ForEach(out.points) { pt in
+                ForEach(visiblePoints) { pt in
                     if let ls = pt.longStop {
                         LineMark(
                             x: .value("Bar", Double(pt.index)),
@@ -3760,7 +3808,7 @@ struct ChartViewiPad: View {
             }
 
             // 4. EMA Filter Line
-            ForEach(out.emaPoints) { p in
+            ForEach(visibleEMAPoints) { p in
                 LineMark(
                     x: .value("Bar", Double(p.index)),
                     y: .value("Helix EMA", p.value),
@@ -3771,7 +3819,7 @@ struct ChartViewiPad: View {
             }
 
             // 5. Buy / Sell Labels & MACD Signals
-            ForEach(out.signals) { sig in
+            ForEach(visibleSignals) { sig in
                 if sig.index >= 0 && sig.index < cs.count {
                     let c = cs[sig.index]
                     PointMark(
@@ -3796,6 +3844,155 @@ struct ChartViewiPad: View {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func algoSmartAssistLabelView(_ lbl: AlgoSmartAssist.StructureLabel) -> some View {
+        if lbl.isCircle {
+            Circle()
+                .fill(lbl.isBullish ? Theme.Color.success.opacity(0.55) : Theme.Color.danger.opacity(0.55))
+                .frame(width: 6, height: 6)
+        } else if lbl.isPullback {
+            Text(lbl.text)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(lbl.isBullish ? Theme.Color.success : Theme.Color.danger)
+        } else if !lbl.text.isEmpty {
+            Text(lbl.text)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(lbl.text == "I D M" ? Color.white.opacity(0.8) : (lbl.isBullish ? Theme.Color.success : Theme.Color.danger))
+                .padding(.horizontal, 3)
+                .padding(.vertical, 1)
+                .background(Theme.Color.surfaceHi.opacity(0.85))
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+        }
+    }
+
+    @ChartContentBuilder
+    private func algoSmartAssistLabelMark(_ lbl: AlgoSmartAssist.StructureLabel, cs: [Candle]) -> some ChartContent {
+        let c = cs[lbl.bar]
+        PointMark(
+            x: .value("ASALbl x", Double(lbl.bar)),
+            y: .value("ASALbl y", lbl.isPullback ? (lbl.isBullish ? c.low : c.high) : lbl.price)
+        )
+        .foregroundStyle(Color.clear)
+        .annotation(position: lbl.isBullish ? .top : .bottom) {
+            algoSmartAssistLabelView(lbl)
+        }
+    }
+
+    @ChartContentBuilder
+    private func algoSmartAssistBarMark(_ bar: AlgoSmartAssist.ColoredBar, cs: [Candle]) -> some ChartContent {
+        let c = cs[bar.barIndex]
+        let barColor: Color = {
+            switch bar.colorType {
+            case .scobUp: return Color(red: 0.04, green: 0.25, blue: 0.98)
+            case .scobDn: return Color(red: 0.85, green: 0.47, blue: 0.11)
+            case .isb:    return Color(red: 0.73, green: 0.02, blue: 0.97)
+            case .osbUp:  return Color(red: 0.04, green: 0.25, blue: 0.98)
+            case .osbDn:  return Color(red: 0.85, green: 0.47, blue: 0.11)
+            }
+        }()
+
+        RectangleMark(
+            xStart: .value("ASABar x0", Double(bar.barIndex) - 0.35),
+            xEnd: .value("ASABar x1", Double(bar.barIndex) + 0.35),
+            yStart: .value("ASABar y0", c.low),
+            yEnd: .value("ASABar y1", c.high)
+        )
+        .foregroundStyle(barColor.opacity(0.35))
+    }
+
+    /// AlgoSmart Assist v2 marks (POI order blocks, structures, live lines, labels, bar colors).
+    @ChartContentBuilder
+    private var algoSmartAssistMarks: some ChartContent {
+        let out = algoSmartAssistOutput
+        if !out.zones.isEmpty || !out.lines.isEmpty || !out.labels.isEmpty || !out.tpLines.isEmpty || !out.liveLines.isEmpty || !out.coloredBars.isEmpty {
+            let lastIndex = max(0, candles.count - 1)
+            let cs = displayCandles
+            let validColoredBars = out.coloredBars.filter { $0.barIndex >= 0 && $0.barIndex < cs.count }
+            let validLabels = out.labels.filter { $0.bar >= 0 && $0.bar < cs.count }
+
+            // 1. POI Order Block Zones
+            ForEach(out.zones) { zone in
+                let xStart = Double(zone.startBar)
+                let xEnd = Double(zone.endBar ?? lastIndex)
+                let baseColor: Color = zone.isMitigated
+                    ? Color.gray
+                    : (zone.isSupply ? Color(red: 0.80, green: 0.36, blue: 0.28) : Color(red: 0.18, green: 0.51, blue: 0.38))
+
+                RectangleMark(
+                    xStart: .value("ASA x0", xStart), xEnd: .value("ASA x1", xEnd),
+                    yStart: .value("ASA y0", zone.bottom), yEnd: .value("ASA y1", zone.top)
+                )
+                .foregroundStyle(baseColor.opacity(zone.isMitigated ? 0.12 : 0.22))
+
+                RuleMark(xStart: .value("ASA t0", xStart), xEnd: .value("ASA t1", xEnd), y: .value("ASA top", zone.top))
+                    .foregroundStyle(baseColor.opacity(0.75))
+                    .lineStyle(StrokeStyle(lineWidth: 1))
+
+                RuleMark(xStart: .value("ASA b0", xStart), xEnd: .value("ASA b1", xEnd), y: .value("ASA bot", zone.bottom))
+                    .foregroundStyle(baseColor.opacity(0.75))
+                    .lineStyle(StrokeStyle(lineWidth: 1))
+            }
+
+            // 2. Bar Highlights (SCOB, ISB, OSB)
+            ForEach(validColoredBars) { bar in
+                algoSmartAssistBarMark(bar, cs: cs)
+            }
+
+            // 3. Structure Lines (BOS, CHoCH, IDM, Sweeps)
+            ForEach(out.lines) { ln in
+                let lineColor: Color = ln.labelText == "I D M"
+                    ? Color.white.opacity(0.6)
+                    : (ln.labelText == "X" ? Color.gray : (ln.isBullish ? Theme.Color.success : Theme.Color.danger))
+
+                RuleMark(
+                    xStart: .value("ASALn x0", Double(ln.startBar)),
+                    xEnd: .value("ASALn x1", Double(ln.endBar)),
+                    y: .value("ASALn y", ln.price)
+                )
+                .foregroundStyle(lineColor)
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: ln.isDashed ? [4, 4] : [2, 2]))
+            }
+
+            // 4. Target Profit Lines
+            ForEach(out.tpLines) { tp in
+                RuleMark(
+                    xStart: .value("ASATP x0", Double(tp.startBar)),
+                    xEnd: .value("ASATP x1", Double(min(lastIndex, tp.startBar + 8))),
+                    y: .value("ASATP y", tp.targetPrice)
+                )
+                .foregroundStyle(Color.purple)
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 2]))
+            }
+
+            // 5. Live Extension Lines
+            ForEach(out.liveLines) { ll in
+                let lineColor: Color = ll.isBullish ? Theme.Color.success : Theme.Color.danger
+
+                RuleMark(
+                    xStart: .value("ASALive x0", Double(ll.startBar)),
+                    xEnd: .value("ASALive x1", Double(lastIndex + 30)),
+                    y: .value("ASALive y", ll.price)
+                )
+                .foregroundStyle(lineColor.opacity(0.8))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                .annotation(position: .overlay, alignment: .trailing) {
+                    Text(ll.text)
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(lineColor)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Theme.Color.surfaceHi.opacity(0.9))
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                }
+            }
+
+            // 6. Structure Labels & Pullback Markers
+            ForEach(validLabels) { lbl in
+                algoSmartAssistLabelMark(lbl, cs: cs)
             }
         }
     }
@@ -3901,7 +4098,8 @@ struct ChartViewiPad: View {
     @ChartContentBuilder
     private func candleMarks(indices: [Int]) -> some ChartContent {
         let cs = displayCandles
-        ForEach(indices, id: \.self) { i in
+        let safe = renderSafeIndices(indices, count: cs.count)
+        ForEach(safe, id: \.self) { i in
             let c = cs[i]
             RuleMark(
                 x: .value("Bar", Double(i)),
@@ -4126,6 +4324,7 @@ struct ChartViewiPad: View {
             rankedOBSetups: rankedOBSetups,
             volumeFilteredOBZones: volumeFilteredOBZones,
             helixOBComboOutput: helixOBComboOutput,
+            algoSmartAssistOutput: algoSmartAssistOutput,
             chochZones: chochZones,
             htfChochZones: htfChochZones,
             sessionRuns: sessionRuns,
@@ -4518,6 +4717,7 @@ extension ChartViewiPad: Equatable {
     static func == (l: ChartViewiPad, r: ChartViewiPad) -> Bool {
         Candle.seriesEqual(l.candles, r.candles)
             && l.chartType == r.chartType
+            && l.renkoConfig == r.renkoConfig
             && l.accent == r.accent
             && l.chartTheme == r.chartTheme
             && l.xDomain == r.xDomain

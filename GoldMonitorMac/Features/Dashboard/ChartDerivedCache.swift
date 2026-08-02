@@ -201,21 +201,31 @@ final class ChartDerivedCache: ObservableObject {
     private struct BaseDisplaySig: Equatable {
         let count: Int
         let firstTS: TimeInterval
-        let heikinAshi: Bool
+        let chartType: ChartType
+        let renkoConfig: RenkoConfig?
     }
     private var baseDisplaySig: BaseDisplaySig?
     private var baseDisplayCache: [Candle] = []
 
-    /// The cached base (possibly HA-transformed) candles before the
+    /// The cached base (possibly HA or Renko transformed) candles before the
     /// live-price overlay. Only recomputes on structural changes.
-    private func baseDisplayCandles(candles: [Candle], heikinAshi: Bool) -> [Candle] {
+    private func baseDisplayCandles(candles: [Candle], chartType: ChartType, renkoConfig: RenkoConfig = .default) -> [Candle] {
         let sig = BaseDisplaySig(
             count: candles.count,
             firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            heikinAshi: heikinAshi
+            chartType: chartType,
+            renkoConfig: chartType == .renko ? renkoConfig : nil
         )
         if sig == baseDisplaySig { return baseDisplayCache }
-        let result = heikinAshi ? HeikinAshi.transform(candles) : candles
+        let result: [Candle]
+        switch chartType {
+        case .line, .candle:
+            result = candles
+        case .heikinAshi:
+            result = HeikinAshi.transform(candles)
+        case .renko:
+            result = Renko.transform(candles, config: renkoConfig)
+        }
         baseDisplaySig = sig
         baseDisplayCache = result
         return result
@@ -231,20 +241,10 @@ final class ChartDerivedCache: ObservableObject {
     private var patchedSig: PatchedSig?
     private var patchedCache: [Candle] = []
 
-    /// Candles actually drawn: HA-transformed when requested, with the
+    /// Candles actually drawn: HA/Renko-transformed when requested, with the
     /// in-progress (last) bar patched to the live price.
-    ///
-    /// The patched array is MEMOIZED. `ChartViewiPad` reads the
-    /// `displayCandles` computed property ~13× per render (candle marks,
-    /// line marks, UT Bot, hover, auto-Y-domain…), and patching mutates one
-    /// element of the cached base array — which, because the cache still
-    /// holds a reference, forces a full O(n) copy-on-write EVERY call. On
-    /// deep history that was ~13 full-array copies (tens of MB of
-    /// allocation) per frame, i.e. the dominant pan/zoom CPU cost. Keying
-    /// on (base signature + live price) collapses it to one rebuild per
-    /// tick, with every other read hitting the cache.
-    func displayCandles(candles: [Candle], heikinAshi: Bool, livePrice: Double?) -> [Candle] {
-        let base = baseDisplayCandles(candles: candles, heikinAshi: heikinAshi)
+    func displayCandles(candles: [Candle], chartType: ChartType, renkoConfig: RenkoConfig = .default, livePrice: Double?) -> [Candle] {
+        let base = baseDisplayCandles(candles: candles, chartType: chartType, renkoConfig: renkoConfig)
         guard let live = livePrice, let b = base.last, b.close != 0,
               abs(live - b.close) / b.close < 0.10 else { return base }
         if let sig = patchedSig, let baseSig = baseDisplaySig,
@@ -265,6 +265,10 @@ final class ChartDerivedCache: ObservableObject {
             patchedCache = patched
         }
         return patched
+    }
+
+    func displayCandles(candles: [Candle], heikinAshi: Bool, livePrice: Double?) -> [Candle] {
+        displayCandles(candles: candles, chartType: heikinAshi ? .heikinAshi : .candle, renkoConfig: .default, livePrice: livePrice)
     }
 
     // ── Indicators (SMA / EMA / Bollinger) ────────────────────────────
@@ -823,6 +827,36 @@ final class ChartDerivedCache: ObservableObject {
         }
     }
 
+    /// Deliberately keyed on bar *identity* only — no trailing OHLC, unlike
+    /// e.g. `RankedOBSig`. This is the heaviest structural pass in the app
+    /// (~28 ms over 3k bars, on the main thread during view update), and
+    /// including the live bar's close/high/low made every 1 Hz tick rewrite of
+    /// the trailing bar recompute the whole series. The other structural zone
+    /// engines (`OBSig`, `SonarlabOBSig`, `EnhancedSonarlabOBSig`) already key
+    /// on count + firstTS for exactly this reason. The visible effect is that
+    /// BOS/CHoCH confirm on bar close rather than intra-bar, which is how the
+    /// Pine script's own structure rules read anyway.
+    private struct AlgoSmartAssistSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let params: [String: ParamValue]
+    }
+    private let algoSmartAssistSlot = Slot<AlgoSmartAssistSig, AlgoSmartAssist.Output>(.empty)
+
+    func algoSmartAssist(candles: [Candle], params: [String: ParamValue]) -> AlgoSmartAssist.Output {
+        let last = candles.last
+        let sig = AlgoSmartAssistSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: last?.id.timeIntervalSince1970 ?? 0,
+            params: params
+        )
+        return resolve(algoSmartAssistSlot, signature: sig) {
+            AlgoSmartAssist.calculate(candles: candles, params: params)
+        }
+    }
+
     // ── Volume Profile ─────────────────────────────────────────────────
 
     /// Includes the trailing bar's timestamp/close/volume so the 1 Hz
@@ -1260,6 +1294,7 @@ final class ChartDerivedCache: ObservableObject {
         var rankedOBSetups: [RankedOBStrategy.Setup] = []
         let volumeFilteredOBZones: [VolumeFilteredOrderBlocks.Zone]
         let helixOBComboOutput: HelixOBCombo.Output
+        let algoSmartAssistOutput: AlgoSmartAssist.Output
         let chochZones: [ChangeOfCharacter.Zone]
         let htfChochZones: [ChangeOfCharacter.DatedZone]
         let sessionRuns: [TradingSessions.SessionRun]
@@ -1300,6 +1335,7 @@ final class ChartDerivedCache: ObservableObject {
         let rankedOBSetupKeys: [String]
         let volumeFilteredOBCount: Int
         let helixOBComboCount: Int
+        let algoSmartAssistCount: Int
         let chochCount: Int
         let htfChochCount: Int
         let sessionCount: Int
@@ -1352,6 +1388,7 @@ final class ChartDerivedCache: ObservableObject {
             },
             volumeFilteredOBCount: data.volumeFilteredOBZones.count,
             helixOBComboCount: data.helixOBComboOutput.bullishOBs.count + data.helixOBComboOutput.bearishOBs.count,
+            algoSmartAssistCount: data.algoSmartAssistOutput.zones.count + data.algoSmartAssistOutput.lines.count,
             chochCount: data.chochZones.count,
             htfChochCount: data.htfChochZones.count,
             sessionCount: data.sessionRuns.count,
@@ -1464,6 +1501,18 @@ final class ChartDerivedCache: ObservableObject {
             for pt in data.helixOBComboOutput.points {
                 if let ls = pt.longStop { if ls < lo { lo = ls }; if ls > hi { hi = ls } }
                 if let ss = pt.shortStop { if ss < lo { lo = ss }; if ss > hi { hi = ss } }
+            }
+            for z in data.algoSmartAssistOutput.zones {
+                if z.bottom < lo { lo = z.bottom }
+                if z.top > hi { hi = z.top }
+            }
+            for l in data.algoSmartAssistOutput.lines {
+                if l.price < lo { lo = l.price }
+                if l.price > hi { hi = l.price }
+            }
+            for ll in data.algoSmartAssistOutput.liveLines {
+                if ll.price < lo { lo = ll.price }
+                if ll.price > hi { hi = ll.price }
             }
             // Ichimoku lines — Span B (widest window) and Kijun bound the
             // system; scanning both spans covers the cloud extremes too.

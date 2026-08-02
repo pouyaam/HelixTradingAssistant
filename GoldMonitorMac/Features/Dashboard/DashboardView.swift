@@ -13,6 +13,7 @@ struct DashboardView: View {
     // restored on relaunch.
     @AppStorage("dashboard.timeframe")  private var timeframe: Timeframe = .h1
     @AppStorage("dashboard.chartType")  private var userChartType: ChartType = .candle
+    @AppStorage("dashboard.renkoConfig") private var renkoConfig: RenkoConfig = .default
     @AppStorage("dashboard.showVolume") private var showVolume: Bool = true
     /// News-flag layer on the chart's time axis. On by default; toggled
     /// from the Layers popover. Shared key with the grid panes so the
@@ -55,6 +56,7 @@ struct DashboardView: View {
 
     @State private var indicatorInstances: [IndicatorInstance] = []
     @State private var oscillatorInstances: [OscillatorInstance] = []
+    @State private var showRenkoSettingsPopover: Bool = false
 
     /// Which instance's settings panel is open (if any). Setting this
     /// presents the floating draggable panel for that instance.
@@ -1849,6 +1851,19 @@ struct DashboardView: View {
                         selected: $userChartType,
                         isDisabled: false
                     )
+                    if effectiveChartType == .renko {
+                        Button {
+                            showRenkoSettingsPopover.toggle()
+                        } label: {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.Color.textSecondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .popover(isPresented: $showRenkoSettingsPopover) {
+                            RenkoSettingsView(config: $renkoConfig)
+                        }
+                    }
                     TimeframeSelector(selected: $timeframe)
                     toolbarDivider
                     debugButton
@@ -1859,6 +1874,7 @@ struct DashboardView: View {
                 ChartView(
                     candles: candles,
                     chartType: effectiveChartType,
+                    renkoConfig: renkoConfig,
                     accent: pair.color,
                     chartTheme: chartTheme,
                     xDomain: $xDomain,

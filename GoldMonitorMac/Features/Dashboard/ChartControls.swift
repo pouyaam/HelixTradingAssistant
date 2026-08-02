@@ -82,6 +82,82 @@ struct ChartTypeToggle: View {
         case .line:       return "chart.xyaxis.line"
         case .candle:     return "chart.bar.fill"
         case .heikinAshi: return "rectangle.stack.fill"
+        case .renko:      return "rectangle.3.group.fill"
         }
+    }
+}
+
+/// Settings panel popover content for Renko chart configuration.
+struct RenkoSettingsView: View {
+    @Binding var config: RenkoConfig
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Renko Settings")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.Color.textPrimary)
+
+            Divider()
+
+            HStack {
+                Text("Box Size Mode")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.Color.textSecondary)
+                Spacer()
+                Picker("Mode", selection: $config.mode) {
+                    ForEach(RenkoConfig.Mode.allCases) { m in
+                        Text(m.rawValue).tag(m)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 120)
+            }
+
+            if config.mode == .atr {
+                HStack {
+                    Text("ATR Period")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.Color.textSecondary)
+                    Spacer()
+                    HStack(spacing: 6) {
+                        Button {
+                            if config.atrPeriod > 1 { config.atrPeriod -= 1 }
+                        } label: {
+                            Image(systemName: "minus")
+                                .font(.system(size: 10, weight: .bold))
+                        }
+                        .buttonStyle(.borderless)
+                        Text("\(config.atrPeriod)")
+                            .font(.system(size: 11, weight: .medium).monospacedDigit())
+                            .frame(width: 24, alignment: .center)
+                        Button {
+                            if config.atrPeriod < 100 { config.atrPeriod += 1 }
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 10, weight: .bold))
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+            } else {
+                HStack {
+                    Text("Fixed Box Size")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.Color.textSecondary)
+                    Spacer()
+                    TextField("1.0", value: $config.fixedBoxSize, format: .number)
+                        .font(.system(size: 11).monospacedDigit())
+                        .multilineTextAlignment(.trailing)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                }
+            }
+            // No "Show Wicks" toggle: a Renko brick is a pure box. It
+            // represents a fixed price move rather than a time period, so
+            // there's no intrabar excursion for a shadow to describe.
+        }
+        .padding(12)
+        .frame(width: 220)
     }
 }

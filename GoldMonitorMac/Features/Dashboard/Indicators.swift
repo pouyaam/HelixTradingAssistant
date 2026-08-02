@@ -172,6 +172,8 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     /// indicator combined with session volume filter, EMA filter, MACD crossover signals,
     /// and UAlgo Volumetric Order Blocks with MSB/BOS structure lines.
     case helixOBCombo
+    /// ALGOSMART ASSIST v2 — Smart Money Concepts (SMC) structure, POI order blocks, IDM, CHoCH, BOS, and live extension lines.
+    case algoSmartAssist
 
     var id: String { rawValue }
 
@@ -203,6 +205,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .ichimokuOrderBlock: return "Ichimoku OB"
         case .volumeFilteredOrderBlock: return "Volume-Filtered OB"
         case .helixOBCombo:   return "Helix+OB Combo"
+        case .algoSmartAssist: return "ALGOSMART ASSIST v2"
         }
     }
 
@@ -234,6 +237,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .ichimokuOrderBlock: return Color(red: 0.50, green: 0.80, blue: 0.70)
         case .volumeFilteredOrderBlock: return Color(red: 0.34, green: 0.84, blue: 0.42)
         case .helixOBCombo:   return Color(red: 0.15, green: 0.78, blue: 0.85)
+        case .algoSmartAssist: return Color(red: 0.95, green: 0.82, blue: 0.20)
         }
     }
 
@@ -566,6 +570,42 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                     ParamOption(label: "True", value: "True"),
                     ParamOption(label: "False", value: "False"),
                 ]),
+            ]
+        case .algoSmartAssist:
+            return [
+                .bool(key: "showPOI", label: "Show POI", default: true),
+                .enum(key: "poiType", label: "POI Type", default: "---", options: [
+                    ParamOption(label: "None (---)", value: "---"),
+                    ParamOption(label: "Mother Bar", value: "Mother Bar"),
+                ]),
+                .double(key: "mergeRatio", label: "Merge Ratio", default: 0.0, step: 0.02, range: 0.0...0.5),
+                .double(key: "maxBarHistory", label: "Max IPA Age", default: 2000, step: 100, range: 100...5000),
+                .enum(key: "structureType", label: "Structure Type", default: "Choch without IDM", options: [
+                    ParamOption(label: "Choch without IDM", value: "Choch without IDM"),
+                    ParamOption(label: "Choch with IDM", value: "Choch with IDM"),
+                ]),
+                .bool(key: "showHL", label: "Mark H/L Labels", default: false),
+                .bool(key: "showCircleHL", label: "Mark Circle at H/L", default: true),
+                .bool(key: "showMn", label: "Show Pullback Markers", default: false),
+                .bool(key: "showBOS", label: "Show B O S", default: true),
+                .bool(key: "showChoCh", label: "Show CHoCH", default: true),
+                .bool(key: "showIDM", label: "Show IDM", default: true),
+                .bool(key: "showPdhl", label: "Show Live PDH/PDL", default: false),
+                .double(key: "lengPdhl", label: "PDH/PDL Extend", default: 40, step: 1, range: 1...200),
+                .bool(key: "showMid", label: "Show Equilibrium (0.5)", default: true),
+                .double(key: "lengMid", label: "Equilibrium Extend", default: 40, step: 1, range: 1...200),
+                .bool(key: "showSw", label: "Show H/L Sweeping Lines", default: true),
+                .bool(key: "markX", label: "Mark Sweep 'X'", default: false),
+                .bool(key: "showTP", label: "Show Target Profit", default: false),
+                .bool(key: "showliveBOS", label: "Show Live BOS", default: true),
+                .double(key: "lengBos", label: "Live BOS Extend", default: 40, step: 1, range: 1...200),
+                .bool(key: "showliveChoch", label: "Show Live ChoCh", default: true),
+                .double(key: "lengChoch", label: "Live ChoCh Extend", default: 40, step: 1, range: 1...200),
+                .bool(key: "showliveIDM", label: "Show Live IDM", default: true),
+                .double(key: "lengIDM", label: "Live IDM Extend", default: 15, step: 1, range: 1...200),
+                .bool(key: "showSCOB", label: "Color Bull/Bear SCOB", default: true),
+                .bool(key: "showISB", label: "Color Inside Bar", default: false),
+                .bool(key: "showOSB", label: "Color Outside Bar", default: false),
             ]
         }
     }

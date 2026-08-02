@@ -22,6 +22,7 @@ struct ChartPaneView: View {
     /// primary chart uses, so hiding news there hides it in every pane.
     @AppStorage("dashboard.showNews")   private var showNews: Bool = true
     @AppStorage("dashboard.chartTheme") private var chartThemeRaw: String = ChartTheme.greenRed.rawValue
+    @AppStorage("dashboard.renkoConfig") private var renkoConfig: RenkoConfig = .default
     private var chartTheme: ChartTheme { ChartTheme(rawValue: chartThemeRaw) ?? .greenRed }
 
     let pane: ChartPane
@@ -171,6 +172,7 @@ struct ChartPaneView: View {
                     ChartViewiPad(
                         candles: candles,
                         chartType: pane.chartType,
+                        renkoConfig: renkoConfig,
                         accent: pair.color,
                         xDomain: $xDomain,
                         yDomain: $yDomain,
@@ -199,6 +201,7 @@ struct ChartPaneView: View {
                     ChartView(
                         candles: candles,
                         chartType: pane.chartType,
+                        renkoConfig: renkoConfig,
                         accent: pair.color,
                         chartTheme: chartTheme,
                         xDomain: $xDomain,
