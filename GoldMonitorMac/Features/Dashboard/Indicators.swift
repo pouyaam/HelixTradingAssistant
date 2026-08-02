@@ -151,6 +151,11 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     case changeOfCharacter
     /// Session-based Volume Profile — per-day volume histogram with POC, VAH, VAL.
     case volumeProfile
+    /// Previous Day — the last *completed* trading session's high/low
+    /// (PDH/PDL), its midpoint, and that session's volume profile drawn as
+    /// a histogram in the chart's right margin with POC / VAH / VAL. Every
+    /// element has its own toggle (see `paramSpecs`).
+    case previousDay
     /// Ichimoku Kinkō Hyō — Tenkan / Kijun / Senkou A+B (the shaded Kumo
     /// cloud) / Chikou. Doesn't fit the single-line `IndicatorPoint`
     /// shape: it renders as five lines plus a filled cloud (see
@@ -201,6 +206,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .volumeRankedOrderBlock: return "Volume-Ranked OB"
         case .changeOfCharacter: return "CHoCH Zones"
         case .volumeProfile:     return "Volume Profile"
+        case .previousDay:       return "Previous Day (PDH/PDL + VP)"
         case .ichimoku:          return "Ichimoku Cloud"
         case .ichimokuOrderBlock: return "Ichimoku OB"
         case .volumeFilteredOrderBlock: return "Volume-Filtered OB"
@@ -233,6 +239,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .volumeRankedOrderBlock: return Color(red: 0.15, green: 0.85, blue: 0.95)
         case .changeOfCharacter: return Color(red: 0.95, green: 0.35, blue: 0.72)
         case .volumeProfile:     return Color(red: 0.20, green: 0.80, blue: 0.75)
+        case .previousDay:       return Color(red: 0.98, green: 0.68, blue: 0.25)
         case .ichimoku:          return Color(red: 0.60, green: 0.70, blue: 0.95)
         case .ichimokuOrderBlock: return Color(red: 0.50, green: 0.80, blue: 0.70)
         case .volumeFilteredOrderBlock: return Color(red: 0.34, green: 0.84, blue: 0.42)
@@ -496,6 +503,26 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                     ParamOption(label: "1D", value: "1d"),
                 ]),
                 .double(key: "htfCount", label: "HTF zones to show", default: 3, step: 1, range: 1...8),
+            ]
+        case .previousDay:
+            return [
+                // Levels
+                .bool(key: "showPDH", label: "Show Previous Day High (PDH)", default: true),
+                .bool(key: "showPDL", label: "Show Previous Day Low (PDL)", default: true),
+                .bool(key: "showMid", label: "Show Previous Day 50% (Mid)", default: false),
+                .bool(key: "showOpenClose", label: "Show Previous Day Open/Close", default: false),
+                .bool(key: "extendRight", label: "Extend levels to right edge", default: true),
+                .bool(key: "showLevelLabels", label: "Show level price labels", default: true),
+                // Volume profile
+                .bool(key: "showProfile", label: "Show Previous Day Volume Profile", default: true),
+                .bool(key: "showPOC", label: "Show POC", default: true),
+                .bool(key: "showValueArea", label: "Show Value Area (VAH/VAL)", default: true),
+                .bool(key: "extendProfileLevels", label: "Extend POC/VA to right edge", default: true),
+                .double(key: "bucketCount", label: "Buckets per profile", default: 24, step: 2, range: 10...100),
+                .double(key: "valueAreaPct", label: "Value area %", default: 70.0, step: 5.0, range: 50...95),
+                .double(key: "profileWidth", label: "Profile width (% of view)", default: 18, step: 2, range: 4...45),
+                // Session shading
+                .bool(key: "highlightSession", label: "Shade previous session", default: false),
             ]
         case .volumeProfile:
             return [

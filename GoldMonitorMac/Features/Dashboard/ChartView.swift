@@ -544,6 +544,23 @@ struct ChartView: View {
         return derived.algoSmartAssist(candles: candles, params: params)
     }
 
+    /// Params for the Previous Day indicator, or `nil` when it's off.
+    private var previousDayParams: [String: ParamValue]? {
+        guard indicators.contains(.previousDay) else { return nil }
+        return indicatorInstances.first(where: { $0.kind == .previousDay })?.params ?? [:]
+    }
+
+    /// Previous completed trading session — PDH/PDL plus that session's
+    /// volume profile.
+    private var previousDayVP: VolumeProfile.PreviousDayVP? {
+        guard let params = previousDayParams else { return nil }
+        return derived.previousDayVP(
+            candles: candles,
+            bucketCount: Int(params["bucketCount"]?.doubleValue ?? 24),
+            valueAreaPct: params["valueAreaPct"]?.doubleValue ?? 70.0
+        )
+    }
+
     /// Zone-count preset → zones rendered per side (matches the Pine
     /// "One / Low / Medium / High" mapping).
     static func vfobZoneCount(_ preset: String) -> Int {
@@ -892,6 +909,7 @@ struct ChartView: View {
             volumeFilteredOBMarks
             helixOBComboMarks
             algoSmartAssistMarks
+            previousDayMarks
             htfChochMarks
             chochMarks
             scenarioMarks
@@ -3852,6 +3870,133 @@ struct ChartView: View {
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(Theme.Color.textMuted)
             }
+    }
+
+    /// A previous-day level: a horizontal rule with an optional price tag.
+    @ChartContentBuilder
+    private func previousDayLevel(
+        _ price: Double,
+        from x0: Double,
+        to x1: Double,
+        color: Color,
+        label: String,
+        showLabel: Bool,
+        dash: [CGFloat],
+        width: CGFloat,
+        tag: String
+    ) -> some ChartContent {
+        RuleMark(
+            xStart: .value("\(tag) x0", x0),
+            xEnd:   .value("\(tag) x1", x1),
+            y:      .value("\(tag) y", price)
+        )
+        .foregroundStyle(color)
+        .lineStyle(StrokeStyle(lineWidth: width, dash: dash))
+        .annotation(position: .top, alignment: .leading, spacing: 0) {
+            if showLabel {
+                Text("\(label) \(Self.priceExact(price))")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundStyle(color)
+                    .padding(.horizontal, 3)
+                    .background(
+                        Theme.Color.surfaceMax.opacity(0.85),
+                        in: RoundedRectangle(cornerRadius: 3)
+                    )
+            }
+        }
+    }
+
+    /// Previous Day: PDH / PDL (+ optional mid, open/close) drawn from the
+    /// previous session forward, and that session's volume profile as a
+    /// histogram in the right margin with POC / VAH / VAL.
+    ///
+    /// Every element is individually switchable — see the `previousDay`
+    /// entry in `IndicatorKind.paramSpecs`.
+    @ChartContentBuilder
+    private var previousDayMarks: some ChartContent {
+        if let params = previousDayParams, let pd = previousDayVP {
+            let accent = IndicatorKind.previousDay.color
+            let lastBar = Double(max(0, candles.count - 1))
+            let rightEdge = max(lastBar, effectiveXDomain.upperBound)
+
+            let showLabels = params["showLevelLabels"]?.boolValue ?? true
+            let extendRight = params["extendRight"]?.boolValue ?? true
+            let levelEnd = extendRight ? rightEdge : Double(pd.endBar)
+            let profileEnd = (params["extendProfileLevels"]?.boolValue ?? true) ? rightEdge : Double(pd.endBar)
+
+            // Shade the session the levels came from, so it's obvious which
+            // bars produced them.
+            if params["highlightSession"]?.boolValue ?? false {
+                RectangleMark(
+                    xStart: .value("PD sess x0", Double(pd.startBar) - 0.5),
+                    xEnd:   .value("PD sess x1", Double(pd.endBar) + 0.5),
+                    yStart: .value("PD sess y0", pd.low),
+                    yEnd:   .value("PD sess y1", pd.high)
+                )
+                .foregroundStyle(accent.opacity(0.06))
+            }
+
+            if params["showPDH"]?.boolValue ?? true {
+                previousDayLevel(pd.high, from: Double(pd.startBar), to: levelEnd,
+                                 color: accent, label: "PDH", showLabel: showLabels,
+                                 dash: [], width: 1.5, tag: "PDH")
+            }
+            if params["showPDL"]?.boolValue ?? true {
+                previousDayLevel(pd.low, from: Double(pd.startBar), to: levelEnd,
+                                 color: accent, label: "PDL", showLabel: showLabels,
+                                 dash: [], width: 1.5, tag: "PDL")
+            }
+            if params["showMid"]?.boolValue ?? false {
+                previousDayLevel(pd.mid, from: Double(pd.startBar), to: levelEnd,
+                                 color: accent.opacity(0.65), label: "PD 50%", showLabel: showLabels,
+                                 dash: [4, 4], width: 1, tag: "PDM")
+            }
+            if params["showOpenClose"]?.boolValue ?? false {
+                previousDayLevel(pd.open, from: Double(pd.startBar), to: levelEnd,
+                                 color: Theme.Color.textMuted, label: "PDO", showLabel: showLabels,
+                                 dash: [2, 3], width: 1, tag: "PDO")
+                previousDayLevel(pd.close, from: Double(pd.startBar), to: levelEnd,
+                                 color: Theme.Color.textMuted, label: "PDC", showLabel: showLabels,
+                                 dash: [2, 3], width: 1, tag: "PDC")
+            }
+
+            // Right-margin histogram for the previous session.
+            if params["showProfile"]?.boolValue ?? true {
+                let domain = effectiveXDomain
+                let pct = (params["profileWidth"]?.doubleValue ?? 18) / 100.0
+                let width = max(4, (domain.upperBound - domain.lowerBound) * pct)
+
+                vpHistogramMarks(
+                    buckets: pd.buckets,
+                    bucketSize: pd.bucketSize,
+                    pocIndex: pd.pocIndex,
+                    vaLowIndex: pd.vaLowIndex,
+                    vaHighIndex: pd.vaHighIndex,
+                    rightEdge: domain.upperBound,
+                    maxWidth: width,
+                    tag: "PDVP"
+                )
+
+                if !pd.hasRealVolume {
+                    vpTPONote(x: domain.upperBound, y: pd.vah)
+                }
+            }
+
+            if params["showPOC"]?.boolValue ?? true {
+                previousDayLevel(pd.poc, from: Double(pd.startBar), to: profileEnd,
+                                 color: Color(red: 0.96, green: 0.36, blue: 0.36),
+                                 label: "PD POC", showLabel: showLabels,
+                                 dash: [], width: 1.5, tag: "PDPOC")
+            }
+            if params["showValueArea"]?.boolValue ?? true {
+                previousDayLevel(pd.vah, from: Double(pd.startBar), to: profileEnd,
+                                 color: Theme.Color.info.opacity(0.75), label: "PD VAH",
+                                 showLabel: showLabels, dash: [4, 3], width: 1, tag: "PDVAH")
+                previousDayLevel(pd.val, from: Double(pd.startBar), to: profileEnd,
+                                 color: Theme.Color.info.opacity(0.75), label: "PD VAL",
+                                 showLabel: showLabels, dash: [4, 3], width: 1, tag: "PDVAL")
+            }
+        }
     }
 
     /// Visible-range VP: histogram in the right margin plus ranked
