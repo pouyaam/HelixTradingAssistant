@@ -1,10 +1,14 @@
 import SwiftUI
 
-/// Strategy Sentinel 2.0 drawer — an institutional-grade, highly interactive
-/// trade radar sliding out from the chart's right edge.
-/// Setups are categorized by stage (IN ZONE, PENDING, REACTION, ALL), filterable
-/// by direction / HTF / volume / confidence score, and feature real-time spatial
-/// price distance tracking, score breakdown accordions, and 1-click chart focus.
+/// SMC Sentinel drawer — the trade radar sliding out from the chart's right
+/// edge. Every setup listed here comes from `SMCSentinelEngine`, which reads
+/// the ALGOSMART ASSIST v2 indicator only: HTF context → liquidity grab → POI
+/// mitigation in discount/premium → SCOB or LTF CHoCH trigger.
+///
+/// Setups are grouped by the strategy's own lifecycle (WAITING POI, IN POI,
+/// ACTIVE), filterable by direction / trigger / confluence score, and feature
+/// real-time spatial price tracking, score breakdown accordions, and 1-click
+/// chart focus.
 struct SentinelRadarDrawer: View {
     @ObservedObject var sentinel = StrategySentinel.shared
     @EnvironmentObject var app: AppState
@@ -17,17 +21,16 @@ struct SentinelRadarDrawer: View {
     @AppStorage("dashboard.sentinelDrawerExpanded") private var isExpanded: Bool = false
     @State private var selectedStage: StageTab = .all
     @State private var selectedDirection: DirectionFilter = .all
-    @State private var htfOnly: Bool = false
-    @State private var minVolumeFilter: Double = 0.0
+    @State private var triggeredOnly: Bool = false
     @State private var minScoreFilter: Int = 0
     @State private var hoveredAlertID: UUID?
     @State private var expandedAccordionAlertID: UUID?
     @State private var activePopoverAlertID: UUID?
 
     enum StageTab: String, CaseIterable {
-        case inZone = "🔥 IN ZONE"
-        case pending = "⏳ PENDING"
-        case reaction = "🚀 REACTION"
+        case active = "🚀 ACTIVE"
+        case inPOI = "🔥 IN POI"
+        case waiting = "⏳ WAITING"
         case all = "📊 ALL"
     }
 
@@ -54,31 +57,19 @@ struct SentinelRadarDrawer: View {
         ("≥ 90%", 90)
     ]
 
-    private var volumeThresholds: [(label: String, value: Double)] {
-        let vols = symbolAlerts.compactMap { $0.tradedVolume }.filter { $0 > 0 }.sorted()
-        guard !vols.isEmpty else {
-            return [("ALL VOL", 0.0)]
-        }
-
-        var thresholds: [(label: String, value: Double)] = [("ALL VOL", 0.0)]
-
-        let p25 = vols[Int(Double(vols.count - 1) * 0.25)]
-        let p50 = vols[Int(Double(vols.count - 1) * 0.50)]
-        let p75 = vols[Int(Double(vols.count - 1) * 0.75)]
-
-        if p25 > 0 { thresholds.append(("≥ \(Self.formatVolume(p25))", p25)) }
-        if p50 > p25 { thresholds.append(("≥ \(Self.formatVolume(p50))", p50)) }
-        if p75 > p50 { thresholds.append(("≥ \(Self.formatVolume(p75))", p75)) }
-
-        return thresholds
+    /// The engine's market read for this symbol — shown even when no setup
+    /// qualifies, so an empty radar explains which rule is blocking.
+    private var context: StrategySentinel.MarketContext? {
+        guard let pairID = currentPairID else { return nil }
+        return sentinel.marketContext[pairID]
     }
 
     private var filteredAlerts: [RadarAlert] {
         let raw = symbolAlerts.filter { alert in
             switch selectedStage {
-            case .inZone: guard alert.status == .inZone else { return false }
-            case .pending: guard alert.status == .pending else { return false }
-            case .reaction: guard alert.status == .reaction else { return false }
+            case .active: guard alert.status == .active else { return false }
+            case .inPOI: guard alert.status == .mitigating else { return false }
+            case .waiting: guard alert.status == .waitingForPOI else { return false }
             case .all: break
             }
 
@@ -88,12 +79,8 @@ struct SentinelRadarDrawer: View {
             case .sell: guard alert.direction == .sell else { return false }
             }
 
-            if htfOnly {
-                guard alert.isHTFNested else { return false }
-            }
-
-            if minVolumeFilter > 0 {
-                guard (alert.tradedVolume ?? 0) >= minVolumeFilter - 0.001 else { return false }
+            if triggeredOnly {
+                guard alert.breakdown?.hasTrigger == true else { return false }
             }
 
             if minScoreFilter > 0 {
@@ -139,7 +126,7 @@ struct SentinelRadarDrawer: View {
                     .background(Circle().fill(Theme.Color.accentStart.opacity(symbolAlerts.isEmpty ? 0.15 : 0.9)))
                     .foregroundStyle(symbolAlerts.isEmpty ? Theme.Color.textMuted : .white)
 
-                Text("SENTINEL 2.0")
+                Text("SMC SENTINEL")
                     .font(.system(size: 8, weight: .heavy, design: .monospaced))
                     .rotationEffect(.degrees(-90))
                     .fixedSize()
@@ -172,7 +159,7 @@ struct SentinelRadarDrawer: View {
                     .fill(Theme.Color.success)
                     .frame(width: 6, height: 6)
 
-                Text("SENTINEL RADAR 2.0")
+                Text("SMC SENTINEL")
                     .font(.system(size: 10, weight: .heavy, design: .monospaced))
                     .foregroundStyle(Theme.Color.textPrimary)
 
@@ -183,7 +170,34 @@ struct SentinelRadarDrawer: View {
                     .foregroundStyle(Theme.Color.textMuted)
             }
 
-            // Stage Tabs Bar (🔥 IN ZONE / ⏳ PENDING / 🚀 REACTION / 📊 ALL)
+            // Market context read (HTF structure + premium/discount state)
+            if let ctx = context {
+                HStack(spacing: 4) {
+                    Text("\(ctx.htfLabel) \(ctx.contextLabel)")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(ctx.contextLabel.hasPrefix("Bullish")
+                                         ? Theme.Color.success
+                                         : (ctx.contextLabel.hasPrefix("Bearish") ? Theme.Color.danger : Theme.Color.textMuted))
+
+                    if let eq = ctx.equilibrium {
+                        Text("· 0.5 \(PriceFormat.exact(eq))")
+                            .font(.system(size: 8, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Theme.Color.textMuted)
+
+                        Text(ctx.equilibriumState.uppercased())
+                            .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 0.5)
+                            .background((ctx.equilibriumState == "Discount" ? Theme.Color.success : Theme.Color.danger).opacity(0.20))
+                            .foregroundStyle(ctx.equilibriumState == "Discount" ? Theme.Color.success : Theme.Color.danger)
+                            .cornerRadius(3)
+                    }
+
+                    Spacer()
+                }
+            }
+
+            // Stage Tabs Bar (🚀 ACTIVE / 🔥 IN POI / ⏳ WAITING / 📊 ALL)
             HStack(spacing: 3) {
                 ForEach(StageTab.allCases, id: \.self) { stage in
                     Button {
@@ -209,35 +223,11 @@ struct SentinelRadarDrawer: View {
                     }
                 }
 
-                filterChip("⚡ HTF", isActive: htfOnly) {
-                    htfOnly.toggle()
+                filterChip("⚡ TRIGGERED", isActive: triggeredOnly) {
+                    triggeredOnly.toggle()
                 }
 
                 Spacer()
-
-                // Volume filter dropdown
-                Menu {
-                    ForEach(volumeThresholds, id: \.value) { threshold in
-                        Button(threshold.label) {
-                            minVolumeFilter = threshold.value
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 2) {
-                        Image(systemName: "chart.bar.fill")
-                            .font(.system(size: 7, weight: .bold))
-                        Text(volumeThresholds.first(where: { abs($0.value - minVolumeFilter) < 0.001 })?.label ?? "VOL")
-                            .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    }
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
-                    .background(minVolumeFilter > 0 ? Theme.Color.accentStart.opacity(0.25) : Theme.Color.surfaceHi.opacity(0.6))
-                    .foregroundStyle(minVolumeFilter > 0 ? Theme.Color.accentStart : Theme.Color.textMuted)
-                    .cornerRadius(3)
-                }
-                #if os(macOS)
-                .menuStyle(.borderlessButton)
-                #endif
 
                 // Confidence Score filter dropdown
                 Menu {
@@ -270,9 +260,17 @@ struct SentinelRadarDrawer: View {
             if filteredAlerts.isEmpty {
                 VStack(spacing: 4) {
                     Spacer()
-                    Text("No setups match active stage & filters")
+                    Text(symbolAlerts.isEmpty ? "No SMC setup yet" : "No setups match active stage & filters")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Theme.Color.textMuted)
+
+                    // When the engine produced nothing, name the rule that blocked.
+                    if symbolAlerts.isEmpty, let blocker = context?.blocker, !blocker.isEmpty {
+                        Text(blocker)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(Theme.Color.accentStart)
+                            .multilineTextAlignment(.center)
+                    }
                     Spacer()
                 }
                 .frame(maxWidth: .infinity)
@@ -317,7 +315,6 @@ struct SentinelRadarDrawer: View {
     private func alertRow(for alert: RadarAlert) -> some View {
         let isBuy = alert.direction == .buy
         let dirColor = isBuy ? Theme.Color.success : Theme.Color.danger
-        let rank = alert.volumeRank ?? 1
         let isHovered = hoveredAlertID == alert.id
         let isAccordionExpanded = expandedAccordionAlertID == alert.id
         let isPopoverActive = Binding<Bool>(
@@ -331,14 +328,6 @@ struct SentinelRadarDrawer: View {
         return VStack(alignment: .leading, spacing: 5) {
             // Badges Header Row
             HStack(spacing: 4) {
-                Text(rankMedal(rank))
-                    .font(.system(size: 8, weight: .heavy, design: .monospaced))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(rankColor(rank).opacity(0.20))
-                    .foregroundStyle(rankColor(rank))
-                    .cornerRadius(3)
-
                 Text(alert.direction.rawValue)
                     .font(.system(size: 8, weight: .heavy))
                     .padding(.horizontal, 4)
@@ -347,8 +336,8 @@ struct SentinelRadarDrawer: View {
                     .foregroundStyle(dirColor)
                     .cornerRadius(3)
 
-                if alert.isHTFNested {
-                    Text("⚡HTF")
+                if alert.breakdown?.hasTrigger == true {
+                    Text("⚡\(alert.breakdown?.triggerKind ?? "")")
                         .font(.system(size: 7, weight: .heavy, design: .monospaced))
                         .padding(.horizontal, 3)
                         .padding(.vertical, 0.5)
@@ -395,25 +384,30 @@ struct SentinelRadarDrawer: View {
             SpatialPriceBar(alert: alert, livePrice: livePrice)
                 .padding(.vertical, 2)
 
-            // Setup Meta Row (Engine, Traded Volume, R:R)
+            // Setup Meta Row (POI band, TP2, R:R)
             HStack(spacing: 6) {
-                Text(engineLabel(for: alert))
-                    .font(.system(size: 8, weight: .medium))
+                Text("POI \(PriceFormat.exact(alert.zoneBottom))–\(PriceFormat.exact(alert.zoneTop))")
+                    .font(.system(size: 8, weight: .medium, design: .monospaced))
                     .foregroundStyle(Theme.Color.textMuted)
                     .lineLimit(1)
 
                 Spacer()
 
-                if let vol = alert.tradedVolume {
-                    Text("\(Self.formatVolume(vol)) Vol")
-                        .font(.system(size: 8, weight: .bold, design: .monospaced))
-                        .foregroundStyle(Color(red: 0.15, green: 0.85, blue: 0.95))
-                }
+                Text("TP2 \(PriceFormat.exact(alert.takeProfit2))")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundStyle(Theme.Color.success.opacity(0.75))
 
                 Text("\(String(format: "%.1fx", alert.riskRewardRatio)) R:R")
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .foregroundStyle(Theme.Color.accentStart)
             }
+
+            // Strategy read (HTF context · liquidity grab · POI freshness)
+            Text(engineLabel(for: alert))
+                .font(.system(size: 8, weight: .medium))
+                .foregroundStyle(Theme.Color.textMuted)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
 
             // Accordion Score Breakdown (if expanded)
             if isAccordionExpanded {
@@ -496,29 +490,10 @@ struct SentinelRadarDrawer: View {
         }
     }
 
+    /// The rationale's context half — everything before the " -> " execution
+    /// clause the row already renders as entry/SL/TP.
     private func engineLabel(for alert: RadarAlert) -> String {
-        let parts = alert.rationale.components(separatedBy: " -> ")
-        guard let head = parts.first else { return alert.rationale }
-        let segments = head.components(separatedBy: " · ")
-        return segments.last ?? head
-    }
-
-    private func rankMedal(_ rank: Int) -> String {
-        switch rank {
-        case 1:  return "🥇 #1"
-        case 2:  return "🥈 #2"
-        case 3:  return "🥉 #3"
-        default: return "🏅 #\(rank)"
-        }
-    }
-
-    private func rankColor(_ rank: Int) -> Color {
-        switch rank {
-        case 1:  return Color(red: 1.00, green: 0.84, blue: 0.00)
-        case 2:  return Color(red: 0.75, green: 0.75, blue: 0.75)
-        case 3:  return Color(red: 0.80, green: 0.50, blue: 0.20)
-        default: return Color(red: 0.15, green: 0.85, blue: 0.95)
-        }
+        alert.rationale.components(separatedBy: " -> ").first ?? alert.rationale
     }
 
     private func scoreColor(_ score: Int) -> Color {
@@ -533,19 +508,10 @@ struct SentinelRadarDrawer: View {
 
     private func statusColor(_ status: RadarAlert.SetupStatus) -> Color {
         switch status {
-        case .inZone:   return Color(red: 1.00, green: 0.60, blue: 0.00)
-        case .reaction: return Color(red: 0.15, green: 0.85, blue: 0.95)
-        case .pending:  return Theme.Color.textMuted
-        }
-    }
-
-    static func formatVolume(_ vol: Double) -> String {
-        if vol >= 1_000_000 {
-            return String(format: "%.1fM", vol / 1_000_000)
-        } else if vol >= 1_000 {
-            return String(format: "%.1fk", vol / 1_000)
-        } else {
-            return String(format: "%.0f", vol)
+        case .mitigating:    return Color(red: 1.00, green: 0.60, blue: 0.00)
+        case .active:        return Color(red: 0.15, green: 0.85, blue: 0.95)
+        case .waitingForPOI: return Theme.Color.textMuted
+        case .invalidated:   return Theme.Color.danger
         }
     }
 }
@@ -564,14 +530,16 @@ struct SpatialPriceBar: View {
         let sl = alert.stopLoss
         let entry = alert.entryPrice
         let tp = alert.takeProfit
+        let tp2 = alert.takeProfit2
 
-        let minPrice = min(sl, entry, tp, currentPrice)
-        let maxPrice = max(sl, entry, tp, currentPrice)
+        let minPrice = min(sl, entry, tp, tp2, currentPrice)
+        let maxPrice = max(sl, entry, tp, tp2, currentPrice)
         let range = max(0.0001, maxPrice - minPrice)
 
         let entryPct = max(0, min(1, (entry - minPrice) / range))
         let livePct = max(0, min(1, (currentPrice - minPrice) / range))
         let tpPct = max(0, min(1, (tp - minPrice) / range))
+        let tp2Pct = max(0, min(1, (tp2 - minPrice) / range))
 
         VStack(spacing: 2) {
             GeometryReader { geo in
@@ -580,6 +548,14 @@ struct SpatialPriceBar: View {
                     Capsule()
                         .fill(Theme.Color.surfaceHi)
                         .frame(height: 4)
+
+                    // Entry → TP2 run, with the TP1 leg drawn brighter on top.
+                    let runStart = min(entryPct, tp2Pct) * w
+                    let runWidth = abs(tp2Pct - entryPct) * w
+                    Capsule()
+                        .fill(Theme.Color.success.opacity(0.20))
+                        .frame(width: max(2, runWidth), height: 4)
+                        .offset(x: runStart)
 
                     let startX = min(entryPct, tpPct) * w
                     let spanW = abs(tpPct - entryPct) * w
@@ -610,7 +586,7 @@ struct SpatialPriceBar: View {
 
                 Spacer()
 
-                Text("TP \(PriceFormat.exact(tp))")
+                Text("TP1 \(PriceFormat.exact(tp))")
                     .font(.system(size: 7, weight: .bold, design: .monospaced))
                     .foregroundStyle(Theme.Color.success)
             }
@@ -626,63 +602,43 @@ struct ConfluenceAccordionView: View {
     var body: some View {
         if let b = alert.breakdown {
             VStack(alignment: .leading, spacing: 3) {
-                Text("CONFLUENCE SCORE BREAKDOWN (\(alert.confluenceScore)%)")
+                Text("SMC CONFLUENCE (\(alert.confluenceScore)%)")
                     .font(.system(size: 7, weight: .heavy, design: .monospaced))
                     .foregroundStyle(Theme.Color.accentStart)
 
+                // The HTF context is a hard precondition, so it is reported
+                // rather than scored.
+                Text("Context: \(b.contextEvent) on \(b.htfLabel ?? "HTF") · base \(b.baseScore) pts")
+                    .font(.system(size: 8))
+                    .foregroundStyle(Theme.Color.textMuted)
+
                 Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 2) {
-                    GridRow {
-                        Text(b.htfBonus > 0 ? "✓" : "✗")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(b.htfBonus > 0 ? Theme.Color.success : Theme.Color.textMuted)
-                        Text("HTF Nesting (\(b.htfLabel ?? "Zone")):")
-                            .font(.system(size: 8))
-                            .foregroundStyle(Theme.Color.textMuted)
-                        Text("+\(b.htfBonus) pts")
-                            .font(.system(size: 8, weight: .bold, design: .monospaced))
-                            .foregroundStyle(b.htfBonus > 0 ? Theme.Color.success : Theme.Color.textMuted)
-                    }
-
-                    GridRow {
-                        Text("✓")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(Theme.Color.success)
-                        Text("Volume Rank #\(b.volumeRank ?? 1) (\(b.volumeFormatted)):")
-                            .font(.system(size: 8))
-                            .foregroundStyle(Theme.Color.textMuted)
-                        Text("+\(b.rankBonus) pts")
-                            .font(.system(size: 8, weight: .bold, design: .monospaced))
-                            .foregroundStyle(Theme.Color.success)
-                    }
-
-                    GridRow {
-                        Text(b.isTrendAligned ? "✓" : "✗")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(b.isTrendAligned ? Theme.Color.success : Theme.Color.textMuted)
-                        Text("EMA Trend Alignment:")
-                            .font(.system(size: 8))
-                            .foregroundStyle(Theme.Color.textMuted)
-                        Text("+\(b.trendBonus) pts")
-                            .font(.system(size: 8, weight: .bold, design: .monospaced))
-                            .foregroundStyle(b.isTrendAligned ? Theme.Color.success : Theme.Color.textMuted)
-                    }
-
-                    GridRow {
-                        Text(b.hasOpposingTarget ? "✓" : "✗")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(b.hasOpposingTarget ? Theme.Color.success : Theme.Color.textMuted)
-                        Text("Opposing OB Target:")
-                            .font(.system(size: 8))
-                            .foregroundStyle(Theme.Color.textMuted)
-                        Text("+\(b.targetBonus) pts")
-                            .font(.system(size: 8, weight: .bold, design: .monospaced))
-                            .foregroundStyle(b.hasOpposingTarget ? Theme.Color.success : Theme.Color.textMuted)
-                    }
+                    scoreRow(hit: b.idmSweepBonus > 0, label: "IDM sweep @ \(PriceFormat.exact(b.grabLevel))", pts: b.idmSweepBonus)
+                    scoreRow(hit: b.liquiditySweepBonus > 0, label: "Liquidity sweep (X)", pts: b.liquiditySweepBonus)
+                    scoreRow(hit: b.equilibriumBonus > 0, label: "POI in \(b.equilibriumState)", pts: b.equilibriumBonus)
+                    scoreRow(hit: b.hasTrigger, label: "Trigger: \(b.triggerKind)", pts: b.triggerBonus)
+                    scoreRow(hit: b.isFreshZone, label: "Fresh (unmitigated) POI", pts: b.freshZoneBonus)
+                    scoreRow(hit: b.isLTFAligned, label: "LTF structure aligned", pts: b.ltfAlignBonus)
                 }
             }
             .padding(5)
             .background(Theme.Color.surface.opacity(0.85))
             .cornerRadius(4)
+        }
+    }
+
+    @ViewBuilder
+    private func scoreRow(hit: Bool, label: String, pts: Int) -> some View {
+        GridRow {
+            Text(hit ? "✓" : "✗")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(hit ? Theme.Color.success : Theme.Color.textMuted)
+            Text("\(label):")
+                .font(.system(size: 8))
+                .foregroundStyle(Theme.Color.textMuted)
+            Text("+\(pts) pts")
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .foregroundStyle(hit ? Theme.Color.success : Theme.Color.textMuted)
         }
     }
 }
@@ -707,7 +663,7 @@ struct AlertDetailView: View {
 
                 Spacer()
 
-                Text("Rank #\(alert.volumeRank ?? 1)")
+                Text(alert.status.rawValue)
                     .font(.system(size: 10, weight: .heavy, design: .monospaced))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
@@ -720,7 +676,7 @@ struct AlertDetailView: View {
 
             // Why it was selected Rationale Box
             VStack(alignment: .leading, spacing: 4) {
-                Text("WHY THIS POSITION WAS SELECTED")
+                Text("WHY THIS SETUP QUALIFIED")
                     .font(.system(size: 9, weight: .heavy, design: .monospaced))
                     .foregroundStyle(Theme.Color.accentStart)
 
@@ -744,8 +700,24 @@ struct AlertDetailView: View {
                         Text("\(alert.symbol) (\(alert.timeframe))").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.Color.textPrimary)
                     }
                     GridRow {
-                        Text("Traded Volume:").font(.system(size: 10)).foregroundStyle(Theme.Color.textMuted)
-                        Text(formatVol(alert.tradedVolume)).font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(Color(red: 0.15, green: 0.85, blue: 0.95))
+                        Text("HTF Context:").font(.system(size: 10)).foregroundStyle(Theme.Color.textMuted)
+                        Text("\(alert.breakdown?.contextEvent ?? "—") on \(alert.htfLabel ?? "—")").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.Color.textPrimary)
+                    }
+                    GridRow {
+                        Text("Liquidity Grab:").font(.system(size: 10)).foregroundStyle(Theme.Color.textMuted)
+                        Text("\(alert.breakdown?.grabKind ?? "—") @ \(PriceFormat.exact(alert.breakdown?.grabLevel ?? 0))").font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(Color(red: 0.15, green: 0.85, blue: 0.95))
+                    }
+                    GridRow {
+                        Text("Entry Zone (POI):").font(.system(size: 10)).foregroundStyle(Theme.Color.textMuted)
+                        Text("\(PriceFormat.exact(alert.zoneBottom)) – \(PriceFormat.exact(alert.zoneTop))").font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(Theme.Color.textPrimary)
+                    }
+                    GridRow {
+                        Text("Equilibrium (0.5):").font(.system(size: 10)).foregroundStyle(Theme.Color.textMuted)
+                        Text("\(PriceFormat.exact(alert.equilibrium)) · \(alert.breakdown?.equilibriumState ?? "—")").font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(Theme.Color.textPrimary)
+                    }
+                    GridRow {
+                        Text("Trigger:").font(.system(size: 10)).foregroundStyle(Theme.Color.textMuted)
+                        Text(alert.breakdown?.triggerKind ?? "—").font(.system(size: 10, weight: .bold)).foregroundStyle(alert.breakdown?.hasTrigger == true ? Theme.Color.success : Theme.Color.textMuted)
                     }
                     GridRow {
                         Text("Confluence Score:").font(.system(size: 10)).foregroundStyle(Theme.Color.textMuted)
@@ -760,8 +732,12 @@ struct AlertDetailView: View {
                         Text(PriceFormat.exact(alert.stopLoss)).font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(Theme.Color.danger)
                     }
                     GridRow {
-                        Text("Take Profit:").font(.system(size: 10)).foregroundStyle(Theme.Color.textMuted)
+                        Text("Take Profit 1:").font(.system(size: 10)).foregroundStyle(Theme.Color.textMuted)
                         Text(PriceFormat.exact(alert.takeProfit)).font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(Theme.Color.success)
+                    }
+                    GridRow {
+                        Text("Take Profit 2:").font(.system(size: 10)).foregroundStyle(Theme.Color.textMuted)
+                        Text(PriceFormat.exact(alert.takeProfit2)).font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(Theme.Color.success)
                     }
                     GridRow {
                         Text("Setup Status:").font(.system(size: 10)).foregroundStyle(Theme.Color.textMuted)
@@ -797,16 +773,5 @@ struct AlertDetailView: View {
         .padding(Theme.Spacing.md)
         .frame(width: 380)
         .background(Theme.Color.surface)
-    }
-
-    private func formatVol(_ vol: Double?) -> String {
-        guard let v = vol else { return "N/A" }
-        if v >= 1_000_000 {
-            return String(format: "%.1fM accumulated", v / 1_000_000)
-        } else if v >= 1_000 {
-            return String(format: "%.1fk accumulated", v / 1_000)
-        } else {
-            return String(format: "%.0f accumulated", v)
-        }
     }
 }

@@ -33,6 +33,30 @@ struct SettingsView: View {
     @AppStorage("markets.crypto.enabled")  private var cryptoEnabled: Bool = true
     @AppStorage("markets.indices.enabled") private var indicesEnabled: Bool = true
     @AppStorage("dashboard.chartTheme")    private var chartThemeRaw: String = ChartTheme.greenRed.rawValue
+    @AppStorage("dashboard.customUpColorHex")   private var customUpHex: String = "#21C768"
+    @AppStorage("dashboard.customDownColorHex") private var customDownHex: String = "#F04545"
+    @AppStorage("dashboard.customBgColorHex")   private var customBgHex: String = "#12151C"
+
+    private var customUpColorBinding: Binding<Color> {
+        Binding(
+            get: { Color(hex: customUpHex) ?? Theme.Color.success },
+            set: { customUpHex = $0.toHex() }
+        )
+    }
+
+    private var customDownColorBinding: Binding<Color> {
+        Binding(
+            get: { Color(hex: customDownHex) ?? Theme.Color.danger },
+            set: { customDownHex = $0.toHex() }
+        )
+    }
+
+    private var customBgColorBinding: Binding<Color> {
+        Binding(
+            get: { Color(hex: customBgHex) ?? Color(red: 0.07, green: 0.08, blue: 0.11) },
+            set: { customBgHex = $0.toHex() }
+        )
+    }
 
     // Strategy formation alerts. DashboardView reads the same key and
     // suppresses both inbox records and macOS banners when disabled.
@@ -254,7 +278,7 @@ struct SettingsView: View {
                 sectionTitle(
                     icon: "paintpalette.fill",
                     title: "Chart appearance & theme",
-                    subtitle: "Choose the color scheme for candles and volume bars on all price charts."
+                    subtitle: "Choose the color scheme for candles, volume bars, and chart background on all price charts."
                 )
 
                 Picker("Chart Theme", selection: $chartThemeRaw) {
@@ -263,6 +287,34 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+
+                if chartThemeRaw == ChartTheme.custom.rawValue {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                        Text("CUSTOM COLOR PALETTE")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Theme.Color.textMuted)
+
+                        HStack(spacing: Theme.Spacing.lg) {
+                            ColorPicker("Up Candle", selection: customUpColorBinding)
+                                .font(.system(size: 12, weight: .medium))
+                            ColorPicker("Down Candle", selection: customDownColorBinding)
+                                .font(.system(size: 12, weight: .medium))
+                            ColorPicker("Background", selection: customBgColorBinding)
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .padding(.vertical, Theme.Spacing.xs)
+
+                        Button("Reset Custom Colors") {
+                            customUpHex = "#21C768"
+                            customDownHex = "#F04545"
+                            customBgHex = "#12151C"
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.Color.accentStart)
+                    }
+                    .padding(.top, Theme.Spacing.xs)
+                }
             }
         }
     }

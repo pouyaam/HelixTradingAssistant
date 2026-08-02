@@ -19,6 +19,7 @@ struct DashboardViewiPad: View {
 
     @AppStorage("dashboard.timeframe")  private var timeframe: Timeframe = .h1
     @AppStorage("dashboard.chartType")  private var userChartType: ChartType = .candle
+    @AppStorage("dashboard.renkoConfig") private var renkoConfig: RenkoConfig = .default
     @AppStorage("dashboard.showVolume") private var showVolume: Bool = true
     @AppStorage("dashboard.indicators")  private var indicatorsRaw: String = ""
     @AppStorage("dashboard.oscillators") private var oscillatorsRaw: String = ""
@@ -731,6 +732,7 @@ private struct ChartPlotiPad: View {
         ChartViewiPad(
             candles: candles,
             chartType: chartType,
+            renkoConfig: renkoConfig,
             accent: accent,
             xDomain: $xDomain,
             yDomain: $yDomain,
@@ -955,6 +957,8 @@ private struct ChartPlotiPad: View {
                 "k": .double(Double(config.stochK)),
                 "d": .double(Double(config.stochD)),
             ])
+        case .helixOBCombo:
+            return OscillatorInstance(id: stableID, kind: .helixOBCombo)
         }
     }
 }

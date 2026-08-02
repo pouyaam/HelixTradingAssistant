@@ -24,15 +24,27 @@ struct OscillatorPanel: View {
     /// `ChartDerivedCache`.
     @StateObject private var derived = ChartDerivedCache()
 
+    @State private var manualYDomain: ClosedRange<Double>? = nil
+    @State private var yScaleStartDomain: ClosedRange<Double>? = nil
+    @State private var customHeight: CGFloat? = nil
+    @State private var startHeight: CGFloat? = nil
+
+    private var defaultHeight: CGFloat {
+        instance.kind == .helixOBCombo ? 150 : 90
+    }
+
+    private var currentHeight: CGFloat {
+        customHeight ?? defaultHeight
+    }
+
     var body: some View {
-        // Compute visible points ONCE — both `marks` and `yDomain`
-        // previously triggered independent `visiblePoints` evaluations,
-        // each building a fresh `Set(renderIndices)`.
         let pts = visiblePoints
         let domain = effectiveDomain
-        let yDom = yDomainForPoints(pts)
+        let yDom = effectiveYDomain(pts: pts)
 
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 2) {
+            resizeDividerBar
+
             HStack(spacing: 6) {
                 Text(instance.label)
                     .font(.system(size: 10, weight: .semibold))
@@ -40,6 +52,8 @@ struct OscillatorPanel: View {
                 Spacer()
                 latestReadout
             }
+            .padding(.top, 2)
+
             Chart {
                 ForEach(
                     ChartWindow.dayBoundaryPositions(candles: candles, domain: domain),
@@ -75,6 +89,9 @@ struct OscillatorPanel: View {
                     }
                 }
             }
+            .overlay(alignment: .trailing) {
+                yAxisScaleStrip(plotHeight: currentHeight)
+            }
             .chartOverlay { proxy in
                 GeometryReader { geo in
                     Rectangle()
@@ -101,9 +118,85 @@ struct OscillatorPanel: View {
             #if os(macOS)
             .scrollZoom(xDomain: $xDomain, totalCandles: candles.count)
             #endif
-            .frame(height: 90)
+            .frame(height: currentHeight)
             .clipped()
         }
+    }
+
+    // MARK: - Panel Height Resize Splitter Bar
+
+    private var resizeDividerBar: some View {
+        ZStack {
+            Rectangle()
+                .fill(Theme.Color.border.opacity(0.35))
+                .frame(height: 1)
+            Rectangle()
+                .fill(Color.clear)
+                .frame(height: 8)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 1)
+                        .onChanged { value in
+                            if startHeight == nil {
+                                startHeight = currentHeight
+                            }
+                            guard let start = startHeight else { return }
+                            let newH = start - value.translation.height
+                            customHeight = min(max(newH, 60), 450)
+                        }
+                        .onEnded { _ in startHeight = nil }
+                )
+                .onTapGesture(count: 2) { customHeight = nil }
+                #if os(macOS)
+                .onHover { inside in
+                    if inside { NSCursor.resizeUpDown.push() }
+                    else      { NSCursor.pop() }
+                }
+                #endif
+        }
+    }
+
+    // MARK: - Y-Axis Scale Strip & Gesture
+
+    private func yAxisScaleStrip(plotHeight: CGFloat) -> some View {
+        GeometryReader { geo in
+            Rectangle()
+                .fill(Color.clear)
+                .contentShape(Rectangle())
+                .gesture(priceScaleDrag(plotHeight: plotHeight))
+                .onTapGesture(count: 2) { manualYDomain = nil }
+                #if os(macOS)
+                .onHover { inside in
+                    if inside { NSCursor.resizeUpDown.push() }
+                    else      { NSCursor.pop() }
+                }
+                #endif
+        }
+        .frame(width: 50)
+    }
+
+    private func priceScaleDrag(plotHeight: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { value in
+                if yScaleStartDomain == nil {
+                    let pts = visiblePoints
+                    yScaleStartDomain = effectiveYDomain(pts: pts)
+                }
+                guard let start = yScaleStartDomain, plotHeight > 0 else { return }
+                let center = (start.lowerBound + start.upperBound) / 2
+                let halfSpan = (start.upperBound - start.lowerBound) / 2
+                guard halfSpan > 0 else { return }
+                let raw = exp(Double(value.translation.height) / Double(plotHeight) * 1.6)
+                let factor = min(max(raw, 0.1), 10)
+                let newHalf = halfSpan * factor
+                manualYDomain = (center - newHalf) ... (center + newHalf)
+            }
+            .onEnded { _ in yScaleStartDomain = nil }
+    }
+
+    private func effectiveYDomain(pts: [IndicatorPoint]) -> ClosedRange<Double> {
+        if let manual = manualYDomain { return manual }
+        return yDomainForPoints(pts)
     }
 
     // MARK: - Marks dispatch
@@ -154,11 +247,180 @@ struct OscillatorPanel: View {
                 .lineStyle(StrokeStyle(lineWidth: p.band == "k" ? 1.4 : 1.2))
                 .interpolationMethod(.monotone)
             }
+        case .helixOBCombo:
+            let out = derived.helixOBCombo(candles: candles, params: instance.params)
+            let isHA = instance.params["heikenAshi"]?.boolValue ?? false
+            let subCandles = isHA ? HeikinAshi.transform(candles) : candles
+            let lastIndex = max(0, subCandles.count - 1)
+            let visibleIndices = ChartWindow.renderIndices(domain: effectiveDomain, count: subCandles.count)
+
+            // A) Sub-panel Candlesticks (Normal or Heikin Ashi)
+            ForEach(visibleIndices, id: \.self) { i in
+                if i >= 0 && i < subCandles.count {
+                    let c = subCandles[i]
+                    RuleMark(
+                        x: .value("Bar", Double(i)),
+                        yStart: .value("Low", c.low),
+                        yEnd: .value("High", c.high)
+                    )
+                    .foregroundStyle(c.close >= c.open ? Theme.Color.success : Theme.Color.danger)
+                    .lineStyle(StrokeStyle(lineWidth: 1))
+
+                    RectangleMark(
+                        x: .value("Bar", Double(i)),
+                        yStart: .value("Body lo", min(c.open, c.close)),
+                        yEnd: .value("Body hi", max(c.open, c.close)),
+                        width: .fixed(3)
+                    )
+                    .foregroundStyle(c.close >= c.open ? Theme.Color.success : Theme.Color.danger)
+                    .cornerRadius(1)
+                }
+            }
+
+            // B) Volumetric Order Blocks
+            ForEach(out.bullishOBs + out.bearishOBs) { ob in
+                let baseColor: Color = ob.isBullish ? Theme.Color.success : Theme.Color.danger
+                let xStart = Double(ob.barStart)
+                let xEnd = Double(lastIndex)
+
+                RectangleMark(
+                    xStart: .value("HelixOB x0", xStart), xEnd: .value("HelixOB x1", xEnd),
+                    yStart: .value("HelixOB y0", ob.btm), yEnd: .value("HelixOB y1", ob.top)
+                )
+                .foregroundStyle(baseColor.opacity(0.18))
+
+                RuleMark(xStart: .value("HelixOB t0", xStart), xEnd: .value("HelixOB t1", xEnd), y: .value("HelixOB top", ob.top))
+                    .foregroundStyle(baseColor.opacity(0.70))
+                RuleMark(xStart: .value("HelixOB b0", xStart), xEnd: .value("HelixOB b1", xEnd), y: .value("HelixOB bot", ob.btm))
+                    .foregroundStyle(baseColor.opacity(0.70))
+
+                RuleMark(xStart: .value("HelixOB m0", xStart), xEnd: .value("HelixOB m1", xEnd), y: .value("HelixOB mid", ob.mid))
+                    .foregroundStyle(Color.gray.opacity(0.50))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+
+                let totalStr = ob.bullishStr + ob.bearishStr
+                if totalStr > 0 {
+                    let span = max(1.0, xEnd - xStart)
+                    let maxW = min(span * 0.5, 12.0)
+                    let bullW = maxW * (ob.bullishStr / totalStr)
+                    let bearW = maxW * (ob.bearishStr / totalStr)
+
+                    RectangleMark(
+                        xStart: .value("HelixOB uv0", xStart), xEnd: .value("HelixOB uv1", xStart + bullW),
+                        yStart: .value("HelixOB uvy0", ob.mid), yEnd: .value("HelixOB uvy1", ob.top)
+                    )
+                    .foregroundStyle(Theme.Color.success.opacity(0.45))
+
+                    RectangleMark(
+                        xStart: .value("HelixOB dv0", xStart), xEnd: .value("HelixOB dv1", xStart + bearW),
+                        yStart: .value("HelixOB dvy0", ob.btm), yEnd: .value("HelixOB dvy1", ob.mid)
+                    )
+                    .foregroundStyle(Theme.Color.danger.opacity(0.45))
+
+                    let sepX = xStart + max(bullW, bearW)
+                    RuleMark(
+                        x: .value("HelixOB sepX", sepX),
+                        yStart: .value("HelixOB sepY0", ob.btm),
+                        yEnd: .value("HelixOB sepY1", ob.top)
+                    )
+                    .foregroundStyle(Color.gray.opacity(0.60))
+                }
+            }
+
+            // C) MSB / BOS Structure Lines
+            ForEach(out.structures) { s in
+                let color: Color = s.isBullish ? Theme.Color.success : Theme.Color.danger
+                RuleMark(
+                    xStart: .value("HelixMSB x0", Double(s.x1)),
+                    xEnd: .value("HelixMSB x1", Double(s.x2)),
+                    y: .value("HelixMSB y", s.y1)
+                )
+                .foregroundStyle(color)
+                .lineStyle(StrokeStyle(lineWidth: 1))
+
+                PointMark(x: .value("HelixMSB midX", Double(s.x1 + s.x2) / 2.0), y: .value("HelixMSB midY", s.y1))
+                    .symbolSize(0)
+                    .annotation(position: s.isBullish ? .bottom : .top, alignment: .center, spacing: 2) {
+                        Text(s.label)
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(color)
+                    }
+            }
+
+            let visibleSet = Set(visibleIndices)
+            let visiblePoints = out.points.filter { visibleSet.contains($0.index) }
+            let visibleEMAPoints = out.emaPoints.filter { visibleSet.contains($0.index) }
+            let visibleSignals = out.signals.filter { visibleSet.contains($0.index) }
+
+            // D) Long / Short ATR Stop lines
+            let plotStops = instance.params["plotLongShortStop"]?.boolValue ?? false
+            if plotStops {
+                ForEach(visiblePoints) { pt in
+                    if let ls = pt.longStop {
+                        LineMark(
+                            x: .value("Bar", Double(pt.index)),
+                            y: .value("Helix Long Stop", ls),
+                            series: .value("Series", "helix-longstop")
+                        )
+                        .foregroundStyle(Theme.Color.success)
+                        .lineStyle(StrokeStyle(lineWidth: 1.5))
+                        .interpolationMethod(.stepStart)
+                    }
+                    if let ss = pt.shortStop {
+                        LineMark(
+                            x: .value("Bar", Double(pt.index)),
+                            y: .value("Helix Short Stop", ss),
+                            series: .value("Series", "helix-shortstop")
+                        )
+                        .foregroundStyle(Theme.Color.danger)
+                        .lineStyle(StrokeStyle(lineWidth: 1.5))
+                        .interpolationMethod(.stepStart)
+                    }
+                }
+            }
+
+            // E) EMA Filter Line
+            ForEach(visibleEMAPoints) { p in
+                LineMark(
+                    x: .value("Bar", Double(p.index)),
+                    y: .value("Helix EMA", p.value),
+                    series: .value("Series", "helix-ema")
+                )
+                .foregroundStyle(Color.orange.opacity(0.85))
+                .lineStyle(StrokeStyle(lineWidth: 1.2))
+            }
+
+            // F) Buy / Sell / MACD Signals
+            ForEach(visibleSignals) { sig in
+                if sig.index >= 0 && sig.index < subCandles.count {
+                    let c = subCandles[sig.index]
+                    PointMark(
+                        x: .value("Bar", Double(sig.index)),
+                        y: .value("Helix Signal", sig.isBuy ? c.low : c.high)
+                    )
+                    .symbol(.circle)
+                    .symbolSize(sig.isMACD ? 20 : 0)
+                    .foregroundStyle(sig.isBuy ? Theme.Color.success : Theme.Color.danger)
+                    .annotation(
+                        position: sig.isBuy ? .bottom : .top,
+                        alignment: .center,
+                        spacing: 2
+                    ) {
+                        if !sig.isMACD {
+                            Text(sig.isBuy ? "Buy" : "Sell")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(sig.isBuy ? Theme.Color.success : Theme.Color.danger))
+                        }
+                    }
+                }
+            }
         }
     }
 
-    /// Horizontal reference lines specific to each oscillator. RSI uses
-    /// 30/70 (oversold/overbought), Stochastic uses 20/80, MACD uses 0.
+    /// Horizontal reference lines specific to each oscillator.
     @ChartContentBuilder
     private var referenceLines: some ChartContent {
         switch instance.kind {
@@ -180,14 +442,14 @@ struct OscillatorPanel: View {
             RuleMark(y: .value("Zero", 0))
                 .foregroundStyle(Theme.Color.border.opacity(0.6))
                 .lineStyle(StrokeStyle(lineWidth: 0.6))
+        case .helixOBCombo:
+            // No static percentage reference lines for price sub-panel
+            RuleMark(y: .value("Zero", 0)).foregroundStyle(Color.clear)
         }
     }
 
     // MARK: - Latest readout (top-right label)
 
-    /// Shows the most recent value(s) of the oscillator so the user can
-    /// read them without hovering. RSI/Stoch are bounded — print as
-    /// rounded ints. MACD prints as a 2-decimal float.
     @ViewBuilder
     private var latestReadout: some View {
         let pts = computedPoints
@@ -214,6 +476,19 @@ struct OscillatorPanel: View {
                     label("%D", String(format: "%.1f", d.value), color: stochDColor)
                 }
             }
+        case .helixOBCombo:
+            let isHA = instance.params["heikenAshi"]?.boolValue ?? false
+            let subCandles = isHA ? HeikinAshi.transform(candles) : candles
+            if let last = subCandles.last {
+                HStack(spacing: 6) {
+                    Text(isHA ? "HA" : "Normal")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Theme.Color.info)
+                    Text(ChartView.priceExact(last.close))
+                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(last.close >= last.open ? Theme.Color.success : Theme.Color.danger)
+                }
+            }
         }
     }
 
@@ -235,7 +510,8 @@ struct OscillatorPanel: View {
     /// and across pan/zoom frames reuse one computation instead of
     /// re-running it over the full history each time.
     private var computedPoints: [IndicatorPoint] {
-        derived.oscillatorPoints(kind: instance.kind, candles: candles, config: oscillatorConfigFromParams(instance.params))
+        if instance.kind == .helixOBCombo { return [] }
+        return derived.oscillatorPoints(kind: instance.kind, candles: candles, config: oscillatorConfigFromParams(instance.params))
     }
 
     /// Build an OscillatorConfig from per-instance params for the cache
@@ -330,6 +606,36 @@ struct OscillatorPanel: View {
             let span = max(hi - lo, 0.001)
             let pad = span * 0.1
             return (lo - pad) ... (hi + pad)
+        case .helixOBCombo:
+            let out = derived.helixOBCombo(candles: candles, params: instance.params)
+            let isHA = instance.params["heikenAshi"]?.boolValue ?? false
+            let subCandles = isHA ? HeikinAshi.transform(candles) : candles
+            let visibleIndices = Set(ChartWindow.renderIndices(domain: effectiveDomain, count: subCandles.count))
+
+            var lo = Double.greatestFiniteMagnitude
+            var hi = -Double.greatestFiniteMagnitude
+
+            for i in visibleIndices {
+                if i >= 0 && i < subCandles.count {
+                    let c = subCandles[i]
+                    if c.low < lo { lo = c.low }
+                    if c.high > hi { hi = c.high }
+                }
+            }
+            for ob in out.bullishOBs + out.bearishOBs {
+                if ob.btm < lo { lo = ob.btm }
+                if ob.top > hi { hi = ob.top }
+            }
+            for pt in out.points {
+                if visibleIndices.contains(pt.index) {
+                    if let ls = pt.longStop { if ls < lo { lo = ls }; if ls > hi { hi = ls } }
+                    if let ss = pt.shortStop { if ss < lo { lo = ss }; if ss > hi { hi = ss } }
+                }
+            }
+            if lo >= hi { lo = 0; hi = 1 }
+            let span = max(hi - lo, 0.01)
+            let pad = span * 0.05
+            return (lo - pad) ... (hi + pad)
         }
     }
 
@@ -338,6 +644,9 @@ struct OscillatorPanel: View {
         case .rsi:        return [30, 50, 70]
         case .stochastic: return [20, 50, 80]
         case .macd:       return [yDom.lowerBound, 0, yDom.upperBound]
+        case .helixOBCombo:
+            let mid = (yDom.lowerBound + yDom.upperBound) / 2
+            return [yDom.lowerBound, mid, yDom.upperBound]
         }
     }
 
@@ -347,6 +656,8 @@ struct OscillatorPanel: View {
             return String(format: "%.0f", v)
         case .macd:
             return String(format: "%.2f", v)
+        case .helixOBCombo:
+            return ChartView.priceShort(v)
         }
     }
 

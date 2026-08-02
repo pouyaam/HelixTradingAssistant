@@ -112,6 +112,8 @@ enum ChartType: String, CaseIterable, Identifiable, Codable {
     /// bodies/wicks (and the hover tooltip / last-price reference) shift
     /// to HA values.
     case heikinAshi
+    /// Renko bricks filter time/noise to show pure price action.
+    case renko
 
     var id: String { rawValue }
     var label: String {
@@ -119,6 +121,7 @@ enum ChartType: String, CaseIterable, Identifiable, Codable {
         case .line:       return "Line"
         case .candle:     return "Candle"
         case .heikinAshi: return "Heikin Ashi"
+        case .renko:      return "Renko"
         }
     }
 }

@@ -64,6 +64,12 @@ struct DrawingInspector: View {
                 riskFields
             }
 
+            if drawing.kind == .regressionChannel {
+                Divider()
+                    .frame(height: 18)
+                regressionFields
+            }
+
             Divider()
                 .frame(height: 18)
 
@@ -124,23 +130,69 @@ struct DrawingInspector: View {
 
     private var kindIcon: String {
         switch drawing.kind {
-        case .horizontalLine: return "minus"
-        case .trendLine:      return "line.diagonal"
-        case .rectangle:      return "rectangle"
-        case .volumeProfile:  return "chart.bar.xaxis.ascending"
-        case .longPosition:   return "arrow.up.right.square"
-        case .shortPosition:  return "arrow.down.right.square"
+        case .horizontalLine:    return "minus"
+        case .trendLine:         return "line.diagonal"
+        case .rectangle:         return "rectangle"
+        case .volumeProfile:     return "chart.bar.xaxis.ascending"
+        case .longPosition:      return "arrow.up.right.square"
+        case .shortPosition:     return "arrow.down.right.square"
+        case .regressionChannel: return "line.diagonal.chart"
         }
     }
 
     private var kindLabel: String {
         switch drawing.kind {
-        case .horizontalLine: return "Horizontal"
-        case .trendLine:      return "Trend line"
-        case .rectangle:      return "Rectangle"
-        case .volumeProfile:  return "Vol Profile"
-        case .longPosition:   return "Long"
-        case .shortPosition:  return "Short"
+        case .horizontalLine:    return "Horizontal"
+        case .trendLine:         return "Trend line"
+        case .rectangle:         return "Rectangle"
+        case .volumeProfile:     return "Vol Profile"
+        case .longPosition:      return "Long"
+        case .shortPosition:     return "Short"
+        case .regressionChannel: return "Regression"
+        }
+    }
+
+    @ViewBuilder
+    private var regressionFields: some View {
+        HStack(spacing: 8) {
+            Text("Dev:")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.Color.textMuted)
+
+            Picker("Deviation", selection: Binding<Double>(
+                get: { drawing.effectiveDevMult },
+                set: { val in
+                    var copy = drawing
+                    copy.devMult = val
+                    onChange(copy)
+                }
+            )) {
+                Text("1.0 σ").tag(1.0)
+                Text("1.5 σ").tag(1.5)
+                Text("2.0 σ").tag(2.0)
+                Text("2.5 σ").tag(2.5)
+                Text("3.0 σ").tag(3.0)
+            }
+            .pickerStyle(.menu)
+            .font(.system(size: 10, weight: .medium))
+            .frame(width: 65)
+
+            Button(action: {
+                var copy = drawing
+                copy.extendRight = !drawing.isExtendedRight
+                onChange(copy)
+            }) {
+                Image(systemName: "arrow.right.to.line")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(drawing.isExtendedRight ? Theme.Color.accentStart : Theme.Color.textMuted)
+                    .padding(4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(drawing.isExtendedRight ? Theme.Color.accentStart.opacity(0.2) : Color.clear)
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("Extend channel right")
         }
     }
 
