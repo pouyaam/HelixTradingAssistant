@@ -827,6 +827,39 @@ final class ChartDerivedCache: ObservableObject {
         }
     }
 
+    /// Keyed on bar identity + inputs only. The previous day is by definition
+    /// settled, so nothing about it can change until a *new* bar arrives —
+    /// re-deriving it on every live tick would be pure waste.
+    private struct PreviousDayVPSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let bucketCount: Int
+        let valueAreaPct: Double
+    }
+    private let previousDayVPSlot = Slot<PreviousDayVPSig, VolumeProfile.PreviousDayVP?>(nil)
+
+    func previousDayVP(
+        candles: [Candle],
+        bucketCount: Int,
+        valueAreaPct: Double
+    ) -> VolumeProfile.PreviousDayVP? {
+        let sig = PreviousDayVPSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: candles.last?.id.timeIntervalSince1970 ?? 0,
+            bucketCount: bucketCount,
+            valueAreaPct: valueAreaPct
+        )
+        return resolve(previousDayVPSlot, signature: sig) {
+            VolumeProfile.computePreviousDay(
+                candles,
+                bucketCount: bucketCount,
+                valueAreaPct: valueAreaPct
+            )
+        }
+    }
+
     /// Deliberately keyed on bar *identity* only — no trailing OHLC, unlike
     /// e.g. `RankedOBSig`. This is the heaviest structural pass in the app
     /// (~28 ms over 3k bars, on the main thread during view update), and

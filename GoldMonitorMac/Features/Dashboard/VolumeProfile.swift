@@ -109,6 +109,38 @@ enum VolumeProfile {
         let levels: [Level]
     }
 
+    /// The *previous* completed trading session: its high/low/open/close
+    /// plus the volume profile built from that session's bars only.
+    ///
+    /// Distinct from `SessionVP` in that it is a single settled session —
+    /// the one before the session in progress — so PDH/PDL never move
+    /// intraday, which is the whole point of trading against them.
+    struct PreviousDayVP: Hashable {
+        /// Bar indices (into the input candle array) bounding the session.
+        let startBar: Int
+        let endBar: Int
+        /// Previous-day high / low — PDH and PDL.
+        let high: Double
+        let low: Double
+        /// Bars that printed the high and the low.
+        let highBar: Int
+        let lowBar: Int
+        let open: Double
+        let close: Double
+        /// Midpoint of the previous day's range (the 50% level).
+        var mid: Double { (high + low) / 2 }
+
+        let bucketSize: Double
+        let pocIndex: Int
+        let vaLowIndex: Int
+        let vaHighIndex: Int
+        let poc: Double
+        let vah: Double
+        let val: Double
+        let hasRealVolume: Bool
+        let buckets: [Bucket]
+    }
+
     // MARK: - Shared histogram builder
 
     /// Everything a profile needs except its bar span — the single
@@ -246,18 +278,7 @@ enum VolumeProfile {
         guard candles.count >= 2, bucketCount >= 2, maxSessions >= 1 else { return [] }
 
         // 1. Group bar ranges by trading day (dates only, no profile work).
-        var ranges: [Range<Int>] = []
-        var dayStart = tradingDayStart(for: candles[0].id)
-        var sessionStart = 0
-        for i in 1..<candles.count {
-            let d = tradingDayStart(for: candles[i].id)
-            if d != dayStart {
-                ranges.append(sessionStart..<i)
-                dayStart = d
-                sessionStart = i
-            }
-        }
-        ranges.append(sessionStart..<candles.count)
+        let ranges = sessionRanges(candles)
 
         // 2. Build profiles for the most recent sessions only.
         var results: [SessionVP] = []
@@ -283,6 +304,82 @@ enum VolumeProfile {
             ))
         }
         return results
+    }
+
+    // MARK: - Previous-day mode
+
+    /// Split a candle series into trading-day bar ranges. Shared by
+    /// `compute` and `computePreviousDay` so both agree on exactly where a
+    /// session begins (the 18:00 ET boundary — see `tradingDayStart`).
+    static func sessionRanges(_ candles: [Candle]) -> [Range<Int>] {
+        guard !candles.isEmpty else { return [] }
+        var ranges: [Range<Int>] = []
+        var dayStart = tradingDayStart(for: candles[0].id)
+        var sessionStart = 0
+        for i in 1..<candles.count {
+            let d = tradingDayStart(for: candles[i].id)
+            if d != dayStart {
+                ranges.append(sessionStart..<i)
+                dayStart = d
+                sessionStart = i
+            }
+        }
+        ranges.append(sessionStart..<candles.count)
+        return ranges
+    }
+
+    /// Profile of the last *completed* trading session.
+    ///
+    /// Returns `nil` when the series doesn't span at least two sessions —
+    /// there is no previous day to profile, and inventing one from a
+    /// partial session would put a PDH/PDL on the chart that never existed.
+    static func computePreviousDay(
+        _ candles: [Candle],
+        bucketCount: Int = 24,
+        valueAreaPct: Double = 70.0
+    ) -> PreviousDayVP? {
+        guard candles.count >= 2, bucketCount >= 2 else { return nil }
+
+        let ranges = sessionRanges(candles)
+        // `.last` is the session in progress; the one before it is settled.
+        guard ranges.count >= 2 else { return nil }
+        let range = ranges[ranges.count - 2]
+        guard !range.isEmpty else { return nil }
+
+        var high = candles[range.lowerBound].high
+        var low = candles[range.lowerBound].low
+        var highBar = range.lowerBound
+        var lowBar = range.lowerBound
+        for i in range {
+            if candles[i].high > high { high = candles[i].high; highBar = i }
+            if candles[i].low < low { low = candles[i].low; lowBar = i }
+        }
+
+        guard let core = buildCore(
+            candles[range],
+            bucketCount: bucketCount,
+            valueAreaPct: valueAreaPct
+        ) else { return nil }
+
+        return PreviousDayVP(
+            startBar: range.lowerBound,
+            endBar: range.upperBound - 1,
+            high: high,
+            low: low,
+            highBar: highBar,
+            lowBar: lowBar,
+            open: candles[range.lowerBound].open,
+            close: candles[range.upperBound - 1].close,
+            bucketSize: core.bucketSize,
+            pocIndex: core.pocIndex,
+            vaLowIndex: core.vaLowIndex,
+            vaHighIndex: core.vaHighIndex,
+            poc: core.poc,
+            vah: core.vah,
+            val: core.val,
+            hasRealVolume: core.hasRealVolume,
+            buckets: core.buckets
+        )
     }
 
     // MARK: - ZigZag trend mode

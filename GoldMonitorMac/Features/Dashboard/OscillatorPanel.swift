@@ -484,7 +484,7 @@ struct OscillatorPanel: View {
                     Text(isHA ? "HA" : "Normal")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(Theme.Color.info)
-                    Text(ChartView.priceExact(last.close))
+                    Text(PriceFormat.exact(last.close))
                         .font(.system(size: 10, weight: .semibold).monospacedDigit())
                         .foregroundStyle(last.close >= last.open ? Theme.Color.success : Theme.Color.danger)
                 }
@@ -657,7 +657,7 @@ struct OscillatorPanel: View {
         case .macd:
             return String(format: "%.2f", v)
         case .helixOBCombo:
-            return ChartView.priceShort(v)
+            return PriceFormat.short(v)
         }
     }
 
