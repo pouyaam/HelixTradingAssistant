@@ -581,6 +581,81 @@ final class AnalysisStore: ObservableObject {
         )
     }
 
+    /// Smart Money Desk — Ranked OB + ALGOSMART structure + previous-day
+    /// PDH/PDL/POC, computed on the entry timeframe and the one above,
+    /// handed to the model as a pre-computed evidence pack.
+    ///
+    /// The evidence build is the expensive part (three indicator engines
+    /// plus the sentinel, twice), so it runs off the main actor and the
+    /// session only starts once it lands. That means a brief gap between
+    /// the click and the stream opening — acceptable, because the
+    /// alternative is a beachball on a 2000-bar series.
+    func runSMCDesk(
+        engineKind: AIEngineKind,
+        pair: TradingPair,
+        timeframe: Timeframe,
+        candles: [Candle],
+        htfTimeframe: Timeframe?,
+        htfCandles: [Candle],
+        freeText: String? = nil,
+        tabID: UUID? = nil
+    ) {
+        let htfFactor = htfTimeframe.map { max(1, Int($0.seconds / timeframe.seconds)) } ?? 1
+        let htfLabel = htfTimeframe?.rawValue ?? ""
+
+        Task.detached(priority: .userInitiated) {
+            let evidence = SMCEvidence.build(
+                pairID: pair.id,
+                symbol: pair.symbol,
+                timeframe: timeframe,
+                candles: candles,
+                htfCandles: htfCandles,
+                htfLabel: htfLabel,
+                htfFactor: htfFactor
+            )
+            // The HTF pack is bias-only: no sentinel pass (its context
+            // rule needs a timeframe *above* the one being scanned, and
+            // there isn't one here) and fewer zones, so the section
+            // stays a summary rather than competing with the entry TF.
+            let htfEvidence: SMCEvidence? = htfCandles.isEmpty ? nil : {
+                var opts = SMCEvidence.Options.default
+                opts.includeSentinel = false
+                opts.zonesPerSide = 2
+                opts.poiPerSide = 2
+                opts.structureEvents = 4
+                return SMCEvidence.build(
+                    pairID: pair.id,
+                    symbol: pair.symbol,
+                    timeframe: htfTimeframe ?? timeframe,
+                    candles: htfCandles,
+                    options: opts
+                )
+            }()
+
+            let user = PromptBuilder.userPromptSMCDesk(
+                pair: pair,
+                timeframe: timeframe,
+                candles: candles,
+                evidence: evidence,
+                htfEvidence: htfEvidence,
+                htfTimeframe: htfTimeframe,
+                freeText: freeText
+            )
+            let label = htfTimeframe.map { "\(timeframe.label) / \($0.label)" } ?? timeframe.label
+
+            await MainActor.run {
+                self.startSession(
+                    key: SessionKey(pairID: pair.id, kind: .smcDesk, tabID: tabID),
+                    engineKind: engineKind,
+                    pair: pair,
+                    timeframeLabel: label,
+                    user: user,
+                    systemOverride: PromptBuilder.systemSMCDesk
+                )
+            }
+        }
+    }
+
     /// Confluence Trade Scanner — same multi-TF bundle as
     /// `runMultiTimeframe` but routed through the scanner's
     /// user-prompt builder and stored under the
@@ -1185,7 +1260,7 @@ final class AnalysisStore: ObservableObject {
         // `.custom`, `.combined`, and `.topDownSniper` are permissive
         // — they can emit any block, so we try every parser and keep
         // whatever actually appeared.
-        let multiBlock = (kind == .custom || kind == .combined || kind == .topDownSniper)
+        let multiBlock = (kind == .custom || kind == .combined || kind == .topDownSniper || kind == .smcDesk)
         let sr  = (kind == .supportResistance || kind == .full || multiBlock)
             ? PromptBuilder.parseSRLevels(session.report)
             : nil

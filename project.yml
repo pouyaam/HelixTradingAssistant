@@ -132,6 +132,7 @@ targets:
           - "**/ChartSkeleton.swift"
           - "**/RiskCalculatorView.swift"
           - "**/UpdatesCard.swift"
+          - "**/MCPServerCard.swift"
           - "**/AnalysisActionDock.swift"
           - "**/AnalysisAspectCard.swift"
           - "**/AnalysisHistoryView.swift"

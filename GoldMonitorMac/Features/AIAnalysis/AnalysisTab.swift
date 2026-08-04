@@ -71,6 +71,7 @@ extension AnalysisKind {
         case .custom:            return "Custom"
         case .combined:          return "Analysis"
         case .topDownSniper:     return "Sniper"
+        case .smcDesk:           return "Smart Money"
         }
     }
 }
