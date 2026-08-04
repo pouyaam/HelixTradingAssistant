@@ -206,6 +206,7 @@ struct SettingsView: View {
         case .notifications: notificationsSection
         case .data:       DataSourcesCard()
         case .ai:         aiSection
+        case .mcp:        MCPServerCard()
         case .network:    proxyCard
         case .autoTrader: AutoTraderCard()
         case .about:      UpdatesCard()

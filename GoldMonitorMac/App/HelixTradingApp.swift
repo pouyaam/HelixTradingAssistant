@@ -46,6 +46,12 @@ struct HelixTradingApp: App {
     /// here alongside the other app-root stores.
     @StateObject private var notificationInbox = NotificationInbox()
 
+    /// Local MCP server — exposes the market store + SMC engines to
+    /// other AI tools. Owns its own lifecycle; the boot task only
+    /// hands it the database, and it starts itself if the user had it
+    /// enabled.
+    @StateObject private var mcpServer = MCPServerSettings()
+
     /// Auto-trader orchestrator — constructed eagerly with no
     /// deps so it's always in the SwiftUI environment from first
     /// render. The boot `.task` calls `engine.attach(...)` once
@@ -72,6 +78,7 @@ struct HelixTradingApp: App {
                 .environmentObject(autoTrader)
                 .environmentObject(dataConfig)
                 .environmentObject(notificationInbox)
+                .environmentObject(mcpServer)
                 .frame(minWidth: 980, idealWidth: 1180, minHeight: 640, idealHeight: 760)
                 .preferredColorScheme(.dark)
                 .task {
@@ -107,6 +114,10 @@ struct HelixTradingApp: App {
                     }
 
                     if let db = appState.database {
+                        // Serve the MCP tools off the same store the
+                        // chart reads, so external clients and the app
+                        // can never disagree about the bars.
+                        mcpServer.attach(database: db)
                         // Live schedulers — Yahoo for chart history +
                         // crypto polling.
                         yahoo.start(database: db)

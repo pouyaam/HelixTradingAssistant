@@ -98,7 +98,7 @@ struct AnalysisPlansColumn: View {
     @ViewBuilder
     private var cardStack: some View {
         switch kind {
-        case .full, .confluenceScanner, .custom, .combined, .topDownSniper:
+        case .full, .confluenceScanner, .custom, .combined, .topDownSniper, .smcDesk:
             // Confluence Trade Scanner's scored scenario queue gets pole position
             // — it's the headline output now (S&D + market
             // structure + breakouts, all ranked). Falls back to
@@ -146,7 +146,7 @@ struct AnalysisPlansColumn: View {
             if !supplyDemandZones.isEmpty {
                 SupplyDemandCard(zones: supplyDemandZones, onAdd: onAddSupplyDemand)
             }
-            let fvgEligible = (kind == .custom || kind == .combined || kind == .topDownSniper)
+            let fvgEligible = (kind == .custom || kind == .combined || kind == .topDownSniper || kind == .smcDesk)
             if fvgEligible, !fvgZones.isEmpty {
                 FVGCard(zones: fvgZones, onAdd: onAddFVGZones)
             }

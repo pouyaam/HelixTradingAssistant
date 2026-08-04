@@ -44,6 +44,14 @@ enum AnalysisKind: String, CaseIterable, Identifiable, Codable {
     /// gives the precise entry. Emits LEVELS / SUPPLY_DEMAND / FVG
     /// / SCENARIO blocks. See `systemTopDownSniper`.
     case topDownSniper
+    /// Smart Money Desk — the SMC read. Unlike every other kind, the
+    /// model is not asked to *find* structure: `SMCEvidence` hands it
+    /// pre-computed Ranked-OB grades, ALGOSMART BOS/CHoCH/IDM/sweep
+    /// events and POI zones, and the settled previous-day
+    /// PDH/PDL/POC/VA, on the entry timeframe and the one above. Its
+    /// job is to rank that evidence into a liquidity → POI → trigger
+    /// narrative and a trade plan. See `systemSMCDesk`.
+    case smcDesk
 
     var id: String { rawValue }
 
@@ -57,6 +65,7 @@ enum AnalysisKind: String, CaseIterable, Identifiable, Codable {
         case .custom:            return "Custom"
         case .combined:          return "Analysis"
         case .topDownSniper:     return "Top-Down Sniper"
+        case .smcDesk:           return "Smart Money Desk"
         }
     }
 
@@ -72,6 +81,7 @@ enum AnalysisKind: String, CaseIterable, Identifiable, Codable {
         case .custom:            return "custom"
         case .combined:          return "analysis"
         case .topDownSniper:     return "top-down-sniper"
+        case .smcDesk:           return "smart-money"
         }
     }
 }
@@ -97,6 +107,7 @@ enum PromptBuilder {
         case .custom:            return systemCustomDefault
         case .combined:          return systemCustomDefault   // real runs override via systemCombined(...)
         case .topDownSniper:     return systemTopDownSniper(htf: "4H", mtf: "1H", ltf: "15m")  // real runs override per trio
+        case .smcDesk:           return systemSMCDesk
         }
     }
 
@@ -154,6 +165,145 @@ enum PromptBuilder {
     Use raw numbers (no thousands separators, no currency symbols)
     inside the JSON. Omit a block entirely when it doesn't fit the
     user's question.
+    """
+
+    /// Smart Money Desk. The distinguishing feature of this prompt is
+    /// that detection is already done: `SMCEvidence` hands the model
+    /// graded Ranked-OB zones, ALGOSMART structure events + POI zones,
+    /// and a settled previous-day profile, on two timeframes. So the
+    /// prompt spends its length on *how to rank and sequence* that
+    /// evidence — the part a model is genuinely good at — and forbids
+    /// re-deriving structure from the OHLC table, which is the failure
+    /// mode that makes SMC output look plausible and land wrong.
+    ///
+    /// The reasoning order below is not decorative. Liquidity before
+    /// POI, POI before trigger, invalidation before targets: a plan
+    /// built in any other order tends to rationalise an entry that was
+    /// already chosen.
+    static let systemSMCDesk = """
+    You are a Smart Money Concepts (SMC) desk analyst. You read
+    markets as an accumulation → manipulation → distribution cycle:
+    price moves to where resting liquidity is, takes it, and reverses
+    from a point of interest.
+
+    ## What you are given
+
+    Detection has ALREADY been run for you by deterministic engines.
+    You will receive, for the entry timeframe and the timeframe above:
+
+    - **Ranked Order Blocks** — swing order blocks graded A / B / C on
+      Volume-Profile + Ichimoku confluence, each with its price range,
+      distance from spot in ATR, whether price is inside it, whether it
+      is a *breaker* (already traded through, role flipped), and whether
+      an independent ALGOSMART POI overlaps it.
+    - **ALGOSMART ASSIST v2 structure** — confirmed BOS / CHoCH / IDM /
+      liquidity-sweep events with prices and age, the live working
+      levels, the 0.5 equilibrium of the current leg, and supply/demand
+      POI zones tagged fresh or mitigated and premium or discount.
+    - **Previous day** — PDH, PDL, the 50% mid, open/close, and the
+      settled session's volume profile (POC, VAH, VAL), plus which of
+      PDH/PDL the current session has NOT yet taken.
+    - **Mechanical setups** — anything the app's own SMC rules engine
+      already qualified, with entry / SL / TP1 / TP2 / R:R.
+
+    Treat these numbers as ground truth. Do NOT re-derive order blocks,
+    swings, or structure from the raw OHLC table — the table is there so
+    you can check the last few bars' behaviour *at* the levels you were
+    given, nothing more. If an engine reported a data gap, say what it
+    prevents; never analyse around a gap silently.
+
+    ## How to reason — in this order
+
+    1. **Bias** — from the higher timeframe's most recent BOS or CHoCH.
+       A BOS continues the trend; a CHoCH is the first evidence it is
+       turning. State the bias and the event that sets it, with its
+       price. If HTF and entry-timeframe structure disagree, say so
+       explicitly and trade the HTF, or stand down.
+    2. **Draw on liquidity** — where is price trying to go? Unswept PDH
+       / PDL are the primary magnets, then equal highs/lows and the
+       previous-day POC (an unfilled POC is a magnet; a POC price is
+       already trading in is acceptance, not a target). Name the
+       specific level and price.
+    3. **Premium / discount** — relative to the 0.5 equilibrium you were
+       given. Longs belong in discount, shorts in premium. An entry on
+       the wrong side of equilibrium needs an explicit reason or it is
+       not a setup.
+    4. **Has liquidity already been taken?** — an IDM sweep or a
+       liquidity sweep since the bias-setting event is what makes a POI
+       tradeable. Without it you are buying into a move that has not
+       yet fuelled itself; say the setup is *pending* rather than
+       inventing a trigger.
+    5. **POI selection** — pick ONE zone to trade. Prefer, in order:
+       grade A over B over C; a zone an ALGOSMART POI also marks over
+       one only Ranked OB sees; fresh over mitigated; nearer in ATR over
+       further. A breaker is only tradeable in its flipped direction.
+       Name the zone by its price range and say why it beat the others.
+    6. **Trigger and invalidation** — what confirms entry (a rejection
+       from the zone, a lower-timeframe CHoCH, a displacement candle
+       closing out of the zone), and the price at which the idea is
+       simply wrong. Invalidation goes beyond the zone's far edge, not
+       inside it.
+    7. **Targets** — the liquidity from step 2 first, then previous-day
+       VAH/VAL/POC and opposing POI zones as intermediate magnets.
+
+    ## Output
+
+    Markdown, in this structure — keep it tight, every claim carrying a
+    number:
+
+    1. **Read** — 2–3 sentences: bias, where price is in the range, what
+       it is reaching for.
+    2. **Structure** — the events that set the bias, with prices.
+    3. **Liquidity map** — swept vs unswept, PDH/PDL/POC, with prices.
+    4. **The zone** — the POI you chose, its grade and range, and why it
+       beat the alternatives.
+    5. **Trade plan** — direction, entry, stop, TP1, TP2, R:R, and the
+       trigger you are waiting for. If nothing qualifies, say "no setup"
+       and state the one condition that would create one — a forced
+       trade is worse than no trade.
+    6. **Invalidation** — the price and what it would mean.
+
+    Then emit these structured blocks so the chart can draw them:
+
+    ### LEVELS_JSON
+    ```json
+    {"support":[<numbers>],"resistance":[<numbers>]}
+    ```
+
+    ### SUPPLY_DEMAND_JSON
+    ```json
+    {"zones":[{"barStart":<int>,"barEnd":<int>,"low":<number>,"high":<number>,"type":"demand|supply","fresh":<bool>,"strength":"weak|medium|strong"}]}
+    ```
+
+    ### SCENARIO_JSON
+    ```json
+    {"bias":"long|short|neutral","entry":<number>,"tp":<number>,"sl":<number>}
+    ```
+
+    ### ALT_SCENARIO_JSON
+    ```json
+    {"bias":"long|short|neutral","entry":<number>,"tp":<number>,"sl":<number>}
+    ```
+
+    - `support` / `resistance`: the levels you actually cite — include
+      PDH / PDL / previous-day POC and your chosen zone's edges.
+    - `SUPPLY_DEMAND_JSON`: the zones you discuss, using the price
+      ranges you were GIVEN, not ones you estimate. `barStart` /
+      `barEnd` are NEGATIVE offsets from the latest bar (-1 = latest);
+      derive them from each zone's stated age in bars.
+    - `SCENARIO_JSON` is your primary plan. For long, `tp > entry > sl`;
+      for short, `sl > entry > tp`. `sl` is the invalidation price from
+      step 6.
+    - `ALT_SCENARIO_JSON` is the "if the primary invalidates" plan —
+      usually the opposite side keyed to a break of your stop. Omit the
+      block entirely if there is no genuine alternative; do not emit a
+      placeholder.
+    - Raw numbers only — no thousands separators, no currency symbols.
+    - If your verdict is "no setup", still emit LEVELS_JSON, and omit
+      both SCENARIO blocks rather than inventing a trade.
+
+    The user is a trader and reads this as analysis. No disclaimer
+    boilerplate, no "consult a financial advisor".
     """
 
     private static let systemFullTA = """
@@ -632,7 +782,87 @@ enum PromptBuilder {
         case .topDownSniper:
             // Never reached — goes through `userPromptTopDownSniper`.
             return "Run the Top-Down Sniper model per the system message."
+        case .smcDesk:
+            // Never reached — goes through `userPromptSMCDesk`, which
+            // carries the evidence pack. Kept for exhaustiveness.
+            return "Run the Smart Money read per the system message."
         }
+    }
+
+    // ── Smart Money Desk ──────────────────────────────────────────────
+
+    /// Build the SMC user prompt around a pre-computed evidence pack.
+    ///
+    /// The OHLC table is deliberately short (30 bars). Every level the
+    /// model needs is already in the evidence sections with a price on
+    /// it; the bars are only there so it can see how the last handful
+    /// behaved *at* those levels. A long table here would invite exactly
+    /// the eyeball re-derivation the system prompt forbids — and would
+    /// spend the token budget on the part of the job the Swift engines
+    /// already did better.
+    static func userPromptSMCDesk(
+        pair: TradingPair,
+        timeframe: Timeframe,
+        candles: [Candle],
+        evidence: SMCEvidence,
+        htfEvidence: SMCEvidence? = nil,
+        htfTimeframe: Timeframe? = nil,
+        freeText: String? = nil
+    ) -> String {
+        let trimmed = Array(candles.suffix(30))
+        let lines = trimmed.map { ohlcLine($0) }.joined(separator: "\n")
+
+        let htfBlock: String = {
+            guard let htfEvidence, let htfTimeframe else { return "" }
+            return """
+
+            # Higher timeframe — \(htfTimeframe.label) (bias)
+
+            \(htfEvidence.markdown())
+            """
+        }()
+
+        let intent: String = {
+            let t = freeText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !t.isEmpty else { return "" }
+            return """
+
+            ## The trader's specific question
+
+            \(t)
+
+            Answer it inside the structure above rather than replacing it.
+            """
+        }()
+
+        return """
+        ## Context
+
+        Pair: **\(pair.name)** (\(pair.symbol))
+        Entry timeframe: **\(timeframe.label)**
+        Last close: \(fmt(pair.price))
+        24h change: \(String(format: "%+.2f", pair.changePercent))%
+        \(htfBlock)
+
+        # Entry timeframe — \(timeframe.label)
+
+        \(evidence.markdown())
+
+        ## Recent OHLC (\(trimmed.count) bars, oldest first — V = volume)
+
+        Context for how price is behaving at the levels above. Do not
+        derive new structure from it.
+
+        \(lines.isEmpty ? "  (no recent data)" : lines)
+        \(intent)
+
+        ## Task
+
+        Run the Smart Money read described in the system message, in the
+        order given. Be specific and numeric — cite the prices you were
+        handed, not approximations of them. Output Markdown plus the
+        structured blocks, no surrounding prose.
+        """
     }
 
     // ── Multi-timeframe user prompt ───────────────────────────────────

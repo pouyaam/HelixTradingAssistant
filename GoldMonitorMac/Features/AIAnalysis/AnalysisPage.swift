@@ -1028,6 +1028,8 @@ struct AnalysisPage: View {
             // Swing / Scalp before each analyze so the
             // timeframes + prompt-horizon match their intent.
             profilePickerVisible = true
+        case .smcDesk:
+            runSMCDeskAnalysis()
         case .full, .supportResistance, .fvg:
             runSingleTFAnalysis()
         case .custom:
@@ -1123,6 +1125,39 @@ struct AnalysisPage: View {
                     kind: selectedKind, engineKind: selectedEngine,
                     pair: pair, timeframe: timeframe, candles: candles,
                     htf: htf, tabID: currentTab.id
+                )
+            }
+        }
+    }
+
+    /// Smart Money Desk — entry timeframe plus the one above it for
+    /// bias. Unlike `runSingleTFAnalysis` this hands the raw HTF
+    /// candles down rather than a `MarketSnapshot`: the SMC evidence
+    /// pack has to run the structure engines on that series itself, so
+    /// a summarised snapshot would be useless to it.
+    private func runSMCDeskAnalysis() {
+        let tabID = currentTab.id
+        let htfTimeframe = higherTimeframe(above: timeframe)
+        guard let htfTimeframe, let loader = loadCandles else {
+            // No timeframe above (daily) or no loader — run entry-TF
+            // only. The evidence pack degrades cleanly: the sentinel
+            // falls back to its LTF read and says so.
+            store.runSMCDesk(
+                engineKind: selectedEngine,
+                pair: pair, timeframe: timeframe, candles: candles,
+                htfTimeframe: nil, htfCandles: [], tabID: tabID
+            )
+            return
+        }
+        Task {
+            let htfCandles = await loader(htfTimeframe)
+            await MainActor.run {
+                store.runSMCDesk(
+                    engineKind: selectedEngine,
+                    pair: pair, timeframe: timeframe, candles: candles,
+                    htfTimeframe: htfCandles.isEmpty ? nil : htfTimeframe,
+                    htfCandles: htfCandles,
+                    tabID: tabID
                 )
             }
         }
@@ -1486,6 +1521,9 @@ struct AnalysisPage: View {
             return "Run **\(selectedEngine.label)** for **Confluence Trade Scanner** on \(pair.name) across 15m, 1h, and 4h — scans for impulsive breakouts that left an FVG, then frames an entry against the last opposite-direction candle."
         case .custom:
             return "Write your own prompt in the editor and run it against **\(pair.name)** at \(timeframe.label)."
+        case .smcDesk:
+            let htf = higherTimeframe(above: timeframe)?.label
+            return "Run **\(selectedEngine.label)** for **Smart Money Desk** on \(pair.name) at \(timeframe.label)\(htf.map { " with \($0) bias" } ?? "") — Ranked OB grades, ALGOSMART structure, and previous-day PDH/PDL/POC, pre-computed."
         case .full, .supportResistance, .fvg:
             return "Run **\(selectedEngine.label)** for **\(selectedKind.label)** on \(pair.name) at \(timeframe.label)."
         }
@@ -1559,7 +1597,7 @@ struct AnalysisPage: View {
 
         // `.custom`, `.combined`, `.topDownSniper` are permissive
         // (they can emit any of the structured blocks).
-        let permissive = (kind == .custom || kind == .combined || kind == .topDownSniper)
+        let permissive = (kind == .custom || kind == .combined || kind == .topDownSniper || kind == .smcDesk)
         var p = ParsedPayloads()
         if kind == .supportResistance || kind == .full || permissive {
             p.srLevels = PromptBuilder.parseSRLevels(report)
