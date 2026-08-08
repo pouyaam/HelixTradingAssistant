@@ -259,5 +259,10 @@ struct MCPServerCard: View {
         ("algosmart_assist", "ALGOSMART ASSIST v2 — BOS / CHoCH / IDM / sweeps, POI zones, equilibrium, qualified setups."),
         ("previous_day_levels", "Previous session PDH / PDL / mid / POC / VAH / VAL and unswept liquidity."),
         ("smc_brief", "All of the above across two timeframes, plus the desk's analysis method."),
+        ("fvg_detector", "3-bar Fair Value Gaps (Bullish/Bearish), gap size/%, and mitigation state."),
+        ("session_ranges", "Asia, London, and NY session ranges, 50% equilibrium, and high/low sweeps."),
+        ("mtf_bias", "EMA20 & EMA50 alignment across 6 timeframes (1m to 1d) for multi-timeframe directional bias."),
+        ("position_sizer", "Unit position size, lot size, monetary risk ($), and R:R calculator."),
     ]
 }
+

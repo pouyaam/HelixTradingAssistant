@@ -890,6 +890,38 @@ final class ChartDerivedCache: ObservableObject {
         }
     }
 
+    /// AMD phase cycles. Keyed on bar identity plus the trailing bar's
+    /// OHLC: unlike the pure structure engines, a live tick genuinely
+    /// changes this output — the current bar can extend a sweep, fill an
+    /// entry gap, or hit a target, and all three should show up without
+    /// waiting for the bar to close.
+    private struct AMDSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let lastHigh: Double
+        let lastLow: Double
+        let lastClose: Double
+        let config: AMDCycle.Configuration
+    }
+    private let amdSlot = Slot<AMDSig, [AMDCycle.Cycle]>([])
+
+    func amdCycles(candles: [Candle], config: AMDCycle.Configuration) -> [AMDCycle.Cycle] {
+        let last = candles.last
+        let sig = AMDSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: last?.id.timeIntervalSince1970 ?? 0,
+            lastHigh: last?.high ?? 0,
+            lastLow: last?.low ?? 0,
+            lastClose: last?.close ?? 0,
+            config: config
+        )
+        return resolve(amdSlot, signature: sig) {
+            AMDCycle.compute(candles, configuration: config)
+        }
+    }
+
     // ── Volume Profile ─────────────────────────────────────────────────
 
     /// Includes the trailing bar's timestamp/close/volume so the 1 Hz
@@ -1328,6 +1360,7 @@ final class ChartDerivedCache: ObservableObject {
         let volumeFilteredOBZones: [VolumeFilteredOrderBlocks.Zone]
         let helixOBComboOutput: HelixOBCombo.Output
         let algoSmartAssistOutput: AlgoSmartAssist.Output
+        var amdCycles: [AMDCycle.Cycle] = []
         let chochZones: [ChangeOfCharacter.Zone]
         let htfChochZones: [ChangeOfCharacter.DatedZone]
         let sessionRuns: [TradingSessions.SessionRun]
@@ -1369,6 +1402,9 @@ final class ChartDerivedCache: ObservableObject {
         let volumeFilteredOBCount: Int
         let helixOBComboCount: Int
         let algoSmartAssistCount: Int
+        /// Count alone won't do: a live cycle's plan levels and phase
+        /// move while the cycle set stays the same size.
+        let amdKeys: [String]
         let chochCount: Int
         let htfChochCount: Int
         let sessionCount: Int
@@ -1422,6 +1458,9 @@ final class ChartDerivedCache: ObservableObject {
             volumeFilteredOBCount: data.volumeFilteredOBZones.count,
             helixOBComboCount: data.helixOBComboOutput.bullishOBs.count + data.helixOBComboOutput.bearishOBs.count,
             algoSmartAssistCount: data.algoSmartAssistOutput.zones.count + data.algoSmartAssistOutput.lines.count,
+            amdKeys: data.amdCycles.map {
+                "\($0.id)|\($0.phase.rawValue)|\($0.gap?.takeProfit2 ?? 0)"
+            },
             chochCount: data.chochZones.count,
             htfChochCount: data.htfChochZones.count,
             sessionCount: data.sessionRuns.count,
@@ -1546,6 +1585,20 @@ final class ChartDerivedCache: ObservableObject {
             for ll in data.algoSmartAssistOutput.liveLines {
                 if ll.price < lo { lo = ll.price }
                 if ll.price > hi { hi = ll.price }
+            }
+            for cycle in data.amdCycles {
+                var values = [cycle.rangeHigh, cycle.rangeLow]
+                if let p = cycle.sweepPrice { values.append(p) }
+                if let e = cycle.expansionExtreme { values.append(e) }
+                if let gap = cycle.gap {
+                    values.append(contentsOf: [
+                        gap.high, gap.low, gap.stopLoss, gap.takeProfit1, gap.takeProfit2,
+                    ])
+                }
+                for v in values {
+                    if v < lo { lo = v }
+                    if v > hi { hi = v }
+                }
             }
             // Ichimoku lines — Span B (widest window) and Kijun bound the
             // system; scanning both spans covers the cloud extremes too.

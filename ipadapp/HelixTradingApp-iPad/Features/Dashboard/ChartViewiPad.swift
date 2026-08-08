@@ -181,6 +181,22 @@ struct ChartViewiPad: View {
         return derived.algoSmartAssist(candles: candles, params: params)
     }
 
+    /// Params for the AMD indicator, or `nil` when it's off.
+    private var amdParams: [String: ParamValue]? {
+        guard indicators.contains(.amdCycle) else { return nil }
+        return indicatorInstances.first(where: { $0.kind == .amdCycle })?.params ?? [:]
+    }
+
+    /// AMD phase cycles — accumulation range, liquidity sweep, expansion
+    /// leg, and the FVG entry it left behind.
+    private var amdCycles: [AMDCycle.Cycle] {
+        guard let params = amdParams else { return [] }
+        return derived.amdCycles(
+            candles: candles,
+            config: AMDCycle.Configuration(params: params)
+        )
+    }
+
     private var sonarlabOBZones: [SonarlabOrderBlocks.Zone] {
         guard indicators.contains(.sonarlabOrderBlock) else { return [] }
         let mitType: SonarlabOrderBlocks.MitigationType =
@@ -534,6 +550,7 @@ struct ChartViewiPad: View {
                 volumeFilteredOBMarks
                 helixOBComboMarks
                 algoSmartAssistMarks
+                amdMarks
                 chochMarks
                 htfChochMarks
                 scenarioMarks
@@ -2335,6 +2352,259 @@ struct ChartViewiPad: View {
             .padding(.vertical, 1)
             .background(Capsule().fill(color.opacity(0.95)))
             .fixedSize()
+    }
+
+    // MARK: - AMD (Accumulation · Manipulation · Distribution)
+
+    /// Which parts of an AMD cycle to draw. Mirrors `ChartView.AMDStyle`
+    /// — the two charts share the engine and the toggle keys, only the
+    /// mark builders are per-platform.
+    private struct AMDStyle {
+        let accumulation: Bool
+        let manipulation: Bool
+        let distribution: Bool
+        let gap: Bool
+        let plan: Bool
+        let labels: Bool
+        let rightEdge: Double
+
+        init(params: [String: ParamValue], rightEdge: Double) {
+            accumulation = params["showAccumulation"]?.boolValue ?? true
+            manipulation = params["showManipulation"]?.boolValue ?? true
+            distribution = params["showDistribution"]?.boolValue ?? true
+            gap = params["showGap"]?.boolValue ?? true
+            plan = params["showPlan"]?.boolValue ?? true
+            labels = params["showLabels"]?.boolValue ?? true
+            self.rightEdge = rightEdge
+        }
+    }
+
+    private func amdColor(_ cycle: AMDCycle.Cycle) -> Color {
+        switch cycle.direction {
+        case .long:  return Theme.Color.success
+        case .short: return Theme.Color.danger
+        case nil:    return IndicatorKind.amdCycle.color
+        }
+    }
+
+    /// AMD phase overlay: the accumulation range, the sweep that took
+    /// liquidity out of it, the displacement leg that followed, and the
+    /// fair value gap the leg left behind as the entry.
+    @ChartContentBuilder
+    private var amdMarks: some ChartContent {
+        if let params = amdParams {
+            let lastBar = Double(max(0, candles.count - 1))
+            let style = AMDStyle(
+                params: params,
+                rightEdge: max(lastBar, effectiveXDomain.upperBound)
+            )
+            ForEach(amdCycles) { cycle in
+                amdAccumulationMarks(cycle, style: style)
+                amdManipulationMarks(cycle, style: style)
+                amdExpansionMarks(cycle, style: style)
+                amdEntryMarks(cycle, style: style)
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private func amdAccumulationMarks(_ cycle: AMDCycle.Cycle, style: AMDStyle) -> some ChartContent {
+        if style.accumulation {
+            let accent = IndicatorKind.amdCycle.color
+            let live = cycle.phase == .accumulation
+            let edgeEnd = live ? style.rightEdge : Double(cycle.lastRelevantIndex)
+
+            RectangleMark(
+                xStart: .value("AMD base x0", Double(cycle.rangeStart) - 0.5),
+                xEnd:   .value("AMD base x1", Double(cycle.rangeEnd) + 0.5),
+                yStart: .value("AMD base y0", cycle.rangeLow),
+                yEnd:   .value("AMD base y1", cycle.rangeHigh)
+            )
+            .foregroundStyle(accent.opacity(cycle.phase == .failed ? 0.05 : 0.10))
+
+            // Indexed rather than keyed on the price — see ChartView.
+            ForEach([0, 1], id: \.self) { edge in
+                RuleMark(
+                    xStart: .value("AMD edge x0", Double(cycle.rangeStart) - 0.5),
+                    xEnd:   .value("AMD edge x1", edgeEnd),
+                    y:      .value("AMD edge y", edge == 0 ? cycle.rangeHigh : cycle.rangeLow)
+                )
+                .foregroundStyle(accent.opacity(0.55))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+            }
+
+            if style.labels {
+                PointMark(
+                    x: .value("AMD base tag x", Double(cycle.rangeStart)),
+                    y: .value("AMD base tag y", cycle.rangeHigh)
+                )
+                .symbolSize(0)
+                .annotation(position: .top, alignment: .leading, spacing: 2) {
+                    setupTag("A · Accumulation", color: accent.opacity(0.9))
+                }
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private func amdManipulationMarks(_ cycle: AMDCycle.Cycle, style: AMDStyle) -> some ChartContent {
+        if style.manipulation,
+           let sweep = cycle.sweepIndex,
+           let sweepPrice = cycle.sweepPrice,
+           let side = cycle.sweptSide {
+            let edge = side == .high ? cycle.rangeHigh : cycle.rangeLow
+            let reclaim = cycle.reclaimIndex ?? sweep
+            let invalidationEnd = cycle.gap?.resolveIndex.map(Double.init) ?? style.rightEdge
+
+            RectangleMark(
+                xStart: .value("AMD sweep x0", Double(sweep) - 0.5),
+                xEnd:   .value("AMD sweep x1", Double(reclaim) + 0.5),
+                yStart: .value("AMD sweep y0", min(edge, sweepPrice)),
+                yEnd:   .value("AMD sweep y1", max(edge, sweepPrice))
+            )
+            .foregroundStyle(Theme.Color.warn.opacity(0.22))
+
+            RuleMark(
+                xStart: .value("AMD invalidation x0", Double(sweep)),
+                xEnd:   .value("AMD invalidation x1", invalidationEnd),
+                y:      .value("AMD invalidation y", sweepPrice)
+            )
+            .foregroundStyle(Theme.Color.warn.opacity(0.75))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+
+            if style.labels {
+                PointMark(
+                    x: .value("AMD sweep tag x", Double(sweep)),
+                    y: .value("AMD sweep tag y", sweepPrice)
+                )
+                .symbolSize(50)
+                .foregroundStyle(Theme.Color.warn)
+                .annotation(
+                    position: side == .high ? .top : .bottom,
+                    alignment: .center,
+                    spacing: 3
+                ) {
+                    setupTag(
+                        side == .high ? "M · sweep highs" : "M · sweep lows",
+                        color: Theme.Color.warn
+                    )
+                }
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private func amdExpansionMarks(_ cycle: AMDCycle.Cycle, style: AMDStyle) -> some ChartContent {
+        if style.distribution,
+           let reclaim = cycle.reclaimIndex,
+           let extremeIndex = cycle.expansionExtremeIndex,
+           let extreme = cycle.expansionExtreme {
+            let color = amdColor(cycle)
+            let isLong = cycle.direction?.isLong ?? true
+            let origin = isLong ? candles[min(reclaim, candles.count - 1)].low
+                                : candles[min(reclaim, candles.count - 1)].high
+
+            ForEach([0, 1], id: \.self) { endpoint in
+                LineMark(
+                    x: .value("AMD leg x", endpoint == 0 ? Double(reclaim) : Double(extremeIndex)),
+                    y: .value("AMD leg y", endpoint == 0 ? origin : extreme),
+                    series: .value("AMD leg series", "amd-leg-\(cycle.id)")
+                )
+                .foregroundStyle(color.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1.4, dash: [6, 3]))
+            }
+
+            if style.labels {
+                PointMark(
+                    x: .value("AMD leg tag x", Double(extremeIndex)),
+                    y: .value("AMD leg tag y", extreme)
+                )
+                .symbolSize(0)
+                .annotation(position: isLong ? .top : .bottom, alignment: .center, spacing: 3) {
+                    setupTag(
+                        cycle.phase == .distribution ? "D · Distribution" : "D · Expansion",
+                        color: color
+                    )
+                }
+            }
+
+            if let stall = cycle.distributionIndex {
+                RuleMark(x: .value("AMD stall x", Double(stall)))
+                    .foregroundStyle(color.opacity(0.35))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 4]))
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private func amdEntryMarks(_ cycle: AMDCycle.Cycle, style: AMDStyle) -> some ChartContent {
+        if let gap = cycle.gap {
+            let color = amdColor(cycle)
+            let isLong = cycle.direction?.isLong ?? true
+            let planEnd = gap.resolveIndex.map(Double.init) ?? style.rightEdge
+            let gapEnd = gap.fillIndex.map { Double($0) + 0.5 } ?? planEnd
+
+            if style.gap {
+                RectangleMark(
+                    xStart: .value("AMD fvg x0", Double(gap.index) - 0.5),
+                    xEnd:   .value("AMD fvg x1", gapEnd),
+                    yStart: .value("AMD fvg y0", gap.low),
+                    yEnd:   .value("AMD fvg y1", gap.high)
+                )
+                .foregroundStyle(color.opacity(gap.state == .armed ? 0.26 : 0.14))
+            }
+
+            if style.plan {
+                amdPlanLevel(gap.entry, from: Double(gap.index), to: planEnd,
+                             color: color, width: 1.6, dash: [])
+                amdPlanLevel(gap.stopLoss, from: Double(gap.index), to: planEnd,
+                             color: Theme.Color.danger, width: 1.3, dash: [5, 3])
+                amdPlanLevel(gap.takeProfit1, from: Double(gap.index), to: planEnd,
+                             color: Theme.Color.success.opacity(0.7), width: 1.1, dash: [3, 3])
+                amdPlanLevel(gap.takeProfit2, from: Double(gap.index), to: planEnd,
+                             color: Theme.Color.success, width: 1.3, dash: [5, 3])
+            }
+
+            if style.labels {
+                PointMark(
+                    x: .value("AMD plan tag x", planEnd),
+                    y: .value("AMD plan tag y", gap.entry)
+                )
+                .symbolSize(0)
+                .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
+                    setupTag(amdPlanTag(cycle, gap: gap, isLong: isLong), color: color)
+                }
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private func amdPlanLevel(
+        _ price: Double,
+        from x0: Double,
+        to x1: Double,
+        color: Color,
+        width: CGFloat,
+        dash: [CGFloat]
+    ) -> some ChartContent {
+        RuleMark(
+            xStart: .value("AMD plan x0", x0),
+            xEnd:   .value("AMD plan x1", x1),
+            y:      .value("AMD plan y", price)
+        )
+        .foregroundStyle(color)
+        .lineStyle(StrokeStyle(lineWidth: width, dash: dash))
+    }
+
+    private func amdPlanTag(_ cycle: AMDCycle.Cycle, gap: AMDCycle.EntryGap, isLong: Bool) -> String {
+        let side = isLong ? "LONG" : "SHORT"
+        switch gap.state {
+        case .armed:   return "AMD \(side) · FVG \(String(format: "%.1f", gap.riskReward))R"
+        case .filled:  return "AMD \(side) · in gap"
+        case .tp1:     return "AMD \(side) · TP1"
+        case .tp2:     return "AMD \(side) · TP2"
+        case .stopped: return "AMD \(side) · stopped"
+        }
     }
 
     // MARK: - Order block marks
@@ -4325,6 +4595,7 @@ struct ChartViewiPad: View {
             volumeFilteredOBZones: volumeFilteredOBZones,
             helixOBComboOutput: helixOBComboOutput,
             algoSmartAssistOutput: algoSmartAssistOutput,
+            amdCycles: amdCycles,
             chochZones: chochZones,
             htfChochZones: htfChochZones,
             sessionRuns: sessionRuns,

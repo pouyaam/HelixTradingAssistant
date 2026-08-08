@@ -26,7 +26,7 @@ struct MCPToolbox {
     }
 
     var tools: [MCPTool] {
-        [listSymbols, historyData, rankOB, algoSmartAssist, previousDayLevels, smcBrief]
+        [listSymbols, historyData, rankOB, algoSmartAssist, previousDayLevels, smcBrief, fvgDetector, sessionRanges, mtfBias, positionSizer]
     }
 
     func tool(named name: String) -> MCPTool? {
@@ -450,6 +450,371 @@ struct MCPToolbox {
                 if args["include_instructions"]?.boolValue ?? true {
                     out["instructions"] = .string(PromptBuilder.systemSMCDesk)
                 }
+                return .object(out)
+            }
+        )
+    }
+
+    // MARK: - fvg_detector
+
+    private var fvgDetector: MCPTool {
+        MCPTool(
+            name: "fvg_detector",
+            title: "Fair Value Gap detector",
+            description: """
+            Scans 3-bar Fair Value Gaps (Bullish & Bearish FVGs), calculates \
+            gap size and gap %, and checks if subsequent price action has \
+            mitigated the gap.
+            """,
+            inputSchema: MCPSchema.object(
+                properties: [
+                    "symbol": MCPSchema.string("Symbol id from list_symbols."),
+                    "source": MCPSchema.string("Data source feed.", default: "derived"),
+                    "timeframe": MCPSchema.string("Bar size.", enum: Timeframe.allCases.map(\.rawValue), default: "1h"),
+                    "limit": MCPSchema.integer("How many bars to scan.", min: 10, max: maxBars, default: 300),
+                    "bars": MCPSchema.integer("Alias for limit.", min: 10, max: maxBars),
+                    "min_gap_pct": MCPSchema.number("Minimum gap size as a percentage threshold (e.g. 0.001 for 0.1%).", min: 0, default: 0.001),
+                    "max_events": MCPSchema.integer("Maximum gap events to return.", min: 1, max: 50, default: 10),
+                ],
+                required: ["symbol"]
+            ),
+            run: { args in
+                let barCount = args["limit"]?.intValue ?? args["bars"]?.intValue ?? 300
+                var modifiedArgs = args
+                modifiedArgs["bars"] = .number(Double(barCount))
+                let req = try self.parseSeriesRequest(modifiedArgs, defaultBars: 300, minBars: 10, defaultTimeframe: .h1)
+
+                let rawMinGap = args["min_gap_pct"]?.doubleValue ?? 0.001
+                let thresholdPct = rawMinGap <= 0.05 ? rawMinGap * 100.0 : rawMinGap
+                let maxEvents = args["max_events"]?.intValue ?? 10
+
+                let zones = FairValueGap.compute(req.candles, threshold: thresholdPct, maxZones: maxEvents)
+                let spot = req.candles.last?.close ?? 0
+                let lastIndex = req.candles.count - 1
+
+                let rows: [JSONValue] = zones.map { z in
+                    let size = z.high - z.low
+                    let pct = z.low > 0 ? (size / z.low) : 0
+                    return .object([
+                        "direction": .string(z.isBullish ? "bullish" : "bearish"),
+                        "high": .number(z.high),
+                        "low": .number(z.low),
+                        "mid": .number(z.mid),
+                        "gap_size": .number(size),
+                        "gap_pct": .number(pct),
+                        "is_mitigated": .bool(z.isMitigated),
+                        "bars_ago": .number(Double(max(0, lastIndex - z.index))),
+                    ])
+                }
+
+                return .object([
+                    "symbol": .string(req.pairID),
+                    "source": .string(args["source"]?.stringValue ?? "derived"),
+                    "timeframe": .string(req.timeframe.rawValue),
+                    "last_close": .number(spot),
+                    "total_gaps": .number(Double(zones.count)),
+                    "gaps": .array(rows),
+                ])
+            }
+        )
+    }
+
+    // MARK: - session_ranges
+
+    private var sessionRanges: MCPTool {
+        MCPTool(
+            name: "session_ranges",
+            title: "Trading session ranges",
+            description: """
+            Tracks Asia (00:00–08:00 UTC), London (07:00–16:00 UTC), and \
+            NY (13:00–21:00 UTC) session Highs, Lows, Mids (50% equilibrium), \
+            Range, and flags if current spot price has swept session extremes.
+            """,
+            inputSchema: MCPSchema.object(
+                properties: [
+                    "symbol": MCPSchema.string("Symbol id from list_symbols."),
+                    "source": MCPSchema.string("Data source feed.", default: "derived"),
+                    "timeframe": MCPSchema.string("Bar size.", enum: Timeframe.allCases.map(\.rawValue), default: "15m"),
+                    "lookback_days": MCPSchema.integer("How many days of session history to analyze.", min: 1, max: 30, default: 5),
+                ],
+                required: ["symbol"]
+            ),
+            run: { args in
+                let lookbackDays = args["lookback_days"]?.intValue ?? 5
+                let tfArg = args["timeframe"]?.stringValue ?? "15m"
+                let tf = Timeframe(rawValue: tfArg) ?? .m15
+                let estimatedBars = Int(Double(lookbackDays * 86400) / tf.seconds) + 100
+
+                var modifiedArgs = args
+                modifiedArgs["bars"] = .number(Double(min(estimatedBars, self.maxBars)))
+                let req = try self.parseSeriesRequest(modifiedArgs, defaultBars: min(estimatedBars, 600), minBars: 20, defaultTimeframe: .m15)
+
+                let utcDefs = [
+                    TradingSessions.SessionDef(id: "asia", name: "Asia", session: "0000-0800", timezone: "UTC", color: .blue),
+                    TradingSessions.SessionDef(id: "london", name: "London", session: "0700-1600", timezone: "UTC", color: .orange),
+                    TradingSessions.SessionDef(id: "newYork", name: "New York", session: "1300-2100", timezone: "UTC", color: .green),
+                ]
+
+                let runs = TradingSessions.compute(req.candles, defs: utcDefs)
+                let spot = req.candles.last?.close ?? 0
+                let totalBars = req.candles.count
+
+                let rows: [JSONValue] = runs.suffix(lookbackDays * 3).map { r in
+                    var isHighSwept = false
+                    var isLowSwept = false
+                    if r.end + 1 < totalBars {
+                        let subsequent = req.candles[(r.end + 1)...]
+                        isHighSwept = subsequent.contains(where: { $0.high > r.high })
+                        isLowSwept = subsequent.contains(where: { $0.low < r.low })
+                    }
+
+                    let startTime = ISO8601DateFormatter().string(from: req.candles[r.start].bucketStart)
+                    let endTime = ISO8601DateFormatter().string(from: req.candles[r.end].bucketStart)
+
+                    return .object([
+                        "session": .string(r.sessionID),
+                        "name": .string(r.name),
+                        "start_time": .string(startTime),
+                        "end_time": .string(endTime),
+                        "high": .number(r.high),
+                        "low": .number(r.low),
+                        "mid": .number((r.high + r.low) / 2.0),
+                        "range": .number(r.range),
+                        "open": .number(r.open),
+                        "close": .number(r.close),
+                        "is_high_swept": .bool(isHighSwept),
+                        "is_low_swept": .bool(isLowSwept),
+                    ])
+                }
+
+                return .object([
+                    "symbol": .string(req.pairID),
+                    "source": .string(args["source"]?.stringValue ?? "derived"),
+                    "timeframe": .string(req.timeframe.rawValue),
+                    "last_close": .number(spot),
+                    "sessions": .array(rows),
+                ])
+            }
+        )
+    }
+
+    // MARK: - mtf_bias
+
+    private var mtfBias: MCPTool {
+        MCPTool(
+            name: "mtf_bias",
+            title: "Multi-timeframe directional bias",
+            description: """
+            Evaluates price vs. EMA20 & EMA50 alignment across 6 timeframes \
+            (1m, 5m, 15m, 1h, 4h, 1d) to output an overall directional bias \
+            (Strongly Bullish, Bullish, Neutral, Bearish, Strongly Bearish).
+            """,
+            inputSchema: MCPSchema.object(
+                properties: [
+                    "symbol": MCPSchema.string("Symbol id from list_symbols."),
+                    "source": MCPSchema.string("Data source feed.", default: "derived"),
+                    "limit": MCPSchema.integer("Bar history limit per timeframe.", min: 60, max: maxBars, default: 200),
+                    "bars": MCPSchema.integer("Alias for limit.", min: 60, max: maxBars),
+                ],
+                required: ["symbol"]
+            ),
+            run: { args in
+                guard let symbolArg = args["symbol"]?.stringValue, !symbolArg.isEmpty else {
+                    throw JSONRPCError.invalidParams("`symbol` is required. Call list_symbols for valid ids.")
+                }
+                let needle = symbolArg.lowercased()
+                guard let def = TradingPair.catalog.first(where: {
+                    $0.id.lowercased() == needle || $0.symbol.lowercased() == needle
+                }) else {
+                    let known = TradingPair.catalog.map(\.id).joined(separator: ", ")
+                    throw JSONRPCError.invalidParams("Unknown symbol \"\(symbolArg)\". Known symbols: \(known).")
+                }
+
+                let limit = args["limit"]?.intValue ?? args["bars"]?.intValue ?? 200
+                let timeframesToScan: [Timeframe] = [.m1, .m5, .m15, .h1, .h4, .d1]
+
+                var tfReports: [JSONValue] = []
+                var totalScore = 0
+
+                for tf in timeframesToScan {
+                    let until = Date()
+                    let since = until.addingTimeInterval(-tf.seconds * Double(limit) * 3)
+                    let loaded = OHLCCandleLoader.load(
+                        repo: self.repo,
+                        pairID: def.id,
+                        tf: tf,
+                        since: since,
+                        until: until,
+                        dropClosedDays: def.category != .crypto
+                    )
+
+                    guard loaded.count >= 50 else {
+                        tfReports.append(.object([
+                            "timeframe": .string(tf.rawValue),
+                            "status": .string("insufficient_data"),
+                        ]))
+                        continue
+                    }
+
+                    let candles = Array(loaded.suffix(limit))
+                    let closes = candles.map(\.close)
+                    let ema20s = Self.emaSeries(closes, period: 20)
+                    let ema50s = Self.emaSeries(closes, period: 50)
+
+                    guard let lastClose = closes.last,
+                          let lastEMA20 = ema20s.last ?? nil,
+                          let lastEMA50 = ema50s.last ?? nil else {
+                        continue
+                    }
+
+                    let score: Int
+                    let alignment: String
+                    let bias: String
+
+                    if lastClose > lastEMA20 && lastEMA20 > lastEMA50 {
+                        score = 2
+                        alignment = "bullish"
+                        bias = "Bullish"
+                    } else if lastClose < lastEMA20 && lastEMA20 < lastEMA50 {
+                        score = -2
+                        alignment = "bearish"
+                        bias = "Bearish"
+                    } else if lastClose > lastEMA20 {
+                        score = 1
+                        alignment = "mixed"
+                        bias = "Slightly Bullish"
+                    } else if lastClose < lastEMA20 {
+                        score = -1
+                        alignment = "mixed"
+                        bias = "Slightly Bearish"
+                    } else {
+                        score = 0
+                        alignment = "neutral"
+                        bias = "Neutral"
+                    }
+
+                    totalScore += score
+
+                    tfReports.append(.object([
+                        "timeframe": .string(tf.rawValue),
+                        "close": .number(lastClose),
+                        "ema20": .number(lastEMA20),
+                        "ema50": .number(lastEMA50),
+                        "alignment": .string(alignment),
+                        "bias": .string(bias),
+                        "score": .number(Double(score)),
+                    ]))
+                }
+
+                let overallBias: String
+                switch totalScore {
+                case 6...:   overallBias = "Strongly Bullish"
+                case 2...5:  overallBias = "Bullish"
+                case -1...1: overallBias = "Neutral"
+                case -5...(-2): overallBias = "Bearish"
+                default:     overallBias = "Strongly Bearish"
+                }
+
+                return .object([
+                    "symbol": .string(def.id),
+                    "source": .string(args["source"]?.stringValue ?? "derived"),
+                    "overall_bias": .string(overallBias),
+                    "composite_score": .number(Double(totalScore)),
+                    "timeframes": .array(tfReports),
+                ])
+            }
+        )
+    }
+
+    /// Helper for calculation of EMA series over array of Double values.
+    private static func emaSeries(_ values: [Double], period: Int) -> [Double?] {
+        guard values.count >= period, period > 0 else { return Array(repeating: nil, count: values.count) }
+        var result: [Double?] = Array(repeating: nil, count: values.count)
+        let k = 2.0 / Double(period + 1)
+        let sma = values[0..<period].reduce(0, +) / Double(period)
+        result[period - 1] = sma
+        var prev = sma
+        for i in period..<values.count {
+            let current = values[i] * k + prev * (1 - k)
+            result[i] = current
+            prev = current
+        }
+        return result
+    }
+
+    // MARK: - position_sizer
+
+    private var positionSizer: MCPTool {
+        MCPTool(
+            name: "position_sizer",
+            title: "Position size and risk calculator",
+            description: """
+            Calculates unit position size, lot size, monetary risk ($), \
+            and Risk-to-Reward (R:R) ratio based on account balance, risk %, \
+            entry price, stop loss, take profit, and contract size.
+            """,
+            inputSchema: MCPSchema.object(
+                properties: [
+                    "account_balance": MCPSchema.number("Account balance currency units.", default: 10000),
+                    "risk_pct": MCPSchema.number("Percentage of account to risk per trade.", default: 1.0),
+                    "entry_price": MCPSchema.number("Entry price level."),
+                    "stop_loss": MCPSchema.number("Stop loss price level."),
+                    "take_profit": MCPSchema.number("Take profit price level (optional)."),
+                    "contract_size": MCPSchema.number("Units per 1 lot (e.g. 100 for gold, 100000 for forex).", default: 100),
+                ],
+                required: ["entry_price", "stop_loss"]
+            ),
+            run: { args in
+                guard let entry = args["entry_price"]?.doubleValue else {
+                    throw JSONRPCError.invalidParams("`entry_price` parameter is required.")
+                }
+                guard let sl = args["stop_loss"]?.doubleValue else {
+                    throw JSONRPCError.invalidParams("`stop_loss` parameter is required.")
+                }
+                let balance = args["account_balance"]?.doubleValue ?? 10000.0
+                let riskPct = args["risk_pct"]?.doubleValue ?? 1.0
+                let contractSize = args["contract_size"]?.doubleValue ?? 100.0
+
+                let slDistance = abs(entry - sl)
+                guard slDistance > 0 else {
+                    throw JSONRPCError.invalidParams("`stop_loss` cannot equal `entry_price`.")
+                }
+
+                let monetaryRisk = balance * (riskPct / 100.0)
+                let units = monetaryRisk / slDistance
+                let lots = contractSize > 0 ? (units / contractSize) : 0
+                let positionValue = units * entry
+                let direction = entry > sl ? "long" : "short"
+
+                var out: [String: JSONValue] = [
+                    "account_balance": .number(balance),
+                    "risk_pct": .number(riskPct),
+                    "monetary_risk": .number(monetaryRisk),
+                    "entry_price": .number(entry),
+                    "stop_loss": .number(sl),
+                    "sl_distance": .number(slDistance),
+                    "direction": .string(direction),
+                    "units": .number(units),
+                    "lots": .number(lots),
+                    "contract_size": .number(contractSize),
+                    "position_value": .number(positionValue),
+                ]
+
+                if let tp = args["take_profit"]?.doubleValue {
+                    let tpDistance = abs(tp - entry)
+                    let rrRatio = tpDistance / slDistance
+                    let potentialReward = monetaryRisk * rrRatio
+                    out["take_profit"] = .number(tp)
+                    out["tp_distance"] = .number(tpDistance)
+                    out["rr_ratio"] = .number(rrRatio)
+                    out["potential_reward"] = .number(potentialReward)
+                } else {
+                    out["take_profit"] = .null
+                    out["tp_distance"] = .null
+                    out["rr_ratio"] = .null
+                    out["potential_reward"] = .null
+                }
+
                 return .object(out)
             }
         )

@@ -179,6 +179,13 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     case helixOBCombo
     /// ALGOSMART ASSIST v2 — Smart Money Concepts (SMC) structure, POI order blocks, IDM, CHoCH, BOS, and live extension lines.
     case algoSmartAssist
+    /// AMD — Accumulation / Manipulation / Distribution. Reads the phase
+    /// rotation rather than a pattern: a contracted base, a liquidity
+    /// sweep beyond one of its edges that gets reclaimed, the
+    /// displacement leg that follows, and the stall at the end of it.
+    /// The fair value gap left inside the displacement is the entry
+    /// (see `AMDCycle` + ChartView's `amdMarks`).
+    case amdCycle
 
     var id: String { rawValue }
 
@@ -212,6 +219,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .volumeFilteredOrderBlock: return "Volume-Filtered OB"
         case .helixOBCombo:   return "Helix+OB Combo"
         case .algoSmartAssist: return "ALGOSMART ASSIST v2"
+        case .amdCycle:       return "AMD · Accum / Manip / Distrib"
         }
     }
 
@@ -245,6 +253,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .volumeFilteredOrderBlock: return Color(red: 0.34, green: 0.84, blue: 0.42)
         case .helixOBCombo:   return Color(red: 0.15, green: 0.78, blue: 0.85)
         case .algoSmartAssist: return Color(red: 0.95, green: 0.82, blue: 0.20)
+        case .amdCycle:       return Color(red: 0.55, green: 0.72, blue: 1.00)
         }
     }
 
@@ -633,6 +642,49 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                 .bool(key: "showSCOB", label: "Color Bull/Bear SCOB", default: true),
                 .bool(key: "showISB", label: "Color Inside Bar", default: false),
                 .bool(key: "showOSB", label: "Color Outside Bar", default: false),
+            ]
+        case .amdCycle:
+            return [
+                .double(key: "atrPeriod", label: "ATR period", default: 14, step: 1, range: 2...100),
+                // ── Accumulation ──────────────────────────────────────
+                .double(key: "minRangeBars", label: "Min accumulation candles", default: 6, step: 1, range: 3...50),
+                .double(key: "maxRangeBars", label: "Max accumulation candles", default: 60, step: 1, range: 5...300),
+                .double(key: "maxRangeATR", label: "Max range height (× ATR)", default: 2.0, step: 0.1, range: 0.2...10),
+                .bool(key: "requireContraction", label: "Require volatility contraction", default: true),
+                .double(key: "contractionRatio", label: "Contraction vs prior candles", default: 0.85, step: 0.05, range: 0.1...1.5),
+                // ── Manipulation ──────────────────────────────────────
+                .double(key: "minSweepATR", label: "Min sweep beyond edge (× ATR)", default: 0.15, step: 0.05, range: 0...2),
+                .double(key: "maxManipulationBars", label: "Sweep window (bars)", default: 12, step: 1, range: 1...60),
+                .double(key: "maxReclaimBars", label: "Reclaim deadline (bars)", default: 5, step: 1, range: 0...30),
+                // ── Distribution / expansion ──────────────────────────
+                .double(key: "minExpansionATR", label: "Min expansion past range (× ATR)", default: 0.5, step: 0.1, range: 0...5),
+                .double(key: "maxExpansionBars", label: "Expansion deadline (bars)", default: 25, step: 1, range: 1...100),
+                .double(key: "distributionBars", label: "Stall bars → distribution", default: 5, step: 1, range: 1...30),
+                // ── Entry FVG ─────────────────────────────────────────
+                .bool(key: "requireFVG", label: "Require entry FVG", default: true),
+                .enum(key: "gapPick", label: "Entry gap", default: "first", options: [
+                    ParamOption(label: "First in the leg (best R)", value: "first"),
+                    ParamOption(label: "Last in the leg (fills first)", value: "last"),
+                    ParamOption(label: "Widest gap", value: "largest"),
+                ]),
+                .enum(key: "entryModel", label: "Entry at", default: "mid", options: [
+                    ParamOption(label: "Near edge", value: "proximal"),
+                    ParamOption(label: "Gap mid", value: "mid"),
+                    ParamOption(label: "Far edge", value: "distal"),
+                ]),
+                .double(key: "stopBufferATR", label: "Stop buffer past sweep (× ATR)", default: 0.25, step: 0.05, range: 0...3),
+                .double(key: "tp1R", label: "TP1 (R)", default: 1.0, step: 0.25, range: 0.25...10),
+                .double(key: "tp2R", label: "TP2 (R)", default: 2.0, step: 0.25, range: 0.5...20),
+                .double(key: "minRR", label: "Min R:R (0 = off)", default: 0, step: 0.25, range: 0...10),
+                // ── Display ───────────────────────────────────────────
+                .bool(key: "showAccumulation", label: "Show accumulation range", default: true),
+                .bool(key: "showManipulation", label: "Show sweep + reclaim", default: true),
+                .bool(key: "showDistribution", label: "Show expansion / distribution", default: true),
+                .bool(key: "showGap", label: "Show entry FVG", default: true),
+                .bool(key: "showPlan", label: "Show entry / SL / TP", default: true),
+                .bool(key: "showLabels", label: "Show phase labels", default: true),
+                .bool(key: "showFailed", label: "Show failed cycles", default: false),
+                .double(key: "maxCycles", label: "Cycles to show", default: 4, step: 1, range: 1...20),
             ]
         }
     }

@@ -186,6 +186,7 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(names, [
             "list_symbols", "history_data", "rank_ob",
             "algosmart_assist", "previous_day_levels", "smc_brief",
+            "fvg_detector", "session_ranges", "mtf_bias", "position_sizer",
         ])
         // A tool with no schema or description is unusable by an agent —
         // the listing IS the documentation.
@@ -314,6 +315,59 @@ final class MCPServerTests: XCTestCase {
         XCTAssertNotNil(out["instructions"]?.stringValue)
     }
 
+    func testFVGDetectorReturnsGaps() throws {
+        let (port, _) = try startServer()
+        let out = try callTool(port: port, "fvg_detector", .object([
+            "symbol": .string("ounce"),
+            "timeframe": .string("1h"),
+            "limit": .number(300),
+        ]))
+        XCTAssertEqual(out["symbol"]?.stringValue, "ounce")
+        XCTAssertNotNil(out["total_gaps"]?.doubleValue)
+        XCTAssertNotNil(out["gaps"]?.arrayValue)
+    }
+
+    func testSessionRangesReturnsRuns() throws {
+        let (port, _) = try startServer()
+        let out = try callTool(port: port, "session_ranges", .object([
+            "symbol": .string("ounce"),
+            "timeframe": .string("5m"),
+            "lookback_days": .number(3),
+        ]))
+        XCTAssertEqual(out["symbol"]?.stringValue, "ounce")
+        XCTAssertNotNil(out["sessions"]?.arrayValue)
+    }
+
+    func testMTFBiasReturnsOverallRating() throws {
+        let (port, _) = try startServer()
+        let out = try callTool(port: port, "mtf_bias", .object([
+            "symbol": .string("ounce"),
+            "limit": .number(200),
+        ]))
+        XCTAssertEqual(out["symbol"]?.stringValue, "ounce")
+        XCTAssertNotNil(out["overall_bias"]?.stringValue)
+        XCTAssertNotNil(out["timeframes"]?.arrayValue)
+    }
+
+    func testPositionSizerCalculatesLotsAndRR() throws {
+        let (port, _) = try startServer()
+        let out = try callTool(port: port, "position_sizer", .object([
+            "account_balance": .number(10000),
+            "risk_pct": .number(1.0),
+            "entry_price": .number(2000.0),
+            "stop_loss": .number(1990.0),
+            "take_profit": .number(2020.0),
+            "contract_size": .number(100),
+        ]))
+        XCTAssertEqual(out["monetary_risk"]?.doubleValue, 100.0)
+        XCTAssertEqual(out["sl_distance"]?.doubleValue, 10.0)
+        XCTAssertEqual(out["units"]?.doubleValue, 10.0)
+        XCTAssertEqual(out["lots"]?.doubleValue, 0.1)
+        XCTAssertEqual(out["direction"]?.stringValue, "long")
+        XCTAssertEqual(out["rr_ratio"]?.doubleValue, 2.0)
+        XCTAssertEqual(out["potential_reward"]?.doubleValue, 200.0)
+    }
+
     // MARK: - Errors
 
     func testUnknownSymbolIsAToolErrorNotATransportError() throws {
@@ -413,6 +467,7 @@ final class MCPServerTests: XCTestCase {
         }.resume()
         wait(for: [done], timeout: 10)
         XCTAssertEqual(payload["status"]?.stringValue, "ok")
-        XCTAssertEqual(payload["tools"]?.intValue, 6)
+        XCTAssertEqual(payload["tools"]?.intValue, 10)
     }
 }
+
