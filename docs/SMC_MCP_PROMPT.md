@@ -111,7 +111,12 @@ reports a blocker, tell me that instead of inventing a setup.
 
 ## Other timeframes
 
-- **Scalping** — `timeframe="5m"`, `htf_timeframe="30m"`, `bars=600`.
-- **Swing** — `timeframe="1h"`, `htf_timeframe="4h"`, `bars=1000`.
+These pairings mirror the mode table in
+[`prompt/SMC_SYSTEM_PROMPT.md`](../prompt/SMC_SYSTEM_PROMPT.md), which is the
+source of truth for mode, session and risk rules. Keep the two in sync.
+
+- **Scalping** — `timeframe="5m"`, `htf_timeframe="15m"`, `bars=800`.
+- **Intraday** — `timeframe="15m"`, `htf_timeframe="1h"`, `bars=800` (default).
+- **Swing** — `timeframe="4h"`, `htf_timeframe="1d"`, `bars=1000`.
 - **Other symbols** — swap `"ounce"` for `btc`, `eth`, `sol`, `wti`.
   Call `list_symbols` for the full catalog.
