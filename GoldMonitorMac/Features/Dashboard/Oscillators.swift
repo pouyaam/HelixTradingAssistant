@@ -195,23 +195,6 @@ struct OscillatorConfig: Codable, Equatable {
     var sp2lRiskReward: Double = 1.0
     var sp2lTargetCount: Int = 1
 
-    // Pin-bar confirmation for SP2L pullbacks and BTB broken-level retests.
-    var pinBarEnableSP2L: Bool = true
-    var pinBarEnableBTB: Bool = true
-    var pinBarATRPeriod: Int = 14
-    var pinBarMinWickBodyRatio: Double = 2.0
-    var pinBarMinWickRangeRatio: Double = 0.55
-    var pinBarMaxBodyRangeRatio: Double = 0.35
-    var pinBarMinCloseLocation: Double = 0.65
-    var pinBarOppositeWickDominance: Double = 1.5
-    var pinBarTouchToleranceATR: Double = 0.10
-    var pinBarStopBufferATR: Double = 0.05
-    var pinBarMaxConfirmationBars: Int = 8
-    var pinBarBTBLookbackBars: Int = 12
-    var pinBarMinBreakoutBodyATR: Double = 0.50
-    var pinBarRiskReward: Double = 2.0
-    var pinBarMaxContinuationBars: Int = 20
-
     // MicroMap continuation strategy. Entries and stops are confirmed by
     // candle close; targets use the candle high/low after entry.
     var microMapATRPeriod: Int = 14
@@ -444,21 +427,6 @@ struct OscillatorConfig: Codable, Equatable {
         sp2lMaxContinuationBars = try c.decodeIfPresent(Int.self, forKey: .sp2lMaxContinuationBars) ?? 10
         sp2lRiskReward     = try c.decodeIfPresent(Double.self, forKey: .sp2lRiskReward)     ?? 1.0
         sp2lTargetCount    = try c.decodeIfPresent(Int.self, forKey: .sp2lTargetCount)       ?? 1
-        pinBarEnableSP2L   = try c.decodeIfPresent(Bool.self,   forKey: .pinBarEnableSP2L)   ?? true
-        pinBarEnableBTB    = try c.decodeIfPresent(Bool.self,   forKey: .pinBarEnableBTB)    ?? true
-        pinBarATRPeriod    = try c.decodeIfPresent(Int.self,    forKey: .pinBarATRPeriod)    ?? 14
-        pinBarMinWickBodyRatio = try c.decodeIfPresent(Double.self, forKey: .pinBarMinWickBodyRatio) ?? 2.0
-        pinBarMinWickRangeRatio = try c.decodeIfPresent(Double.self, forKey: .pinBarMinWickRangeRatio) ?? 0.55
-        pinBarMaxBodyRangeRatio = try c.decodeIfPresent(Double.self, forKey: .pinBarMaxBodyRangeRatio) ?? 0.35
-        pinBarMinCloseLocation = try c.decodeIfPresent(Double.self, forKey: .pinBarMinCloseLocation) ?? 0.65
-        pinBarOppositeWickDominance = try c.decodeIfPresent(Double.self, forKey: .pinBarOppositeWickDominance) ?? 1.5
-        pinBarTouchToleranceATR = try c.decodeIfPresent(Double.self, forKey: .pinBarTouchToleranceATR) ?? 0.10
-        pinBarStopBufferATR = try c.decodeIfPresent(Double.self, forKey: .pinBarStopBufferATR) ?? 0.05
-        pinBarMaxConfirmationBars = try c.decodeIfPresent(Int.self, forKey: .pinBarMaxConfirmationBars) ?? 8
-        pinBarBTBLookbackBars = try c.decodeIfPresent(Int.self, forKey: .pinBarBTBLookbackBars) ?? 12
-        pinBarMinBreakoutBodyATR = try c.decodeIfPresent(Double.self, forKey: .pinBarMinBreakoutBodyATR) ?? 0.50
-        pinBarRiskReward = try c.decodeIfPresent(Double.self, forKey: .pinBarRiskReward) ?? 2.0
-        pinBarMaxContinuationBars = try c.decodeIfPresent(Int.self, forKey: .pinBarMaxContinuationBars) ?? 20
         microMapATRPeriod  = try c.decodeIfPresent(Int.self,    forKey: .microMapATRPeriod)  ?? 14
         microMapMinSpikeBars = try c.decodeIfPresent(Int.self,  forKey: .microMapMinSpikeBars) ?? 2
         microMapMaxSpikeBars = try c.decodeIfPresent(Int.self,  forKey: .microMapMaxSpikeBars) ?? 6
@@ -653,26 +621,6 @@ struct OscillatorConfig: Codable, Equatable {
         config.gradeScaledTargets = robStratGradeScale
         config.tradeBreakers = robStratBreakers
         config.minRR = robStratMinRR
-        return config
-    }
-
-    var pinBarComboConfiguration: PinBarComboSetup.Configuration {
-        var config = PinBarComboSetup.Configuration()
-        config.enableSP2L = pinBarEnableSP2L
-        config.enableBTB = pinBarEnableBTB
-        config.atrPeriod = pinBarATRPeriod
-        config.minWickBodyRatio = pinBarMinWickBodyRatio
-        config.minWickRangeRatio = pinBarMinWickRangeRatio
-        config.maxBodyRangeRatio = pinBarMaxBodyRangeRatio
-        config.minCloseLocation = pinBarMinCloseLocation
-        config.oppositeWickDominance = pinBarOppositeWickDominance
-        config.touchToleranceATR = pinBarTouchToleranceATR
-        config.stopBufferATR = pinBarStopBufferATR
-        config.maxConfirmationBars = pinBarMaxConfirmationBars
-        config.btbLookbackBars = pinBarBTBLookbackBars
-        config.minBreakoutBodyATR = pinBarMinBreakoutBodyATR
-        config.riskReward = pinBarRiskReward
-        config.maxContinuationBars = pinBarMaxContinuationBars
         return config
     }
 

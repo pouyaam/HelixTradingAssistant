@@ -922,6 +922,37 @@ final class ChartDerivedCache: ObservableObject {
         }
     }
 
+    /// SP2L + Pro BTB × Ranked OB. Keyed on the trailing bar's OHLC as
+    /// well as bar identity, like `AMDSig`: the live bar can be the one
+    /// that trades into an armed zone, and the trigger is what the whole
+    /// overlay is about — waiting for the bar to close would hide it.
+    private struct RankedSP2LBTBSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let lastHigh: Double
+        let lastLow: Double
+        let lastClose: Double
+        let config: RankedSP2LBTB.Configuration
+    }
+    private let rankedSP2LBTBSlot = Slot<RankedSP2LBTBSig, RankedSP2LBTB.Output>(.empty)
+
+    func rankedSP2LBTB(candles: [Candle], config: RankedSP2LBTB.Configuration) -> RankedSP2LBTB.Output {
+        let last = candles.last
+        let sig = RankedSP2LBTBSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: last?.id.timeIntervalSince1970 ?? 0,
+            lastHigh: last?.high ?? 0,
+            lastLow: last?.low ?? 0,
+            lastClose: last?.close ?? 0,
+            config: config
+        )
+        return resolve(rankedSP2LBTBSlot, signature: sig) {
+            RankedSP2LBTB.compute(candles, configuration: config)
+        }
+    }
+
     // ── Volume Profile ─────────────────────────────────────────────────
 
     /// Includes the trailing bar's timestamp/close/volume so the 1 Hz
@@ -1216,48 +1247,6 @@ final class ChartDerivedCache: ObservableObject {
         }
     }
 
-    // ── Pin Bar · SP2L + BTB ────────────────────────────────────────
-
-    private struct PinBarComboSig: Equatable {
-        let count: Int
-        let firstTS: TimeInterval
-        let lastTS: TimeInterval
-        let lastOpen: Double
-        let lastHigh: Double
-        let lastLow: Double
-        let lastClose: Double
-        let sp2lHash: Int
-        let config: PinBarComboSetup.Configuration
-    }
-    private let pinBarComboSlot = Slot<PinBarComboSig, [PinBarComboSetup.Result]>([])
-
-    func pinBarComboSetup(
-        candles: [Candle],
-        sp2lResults: [SP2LSetup.Result],
-        config: OscillatorConfig
-    ) -> [PinBarComboSetup.Result] {
-        let last = candles.last
-        let strategyConfig = config.pinBarComboConfiguration
-        let signature = PinBarComboSig(
-            count: candles.count,
-            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
-            lastTS: last?.id.timeIntervalSince1970 ?? 0,
-            lastOpen: last?.open ?? 0,
-            lastHigh: last?.high ?? 0,
-            lastLow: last?.low ?? 0,
-            lastClose: last?.close ?? 0,
-            sp2lHash: sp2lResults.hashValue,
-            config: strategyConfig
-        )
-        return resolve(pinBarComboSlot, signature: signature) {
-            PinBarComboSetup.compute(
-                candles,
-                sp2lResults: sp2lResults,
-                configuration: strategyConfig
-            )
-        }
-    }
-
     // ── MicroMap Strategy ────────────────────────────────────────────
 
     private struct MicroMapSig: Equatable {
@@ -1361,12 +1350,12 @@ final class ChartDerivedCache: ObservableObject {
         let helixOBComboOutput: HelixOBCombo.Output
         let algoSmartAssistOutput: AlgoSmartAssist.Output
         var amdCycles: [AMDCycle.Cycle] = []
+        var rankedSP2LBTB: RankedSP2LBTB.Output = .empty
         let chochZones: [ChangeOfCharacter.Zone]
         let htfChochZones: [ChangeOfCharacter.DatedZone]
         let sessionRuns: [TradingSessions.SessionRun]
         let nySetupResults: [NYOpenSetup.Result]
         let sp2lResults: [SP2LSetup.Result]
-        let pinBarComboResults: [PinBarComboSetup.Result]
         let microMapResults: [MicroMapSetup.Result]
         let mtrResults: [MTRSetup.Result]
         let volumeProfileSessions: [VolumeProfile.SessionVP]
@@ -1405,12 +1394,14 @@ final class ChartDerivedCache: ObservableObject {
         /// Count alone won't do: a live cycle's plan levels and phase
         /// move while the cycle set stays the same size.
         let amdKeys: [String]
+        /// Same reasoning as `amdKeys`: a live setup's plan levels move
+        /// while the setup count stays put.
+        let rankedSP2LBTBKeys: [String]
         let chochCount: Int
         let htfChochCount: Int
         let sessionCount: Int
         let nySetupCount: Int
         let sp2lCount: Int
-        let pinBarCount: Int
         let microMapCount: Int
         let mtrCount: Int
         let vpSessionCount: Int
@@ -1461,12 +1452,14 @@ final class ChartDerivedCache: ObservableObject {
             amdKeys: data.amdCycles.map {
                 "\($0.id)|\($0.phase.rawValue)|\($0.gap?.takeProfit2 ?? 0)"
             },
+            rankedSP2LBTBKeys: data.rankedSP2LBTB.setups.map {
+                "\($0.id)|\($0.status.rawValue)|\($0.takeProfit ?? 0)"
+            } + data.rankedSP2LBTB.orderBlocks.map(\.id),
             chochCount: data.chochZones.count,
             htfChochCount: data.htfChochZones.count,
             sessionCount: data.sessionRuns.count,
             nySetupCount: data.nySetupResults.count,
             sp2lCount: data.sp2lResults.count,
-            pinBarCount: data.pinBarComboResults.count,
             microMapCount: data.microMapResults.count,
             mtrCount: data.mtrResults.count,
             vpSessionCount: data.volumeProfileSessions.count,
@@ -1600,6 +1593,21 @@ final class ChartDerivedCache: ObservableObject {
                     if v > hi { hi = v }
                 }
             }
+            for setup in data.rankedSP2LBTB.setups {
+                var values = [setup.zoneTop, setup.zoneBottom, setup.entryLevel]
+                if let level = setup.brokenLevel { values.append(level) }
+                for v in [setup.entry, setup.stopLoss, setup.takeProfit].compactMap({ $0 }) {
+                    values.append(v)
+                }
+                for v in values {
+                    if v < lo { lo = v }
+                    if v > hi { hi = v }
+                }
+            }
+            for block in data.rankedSP2LBTB.orderBlocks {
+                if block.bottom < lo { lo = block.bottom }
+                if block.top > hi { hi = block.top }
+            }
             // Ichimoku lines — Span B (widest window) and Kijun bound the
             // system; scanning both spans covers the cloud extremes too.
             let ichi = data.ichimokuOutput
@@ -1630,15 +1638,6 @@ final class ChartDerivedCache: ObservableObject {
                 ] + r.takeProfits(count: data.indicatorConfig.sp2lTargetCount) {
                     if v < lo { lo = v }
                     if v > hi { hi = v }
-                }
-            }
-            for result in data.pinBarComboResults {
-                for value in [
-                    result.level, result.pinBarLow, result.pinBarHigh,
-                    result.entry, result.stopLoss, result.takeProfit
-                ] {
-                    if value < lo { lo = value }
-                    if value > hi { hi = value }
                 }
             }
             for result in data.microMapResults {

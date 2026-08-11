@@ -1,0 +1,1939 @@
+{
+  "pd_levels": {
+    "has_real_volume": true,
+    "pdh": 4304.31,
+    "timeframe": "15m",
+    "val": 4253.806875,
+    "pdl": 4223.505,
+    "range": 80.80500000000029,
+    "unswept_levels": [
+      "PDL"
+    ],
+    "open": 4249.5,
+    "mid": 4263.9075,
+    "last_close": 4341.935,
+    "session_end": "2026-08-06T20:45:00Z",
+    "available": true,
+    "symbol": "ounce",
+    "poc": 4265.5909375,
+    "price_location": "above PDH",
+    "vah": 4294.209375,
+    "close": 4240.75,
+    "session_start": "2026-08-05T22:00:00Z"
+  },
+  "sessions": {
+    "symbol": "ounce",
+    "source": "derived",
+    "last_close": 4341.935,
+    "sessions": [
+      {
+        "open": 4252.42,
+        "high": 4298.945,
+        "session": "asia",
+        "end_time": "2026-08-07T07:45:00Z",
+        "close": 4290.22,
+        "start_time": "2026-08-07T00:00:00Z",
+        "is_low_swept": false,
+        "range": 69.06999999999971,
+        "mid": 4264.41,
+        "name": "Asia",
+        "low": 4229.875,
+        "is_high_swept": true
+      },
+      {
+        "open": 4112.415,
+        "high": 4120.495,
+        "session": "london",
+        "end_time": "2026-07-30T15:45:00Z",
+        "close": 4108.25,
+        "start_time": "2026-07-30T14:00:00Z",
+        "is_low_swept": true,
+        "range": 37.22499999999991,
+        "mid": 4101.8825,
+        "name": "London",
+        "low": 4083.27,
+        "is_high_swept": true
+      },
+      {
+        "open": 4077.735,
+        "high": 4079.315,
+        "session": "london",
+        "end_time": "2026-07-31T15:45:00Z",
+        "close": 4045.58,
+        "is_low_swept": true,
+        "start_time": "2026-07-31T07:00:00Z",
+        "range": 58.340000000000146,
+        "mid": 4050.145,
+        "low": 4020.975,
+        "name": "London",
+        "is_high_swept": true
+      },
+      {
+        "open": 4063.95,
+        "high": 4065.305,
+        "session": "london",
+        "end_time": "2026-08-03T15:45:00Z",
+        "close": 4036.135,
+        "start_time": "2026-08-03T07:00:00Z",
+        "is_low_swept": false,
+        "range": 46.065000000000055,
+        "mid": 4042.2725,
+        "low": 4019.24,
+        "name": "London",
+        "is_high_swept": true
+      },
+      {
+        "open": 4063.58,
+        "high": 4093.88,
+        "session": "london",
+        "end_time": "2026-08-04T15:45:00Z",
+        "close": 4087.35,
+        "start_time": "2026-08-04T07:00:00Z",
+        "is_low_swept": false,
+        "range": 48.26000000000022,
+        "mid": 4069.75,
+        "name": "London",
+        "low": 4045.62,
+        "is_high_swept": true
+      },
+      {
+        "open": 4177.645,
+        "high": 4265.29,
+        "session": "london",
+        "end_time": "2026-08-05T15:45:00Z",
+        "close": 4233.025,
+        "start_time": "2026-08-05T07:00:00Z",
+        "is_low_swept": false,
+        "range": 115.01000000000022,
+        "mid": 4207.785,
+        "name": "London",
+        "low": 4150.28,
+        "is_high_swept": true
+      },
+      {
+        "open": 4256.22,
+        "high": 4284.885,
+        "session": "london",
+        "end_time": "2026-08-06T15:45:00Z",
+        "close": 4233.82,
+        "start_time": "2026-08-06T07:00:00Z",
+        "is_low_swept": true,
+        "range": 55.38000000000011,
+        "mid": 4257.195,
+        "name": "London",
+        "low": 4229.505,
+        "is_high_swept": true
+      },
+      {
+        "open": 4297.3,
+        "high": 4371.84,
+        "session": "london",
+        "end_time": "2026-08-07T15:45:00Z",
+        "close": 4341.13,
+        "is_low_swept": false,
+        "start_time": "2026-08-07T07:00:00Z",
+        "range": 88.85000000000036,
+        "mid": 4327.415,
+        "low": 4282.99,
+        "name": "London",
+        "is_high_swept": false
+      },
+      {
+        "open": 4112.415,
+        "high": 4120.495,
+        "session": "newYork",
+        "end_time": "2026-07-30T20:45:00Z",
+        "close": 4103.27,
+        "is_low_swept": true,
+        "start_time": "2026-07-30T14:00:00Z",
+        "range": 37.22499999999991,
+        "mid": 4101.8825,
+        "low": 4083.27,
+        "name": "New York",
+        "is_high_swept": true
+      },
+      {
+        "open": 4040.75,
+        "high": 4055.665,
+        "session": "newYork",
+        "end_time": "2026-07-31T20:45:00Z",
+        "close": 4045.165,
+        "start_time": "2026-07-31T13:00:00Z",
+        "is_low_swept": true,
+        "range": 34.690000000000055,
+        "mid": 4038.3199999999997,
+        "name": "New York",
+        "low": 4020.975,
+        "is_high_swept": true
+      },
+      {
+        "open": 4047.865,
+        "high": 4058.215,
+        "session": "newYork",
+        "end_time": "2026-08-03T20:45:00Z",
+        "close": 4055.33,
+        "is_low_swept": false,
+        "start_time": "2026-08-03T13:00:00Z",
+        "range": 38.975000000000364,
+        "mid": 4038.7275,
+        "low": 4019.24,
+        "name": "New York",
+        "is_high_swept": true
+      },
+      {
+        "open": 4070.925,
+        "high": 4106.475,
+        "session": "newYork",
+        "end_time": "2026-08-04T20:45:00Z",
+        "close": 4077.055,
+        "start_time": "2026-08-04T13:00:00Z",
+        "is_low_swept": false,
+        "range": 45.245000000000346,
+        "mid": 4083.8525,
+        "low": 4061.23,
+        "name": "New York",
+        "is_high_swept": true
+      },
+      {
+        "open": 4183.965,
+        "high": 4268.09,
+        "session": "newYork",
+        "end_time": "2026-08-05T20:45:00Z",
+        "close": 4247.275,
+        "is_low_swept": false,
+        "start_time": "2026-08-05T13:00:00Z",
+        "range": 84.29500000000007,
+        "mid": 4225.9425,
+        "low": 4183.795,
+        "name": "New York",
+        "is_high_swept": true
+      },
+      {
+        "open": 4250.235,
+        "high": 4275.44,
+        "session": "newYork",
+        "end_time": "2026-08-06T20:45:00Z",
+        "close": 4240.75,
+        "is_low_swept": false,
+        "start_time": "2026-08-06T13:00:00Z",
+        "range": 51.93499999999949,
+        "mid": 4249.4725,
+        "low": 4223.505,
+        "name": "New York",
+        "is_high_swept": true
+      },
+      {
+        "open": 4361.415,
+        "high": 4368.01,
+        "session": "newYork",
+        "end_time": "2026-08-07T20:45:00Z",
+        "close": 4341.935,
+        "is_low_swept": false,
+        "start_time": "2026-08-07T13:00:00Z",
+        "range": 40.55500000000029,
+        "mid": 4347.7325,
+        "name": "New York",
+        "low": 4327.455,
+        "is_high_swept": false
+      }
+    ],
+    "timeframe": "15m"
+  },
+  "brief_15m_1h": {
+    "evidence": {
+      "rankedZones": [
+        {
+          "bottom": 4278.665,
+          "maxScore": 5,
+          "grade": "B",
+          "mid": 4281.775,
+          "priceLocation": "above",
+          "distanceATR": 6.467113107237906,
+          "direction": "bearish",
+          "isBreaker": true,
+          "score": 2,
+          "barsAgo": 138,
+          "isCombined": false,
+          "top": 4284.885
+        },
+        {
+          "bottom": 4264.12,
+          "maxScore": 5,
+          "grade": "A",
+          "mid": 4269.78,
+          "distanceATR": 7.537785908252206,
+          "direction": "bearish",
+          "barsAgo": 119,
+          "priceLocation": "above",
+          "score": 4,
+          "isBreaker": true,
+          "isCombined": false,
+          "top": 4275.44
+        },
+        {
+          "bottom": 4245.88,
+          "maxScore": 5,
+          "grade": "B",
+          "mid": 4249.5625,
+          "barsAgo": 84,
+          "direction": "bearish",
+          "priceLocation": "above",
+          "isBreaker": true,
+          "score": 2,
+          "distanceATR": 10.05378197162018,
+          "isCombined": false,
+          "top": 4253.245
+        },
+        {
+          "bottom": 4150.28,
+          "barsAgo": 226,
+          "mid": 4154.4625,
+          "maxScore": 5,
+          "grade": "B",
+          "isBreaker": false,
+          "priceLocation": "above",
+          "direction": "bullish",
+          "distanceATR": 20.777513784848935,
+          "isCombined": false,
+          "poiOverlap": {
+            "bottom": 4153.875,
+            "top": 4157.895
+          },
+          "top": 4158.645,
+          "score": 3
+        },
+        {
+          "bottom": 4065.33,
+          "barsAgo": 270,
+          "mid": 4070.14,
+          "maxScore": 5,
+          "grade": "B",
+          "isBreaker": false,
+          "priceLocation": "above",
+          "direction": "bullish",
+          "distanceATR": 30.265069113688178,
+          "isCombined": false,
+          "poiOverlap": {
+            "bottom": 4061.23,
+            "top": 4071.76
+          },
+          "top": 4074.95,
+          "score": 2
+        },
+        {
+          "bottom": 4045.62,
+          "barsAgo": 318,
+          "mid": 4047.8450000000003,
+          "maxScore": 5,
+          "grade": "B",
+          "isBreaker": false,
+          "priceLocation": "above",
+          "direction": "bullish",
+          "distanceATR": 33.08543325230477,
+          "isCombined": false,
+          "poiOverlap": {
+            "top": 4050.85,
+            "bottom": 4042.72
+          },
+          "top": 4050.07,
+          "score": 3
+        }
+      ],
+      "sentinel": {
+        "htfLabel": "1h",
+        "equilibriumState": "premium",
+        "equilibrium": 4336.4275,
+        "blocker": "Waiting for IDM / liquidity sweep",
+        "context": "Bullish BOS",
+        "setups": []
+      },
+      "poiZones": [
+        {
+          "bottom": 4333.22,
+          "isMitigated": true,
+          "mid": 4335.41,
+          "barsAgo": 8,
+          "direction": "demand",
+          "side": "discount",
+          "top": 4337.6
+        },
+        {
+          "bottom": 4350.8,
+          "isMitigated": true,
+          "mid": 4359.405000000001,
+          "barsAgo": 29,
+          "direction": "supply",
+          "side": "premium",
+          "top": 4368.01
+        },
+        {
+          "bottom": 4301.015,
+          "isMitigated": false,
+          "mid": 4309.2275,
+          "barsAgo": 34,
+          "direction": "demand",
+          "side": "discount",
+          "top": 4317.44
+        },
+        {
+          "bottom": 4320.87,
+          "isMitigated": false,
+          "mid": 4323.9475,
+          "barsAgo": 36,
+          "direction": "demand",
+          "side": "discount",
+          "top": 4327.025
+        }
+      ],
+      "meta": {
+        "lastBarAt": "2026-08-07T20:45:00Z",
+        "atr14": 8.821555932917052,
+        "lastClose": 4341.935,
+        "symbol": "XAU",
+        "barCount": 800,
+        "firstBarAt": "2026-07-28T05:00:00Z",
+        "timeframe": "15m",
+        "pairID": "ounce"
+      },
+      "liveLevels": [
+        {
+          "direction": "bullish",
+          "price": 4301.015,
+          "label": "I D M - 4301.02",
+          "distanceATR": 4.63863748200131
+        },
+        {
+          "direction": "bearish",
+          "price": 4301.015,
+          "label": "CHoCH - 4301.02",
+          "distanceATR": 4.63863748200131
+        },
+        {
+          "direction": "bullish",
+          "price": 4336.4275,
+          "label": "0.5 - 4336.43",
+          "distanceATR": 0.6243229699932805
+        }
+      ],
+      "gaps": [],
+      "previousDay": {
+        "unsweptLevels": [
+          "PDL"
+        ],
+        "mid": 4263.9075,
+        "hasRealVolume": true,
+        "open": 4249.5,
+        "poc": 4265.5909375,
+        "priceLocation": "above PDH",
+        "low": 4223.505,
+        "high": 4304.31,
+        "val": 4253.806875,
+        "range": 80.80500000000029,
+        "bucketCount": 24,
+        "close": 4240.75,
+        "vah": 4294.209375
+      },
+      "structureEvents": [
+        {
+          "direction": "bullish",
+          "price": 4065.315,
+          "kind": "IDM",
+          "barsAgo": 511
+        },
+        {
+          "direction": "bullish",
+          "kind": "BOS",
+          "barsAgo": 257,
+          "price": 4120.495
+        },
+        {
+          "direction": "bullish",
+          "price": 4272.98,
+          "barsAgo": 162,
+          "kind": "IDM"
+        },
+        {
+          "direction": "bullish",
+          "kind": "BOS",
+          "barsAgo": 49,
+          "price": 4304.31
+        },
+        {
+          "direction": "bullish",
+          "kind": "IDM",
+          "barsAgo": 34,
+          "price": 4308.09
+        },
+        {
+          "direction": "bullish",
+          "kind": "BOS",
+          "price": 4327.745,
+          "barsAgo": 33
+        }
+      ]
+    },
+    "markdown": "# Higher timeframe \u2014 1 hour (bias)\n\n### Market structure \u2014 ALGOSMART ASSIST v2 (1h)\n\nConfirmed events (oldest \u2192 newest):\n\n- **Sweep** bullish @ 4166.13 \u2014 61 bars ago\n- **BOS** bullish @ 4173.10 \u2014 60 bars ago\n- **IDM** bullish @ 4243.06 \u2014 30 bars ago\n- **BOS** bullish @ 4304.31 \u2014 12 bars ago\n\nLive levels (working structure, anchored to the right edge):\n\n- **I D M - 4229.88** 4229.88 \u2014 5.7 ATR away\n- **CHoCH - 4223.51** 4223.51 \u2014 6.1 ATR away\n- **0.5 - 4297.67** 4297.67 \u2014 2.3 ATR away\n\nPOI zones:\n\n- **demand** 4260.81\u20134269.22 (mid 4265.01) \u2014 fresh, discount, 16 bars ago\n- **demand** 4252.60\u20134265.47 (mid 4259.03) \u2014 mitigated, discount, 36 bars ago\n\n### Ranked Order Blocks \u2014 graded on Volume Profile + Ichimoku confluence\n\nNearest first. Grade A \u226570% of the confluence score, B \u226540%, C below.\n\n- **B 3/5** bullish \u00b7 4223.51\u20134243.18 (mid 4233.34) \u00b7 price above, 5.0 ATR away \u00b7 27 bars ago\n- **C 1/5** bearish \u00b7 4148.59\u20134166.13 (mid 4157.36) \u00b7 price above, 9.0 ATR away \u00b7 **breaker** (already traded through \u2014 flipped role) \u00b7 281 bars ago\n- **B 2/5** bearish \u00b7 4087.20\u20134120.49 (mid 4103.85) \u00b7 price above, 11.3 ATR away \u00b7 **breaker** (already traded through \u2014 flipped role) \u00b7 144 bars ago\n- **B 3/5** bullish \u00b7 4019.24\u20134053.86 (mid 4036.55) \u00b7 price above, 14.7 ATR away \u00b7 **overlaps ALGOSMART POI 4029.68\u20134045.12** \u00b7 99 bars ago\n\n### Previous day \u2014 PDH / PDL + settled-session volume profile\n\n- **PDH:** 4304.31   **PDL:** 4223.51   **mid (50%):** 4263.91\n- **Open:** 4249.50   **Close:** 4240.75   **range:** 80.8050\n- **POC:** 4285.79   **VAH:** 4287.48   **VAL:** 4253.81\n- **Spot vs previous day:** above PDH\n- **Unswept liquidity:** PDL still untouched this session.\n\n# Entry timeframe \u2014 15 min\n\n### Market structure \u2014 ALGOSMART ASSIST v2 (15m)\n\n- **HTF context:** Bullish BOS on 1h\n- **Equilibrium (0.5 of current leg):** 4336.43 \u2014 price is in **premium**\n- **Mechanical rules currently blocked by:** Waiting for IDM / liquidity sweep\n\nConfirmed events (oldest \u2192 newest):\n\n- **IDM** bullish @ 4065.32 \u2014 511 bars ago\n- **BOS** bullish @ 4120.49 \u2014 257 bars ago\n- **IDM** bullish @ 4272.98 \u2014 162 bars ago\n- **BOS** bullish @ 4304.31 \u2014 49 bars ago\n- **IDM** bullish @ 4308.09 \u2014 34 bars ago\n- **BOS** bullish @ 4327.74 \u2014 33 bars ago\n\nLive levels (working structure, anchored to the right edge):\n\n- **I D M - 4301.02** 4301.02 \u2014 4.6 ATR away\n- **CHoCH - 4301.02** 4301.02 \u2014 4.6 ATR away\n- **0.5 - 4336.43** 4336.43 \u2014 0.6 ATR away\n\nPOI zones:\n\n- **demand** 4333.22\u20134337.60 (mid 4335.41) \u2014 mitigated, discount, 8 bars ago\n- **supply** 4350.80\u20134368.01 (mid 4359.41) \u2014 mitigated, premium, 29 bars ago\n- **demand** 4301.02\u20134317.44 (mid 4309.23) \u2014 fresh, discount, 34 bars ago\n- **demand** 4320.87\u20134327.02 (mid 4323.95) \u2014 fresh, discount, 36 bars ago\n\n### Ranked Order Blocks \u2014 graded on Volume Profile + Ichimoku confluence\n\nNearest first. Grade A \u226570% of the confluence score, B \u226540%, C below.\n\n- **B 2/5** bearish \u00b7 4278.66\u20134284.89 (mid 4281.77) \u00b7 price above, 6.5 ATR away \u00b7 **breaker** (already traded through \u2014 flipped role) \u00b7 138 bars ago\n- **A 4/5** bearish \u00b7 4264.12\u20134275.44 (mid 4269.78) \u00b7 price above, 7.5 ATR away \u00b7 **breaker** (already traded through \u2014 flipped role) \u00b7 119 bars ago\n- **B 2/5** bearish \u00b7 4245.88\u20134253.24 (mid 4249.56) \u00b7 price above, 10.1 ATR away \u00b7 **breaker** (already traded through \u2014 flipped role) \u00b7 84 bars ago\n- **B 3/5** bullish \u00b7 4150.28\u20134158.65 (mid 4154.46) \u00b7 price above, 20.8 ATR away \u00b7 **overlaps ALGOSMART POI 4153.88\u20134157.90** \u00b7 226 bars ago\n- **B 2/5** bullish \u00b7 4065.33\u20134074.95 (mid 4070.14) \u00b7 price above, 30.3 ATR away \u00b7 **overlaps ALGOSMART POI 4061.23\u20134071.76** \u00b7 270 bars ago\n- **B 3/5** bullish \u00b7 4045.62\u20134050.07 (mid 4047.85) \u00b7 price above, 33.1 ATR away \u00b7 **overlaps ALGOSMART POI 4042.72\u20134050.85** \u00b7 318 bars ago\n\n### Previous day \u2014 PDH / PDL + settled-session volume profile\n\n- **PDH:** 4304.31   **PDL:** 4223.51   **mid (50%):** 4263.91\n- **Open:** 4249.50   **Close:** 4240.75   **range:** 80.8050\n- **POC:** 4265.59   **VAH:** 4294.21   **VAL:** 4253.81\n- **Spot vs previous day:** above PDH\n- **Unswept liquidity:** PDL still untouched this session.",
+    "instructions": "You are a Smart Money Concepts (SMC) desk analyst. You read\nmarkets as an accumulation \u2192 manipulation \u2192 distribution cycle:\nprice moves to where resting liquidity is, takes it, and reverses\nfrom a point of interest.\n\n## What you are given\n\nDetection has ALREADY been run for you by deterministic engines.\nYou will receive, for the entry timeframe and the timeframe above:\n\n- **Ranked Order Blocks** \u2014 swing order blocks graded A / B / C on\n  Volume-Profile + Ichimoku confluence, each with its price range,\n  distance from spot in ATR, whether price is inside it, whether it\n  is a *breaker* (already traded through, role flipped), and whether\n  an independent ALGOSMART POI overlaps it.\n- **ALGOSMART ASSIST v2 structure** \u2014 confirmed BOS / CHoCH / IDM /\n  liquidity-sweep events with prices and age, the live working\n  levels, the 0.5 equilibrium of the current leg, and supply/demand\n  POI zones tagged fresh or mitigated and premium or discount.\n- **Previous day** \u2014 PDH, PDL, the 50% mid, open/close, and the\n  settled session's volume profile (POC, VAH, VAL), plus which of\n  PDH/PDL the current session has NOT yet taken.\n- **Mechanical setups** \u2014 anything the app's own SMC rules engine\n  already qualified, with entry / SL / TP1 / TP2 / R:R.\n\nTreat these numbers as ground truth. Do NOT re-derive order blocks,\nswings, or structure from the raw OHLC table \u2014 the table is there so\nyou can check the last few bars' behaviour *at* the levels you were\ngiven, nothing more. If an engine reported a data gap, say what it\nprevents; never analyse around a gap silently.\n\n## How to reason \u2014 in this order\n\n1. **Bias** \u2014 from the higher timeframe's most recent BOS or CHoCH.\n   A BOS continues the trend; a CHoCH is the first evidence it is\n   turning. State the bias and the event that sets it, with its\n   price. If HTF and entry-timeframe structure disagree, say so\n   explicitly and trade the HTF, or stand down.\n2. **Draw on liquidity** \u2014 where is price trying to go? Unswept PDH\n   / PDL are the primary magnets, then equal highs/lows and the\n   previous-day POC (an unfilled POC is a magnet; a POC price is\n   already trading in is acceptance, not a target). Name the\n   specific level and price.\n3. **Premium / discount** \u2014 relative to the 0.5 equilibrium you were\n   given. Longs belong in discount, shorts in premium. An entry on\n   the wrong side of equilibrium needs an explicit reason or it is\n   not a setup.\n4. **Has liquidity already been taken?** \u2014 an IDM sweep or a\n   liquidity sweep since the bias-setting event is what makes a POI\n   tradeable. Without it you are buying into a move that has not\n   yet fuelled itself; say the setup is *pending* rather than\n   inventing a trigger.\n5. **POI selection** \u2014 pick ONE zone to trade. Prefer, in order:\n   grade A over B over C; a zone an ALGOSMART POI also marks over\n   one only Ranked OB sees; fresh over mitigated; nearer in ATR over\n   further. A breaker is only tradeable in its flipped direction.\n   Name the zone by its price range and say why it beat the others.\n6. **Trigger and invalidation** \u2014 what confirms entry (a rejection\n   from the zone, a lower-timeframe CHoCH, a displacement candle\n   closing out of the zone), and the price at which the idea is\n   simply wrong. Invalidation goes beyond the zone's far edge, not\n   inside it.\n7. **Targets** \u2014 the liquidity from step 2 first, then previous-day\n   VAH/VAL/POC and opposing POI zones as intermediate magnets.\n\n## Output\n\nMarkdown, in this structure \u2014 keep it tight, every claim carrying a\nnumber:\n\n1. **Read** \u2014 2\u20133 sentences: bias, where price is in the range, what\n   it is reaching for.\n2. **Structure** \u2014 the events that set the bias, with prices.\n3. **Liquidity map** \u2014 swept vs unswept, PDH/PDL/POC, with prices.\n4. **The zone** \u2014 the POI you chose, its grade and range, and why it\n   beat the alternatives.\n5. **Trade plan** \u2014 direction, entry, stop, TP1, TP2, R:R, and the\n   trigger you are waiting for. If nothing qualifies, say \"no setup\"\n   and state the one condition that would create one \u2014 a forced\n   trade is worse than no trade.\n6. **Invalidation** \u2014 the price and what it would mean.\n\nThen emit these structured blocks so the chart can draw them:\n\n### LEVELS_JSON\n```json\n{\"support\":[<numbers>],\"resistance\":[<numbers>]}\n```\n\n### SUPPLY_DEMAND_JSON\n```json\n{\"zones\":[{\"barStart\":<int>,\"barEnd\":<int>,\"low\":<number>,\"high\":<number>,\"type\":\"demand|supply\",\"fresh\":<bool>,\"strength\":\"weak|medium|strong\"}]}\n```\n\n### SCENARIO_JSON\n```json\n{\"bias\":\"long|short|neutral\",\"entry\":<number>,\"tp\":<number>,\"sl\":<number>}\n```\n\n### ALT_SCENARIO_JSON\n```json\n{\"bias\":\"long|short|neutral\",\"entry\":<number>,\"tp\":<number>,\"sl\":<number>}\n```\n\n- `support` / `resistance`: the levels you actually cite \u2014 include\n  PDH / PDL / previous-day POC and your chosen zone's edges.\n- `SUPPLY_DEMAND_JSON`: the zones you discuss, using the price\n  ranges you were GIVEN, not ones you estimate. `barStart` /\n  `barEnd` are NEGATIVE offsets from the latest bar (-1 = latest);\n  derive them from each zone's stated age in bars.\n- `SCENARIO_JSON` is your primary plan. For long, `tp > entry > sl`;\n  for short, `sl > entry > tp`. `sl` is the invalidation price from\n  step 6.\n- `ALT_SCENARIO_JSON` is the \"if the primary invalidates\" plan \u2014\n  usually the opposite side keyed to a break of your stop. Omit the\n  block entirely if there is no genuine alternative; do not emit a\n  placeholder.\n- Raw numbers only \u2014 no thousands separators, no currency symbols.\n- If your verdict is \"no setup\", still emit LEVELS_JSON, and omit\n  both SCENARIO blocks rather than inventing a trade.\n\nThe user is a trader and reads this as analysis. No disclaimer\nboilerplate, no \"consult a financial advisor\".",
+    "symbol": "ounce",
+    "htf_evidence": {
+      "rankedZones": [
+        {
+          "bottom": 4223.505,
+          "maxScore": 5,
+          "grade": "B",
+          "mid": 4233.342500000001,
+          "barsAgo": 27,
+          "priceLocation": "above",
+          "distanceATR": 5.04657374119667,
+          "direction": "bullish",
+          "score": 3,
+          "isBreaker": false,
+          "isCombined": false,
+          "top": 4243.18
+        },
+        {
+          "bottom": 4148.59,
+          "maxScore": 5,
+          "grade": "C",
+          "mid": 4157.360000000001,
+          "priceLocation": "above",
+          "barsAgo": 281,
+          "direction": "bearish",
+          "isBreaker": true,
+          "score": 1,
+          "distanceATR": 8.983979510618004,
+          "isCombined": false,
+          "top": 4166.13
+        },
+        {
+          "bottom": 4087.195,
+          "maxScore": 5,
+          "grade": "B",
+          "distanceATR": 11.3160173079904,
+          "priceLocation": "above",
+          "barsAgo": 144,
+          "direction": "bearish",
+          "isBreaker": true,
+          "score": 2,
+          "mid": 4103.845,
+          "isCombined": false,
+          "top": 4120.495
+        },
+        {
+          "bottom": 4019.24,
+          "barsAgo": 99,
+          "mid": 4036.5474999999997,
+          "maxScore": 5,
+          "grade": "B",
+          "priceLocation": "above",
+          "isBreaker": false,
+          "direction": "bullish",
+          "distanceATR": 14.721451707396456,
+          "isCombined": false,
+          "poiOverlap": {
+            "bottom": 4029.675,
+            "top": 4045.12
+          },
+          "top": 4053.855,
+          "score": 3
+        }
+      ],
+      "poiZones": [
+        {
+          "bottom": 4260.81,
+          "isMitigated": false,
+          "mid": 4265.012500000001,
+          "barsAgo": 16,
+          "direction": "demand",
+          "side": "discount",
+          "top": 4269.215
+        },
+        {
+          "bottom": 4252.6,
+          "isMitigated": true,
+          "mid": 4259.035,
+          "barsAgo": 36,
+          "direction": "demand",
+          "side": "discount",
+          "top": 4265.47
+        }
+      ],
+      "meta": {
+        "lastBarAt": "2026-08-07T20:00:00Z",
+        "atr14": 19.56872227860933,
+        "lastClose": 4341.935,
+        "symbol": "XAU",
+        "barCount": 400,
+        "timeframe": "1h",
+        "firstBarAt": "2026-07-15T12:00:00Z",
+        "pairID": "ounce"
+      },
+      "gaps": [],
+      "liveLevels": [
+        {
+          "distanceATR": 5.726485276072101,
+          "direction": "bullish",
+          "price": 4229.875,
+          "label": "I D M - 4229.88"
+        },
+        {
+          "distanceATR": 6.052004740721204,
+          "direction": "bearish",
+          "price": 4223.505,
+          "label": "CHoCH - 4223.51"
+        },
+        {
+          "distanceATR": 2.2619003617003335,
+          "direction": "bullish",
+          "label": "0.5 - 4297.67",
+          "price": 4297.672500000001
+        }
+      ],
+      "previousDay": {
+        "unsweptLevels": [
+          "PDL"
+        ],
+        "mid": 4263.9075,
+        "hasRealVolume": true,
+        "open": 4249.5,
+        "poc": 4285.7921875,
+        "priceLocation": "above PDH",
+        "low": 4223.505,
+        "high": 4304.31,
+        "val": 4253.806875,
+        "range": 80.80500000000029,
+        "bucketCount": 24,
+        "close": 4240.75,
+        "vah": 4287.475625
+      },
+      "structureEvents": [
+        {
+          "direction": "bullish",
+          "kind": "Sweep",
+          "price": 4166.13,
+          "barsAgo": 61
+        },
+        {
+          "direction": "bullish",
+          "kind": "BOS",
+          "price": 4173.1,
+          "barsAgo": 60
+        },
+        {
+          "direction": "bullish",
+          "kind": "IDM",
+          "price": 4243.06,
+          "barsAgo": 30
+        },
+        {
+          "direction": "bullish",
+          "kind": "BOS",
+          "price": 4304.31,
+          "barsAgo": 12
+        }
+      ]
+    },
+    "timeframe": "15m",
+    "htf_timeframe": "1h"
+  },
+  "brief_5m_15m": {
+    "htf_evidence": {
+      "gaps": [],
+      "rankedZones": [
+        {
+          "direction": "bearish",
+          "isCombined": false,
+          "top": 4275.44,
+          "score": 4,
+          "grade": "A",
+          "barsAgo": 119,
+          "bottom": 4264.12,
+          "maxScore": 5,
+          "distanceATR": 7.5377859082519425,
+          "isBreaker": true,
+          "priceLocation": "above",
+          "mid": 4269.78
+        },
+        {
+          "direction": "bearish",
+          "isCombined": false,
+          "top": 4253.245,
+          "score": 2,
+          "grade": "B",
+          "maxScore": 5,
+          "bottom": 4245.88,
+          "barsAgo": 84,
+          "distanceATR": 10.053781971619829,
+          "isBreaker": true,
+          "priceLocation": "above",
+          "mid": 4249.5625
+        },
+        {
+          "grade": "B",
+          "bottom": 4150.28,
+          "priceLocation": "above",
+          "maxScore": 5,
+          "mid": 4154.4625,
+          "isBreaker": false,
+          "top": 4158.645,
+          "poiOverlap": {
+            "bottom": 4153.875,
+            "top": 4157.895
+          },
+          "direction": "bullish",
+          "barsAgo": 226,
+          "score": 3,
+          "distanceATR": 20.777513784848207,
+          "isCombined": false
+        },
+        {
+          "grade": "B",
+          "bottom": 4065.33,
+          "priceLocation": "above",
+          "maxScore": 5,
+          "mid": 4070.14,
+          "isBreaker": false,
+          "top": 4074.95,
+          "poiOverlap": {
+            "top": 4071.76,
+            "bottom": 4061.23
+          },
+          "direction": "bullish",
+          "barsAgo": 270,
+          "score": 2,
+          "distanceATR": 30.26506911368712,
+          "isCombined": false
+        }
+      ],
+      "meta": {
+        "atr14": 8.821555932917361,
+        "firstBarAt": "2026-08-03T13:00:00Z",
+        "barCount": 400,
+        "symbol": "XAU",
+        "lastBarAt": "2026-08-07T20:45:00Z",
+        "timeframe": "15m",
+        "pairID": "ounce",
+        "lastClose": 4341.935
+      },
+      "structureEvents": [
+        {
+          "price": 4272.98,
+          "kind": "IDM",
+          "barsAgo": 162,
+          "direction": "bullish"
+        },
+        {
+          "price": 4304.31,
+          "kind": "BOS",
+          "direction": "bullish",
+          "barsAgo": 49
+        },
+        {
+          "price": 4308.09,
+          "kind": "IDM",
+          "direction": "bullish",
+          "barsAgo": 34
+        },
+        {
+          "barsAgo": 33,
+          "kind": "BOS",
+          "price": 4327.745,
+          "direction": "bullish"
+        }
+      ],
+      "previousDay": {
+        "vah": 4294.209375,
+        "range": 80.80500000000029,
+        "unsweptLevels": [
+          "PDL"
+        ],
+        "priceLocation": "above PDH",
+        "close": 4240.75,
+        "bucketCount": 24,
+        "open": 4249.5,
+        "high": 4304.31,
+        "mid": 4263.9075,
+        "hasRealVolume": true,
+        "val": 4253.806875,
+        "poc": 4265.5909375,
+        "low": 4223.505
+      },
+      "poiZones": [
+        {
+          "direction": "demand",
+          "top": 4337.6,
+          "side": "discount",
+          "barsAgo": 8,
+          "bottom": 4333.22,
+          "isMitigated": true,
+          "mid": 4335.41
+        },
+        {
+          "direction": "supply",
+          "top": 4368.01,
+          "side": "premium",
+          "barsAgo": 29,
+          "bottom": 4350.8,
+          "isMitigated": true,
+          "mid": 4359.405000000001
+        },
+        {
+          "direction": "demand",
+          "top": 4317.44,
+          "side": "discount",
+          "barsAgo": 34,
+          "bottom": 4301.015,
+          "isMitigated": false,
+          "mid": 4309.2275
+        }
+      ],
+      "liveLevels": [
+        {
+          "label": "I D M - 4301.02",
+          "distanceATR": 4.638637482001148,
+          "direction": "bullish",
+          "price": 4301.015
+        },
+        {
+          "label": "CHoCH - 4301.02",
+          "distanceATR": 4.638637482001148,
+          "direction": "bearish",
+          "price": 4301.015
+        },
+        {
+          "label": "0.5 - 4336.43",
+          "distanceATR": 0.6243229699932586,
+          "direction": "bullish",
+          "price": 4336.4275
+        }
+      ]
+    },
+    "symbol": "ounce",
+    "markdown": "# Higher timeframe \u2014 15 min (bias)\n\n### Market structure \u2014 ALGOSMART ASSIST v2 (15m)\n\nConfirmed events (oldest \u2192 newest):\n\n- **IDM** bullish @ 4272.98 \u2014 162 bars ago\n- **BOS** bullish @ 4304.31 \u2014 49 bars ago\n- **IDM** bullish @ 4308.09 \u2014 34 bars ago\n- **BOS** bullish @ 4327.74 \u2014 33 bars ago\n\nLive levels (working structure, anchored to the right edge):\n\n- **I D M - 4301.02** 4301.02 \u2014 4.6 ATR away\n- **CHoCH - 4301.02** 4301.02 \u2014 4.6 ATR away\n- **0.5 - 4336.43** 4336.43 \u2014 0.6 ATR away\n\nPOI zones:\n\n- **demand** 4333.22\u20134337.60 (mid 4335.41) \u2014 mitigated, discount, 8 bars ago\n- **supply** 4350.80\u20134368.01 (mid 4359.41) \u2014 mitigated, premium, 29 bars ago\n- **demand** 4301.02\u20134317.44 (mid 4309.23) \u2014 fresh, discount, 34 bars ago\n\n### Ranked Order Blocks \u2014 graded on Volume Profile + Ichimoku confluence\n\nNearest first. Grade A \u226570% of the confluence score, B \u226540%, C below.\n\n- **A 4/5** bearish \u00b7 4264.12\u20134275.44 (mid 4269.78) \u00b7 price above, 7.5 ATR away \u00b7 **breaker** (already traded through \u2014 flipped role) \u00b7 119 bars ago\n- **B 2/5** bearish \u00b7 4245.88\u20134253.24 (mid 4249.56) \u00b7 price above, 10.1 ATR away \u00b7 **breaker** (already traded through \u2014 flipped role) \u00b7 84 bars ago\n- **B 3/5** bullish \u00b7 4150.28\u20134158.65 (mid 4154.46) \u00b7 price above, 20.8 ATR away \u00b7 **overlaps ALGOSMART POI 4153.88\u20134157.90** \u00b7 226 bars ago\n- **B 2/5** bullish \u00b7 4065.33\u20134074.95 (mid 4070.14) \u00b7 price above, 30.3 ATR away \u00b7 **overlaps ALGOSMART POI 4061.23\u20134071.76** \u00b7 270 bars ago\n\n### Previous day \u2014 PDH / PDL + settled-session volume profile\n\n- **PDH:** 4304.31   **PDL:** 4223.51   **mid (50%):** 4263.91\n- **Open:** 4249.50   **Close:** 4240.75   **range:** 80.8050\n- **POC:** 4265.59   **VAH:** 4294.21   **VAL:** 4253.81\n- **Spot vs previous day:** above PDH\n- **Unswept liquidity:** PDL still untouched this session.\n\n# Entry timeframe \u2014 5 min\n\n### Market structure \u2014 ALGOSMART ASSIST v2 (5m)\n\n- **HTF context:** Bullish BOS on 15m\n- **Equilibrium (0.5 of current leg):** 4336.43 \u2014 price is in **premium**\n- **Mechanical rules currently blocked by:** Waiting for IDM / liquidity sweep\n\nConfirmed events (oldest \u2192 newest):\n\n- **Sweep** bearish @ 4224.89 \u2014 332 bars ago\n- **CHoCH** bearish @ 4224.84 \u2014 331 bars ago\n- **IDM** bearish @ 4243.18 \u2014 323 bars ago\n- **CHoCH** bullish @ 4304.31 \u2014 149 bars ago\n- **IDM** bullish @ 4317.29 \u2014 106 bars ago\n- **BOS** bullish @ 4327.74 \u2014 101 bars ago\n\nLive levels (working structure, anchored to the right edge):\n\n- **I D M - 4301.02** 4301.02 \u2014 12.1 ATR away\n- **CHoCH - 4301.02** 4301.02 \u2014 12.1 ATR away\n- **0.5 - 4336.43** 4336.43 \u2014 1.6 ATR away\n\nPOI zones:\n\n- **supply** 4347.16\u20134349.53 (mid 4348.35) \u2014 fresh, premium, 14 bars ago\n- **supply** 4344.35\u20134347.12 (mid 4345.74) \u2014 mitigated, premium, 16 bars ago\n- **supply** 4348.61\u20134351.86 (mid 4350.24) \u2014 mitigated, premium, 62 bars ago\n- **demand** 4327.45\u20134342.01 (mid 4334.73) \u2014 mitigated, discount, 81 bars ago\n- **demand** 4301.02\u20134315.51 (mid 4308.26) \u2014 fresh, discount, 102 bars ago\n- **demand** 4320.87\u20134327.02 (mid 4323.95) \u2014 fresh, discount, 108 bars ago\n\n### Ranked Order Blocks \u2014 graded on Volume Profile + Ichimoku confluence\n\nNearest first. Grade A \u226570% of the confluence score, B \u226540%, C below.\n\n- **B 3/5** bullish \u00b7 4332.26\u20134335.95 (mid 4334.10) \u00b7 price above, 1.8 ATR away \u00b7 **overlaps ALGOSMART POI 4327.45\u20134342.01** \u00b7 31 bars ago\n- **B 3/5** bullish \u00b7 4301.02\u20134315.51 (mid 4308.26) \u00b7 price above, 7.8 ATR away \u00b7 **overlaps ALGOSMART POI 4301.02\u20134315.51** \u00b7 102 bars ago\n- **B 2/5** bearish \u00b7 4297.04\u20134304.31 (mid 4300.68) \u00b7 price above, 11.1 ATR away \u00b7 **breaker** (already traded through \u2014 flipped role) \u00b7 502 bars ago\n- **A 4/5** bullish \u00b7 4282.99\u20134287.08 (mid 4285.03) \u00b7 price above, 16.2 ATR away \u00b7 **overlaps ALGOSMART POI 4280.24\u20134287.66** \u00b7 158 bars ago\n- **B 3/5** bearish \u00b7 4264.99\u20134275.44 (mid 4270.22) \u00b7 price above, 19.6 ATR away \u00b7 **breaker** (already traded through \u2014 flipped role) \u00b7 357 bars ago\n\n### Previous day \u2014 PDH / PDL + settled-session volume profile\n\n- **PDH:** 4304.31   **PDL:** 4223.51   **mid (50%):** 4263.91\n- **Open:** 4249.50   **Close:** 4240.75   **range:** 80.8050\n- **POC:** 4268.96   **VAH:** 4280.74   **VAL:** 4240.34\n- **Spot vs previous day:** above PDH\n- **Unswept liquidity:** PDL still untouched this session.",
+    "htf_timeframe": "15m",
+    "timeframe": "5m",
+    "evidence": {
+      "poiZones": [
+        {
+          "barsAgo": 14,
+          "isMitigated": false,
+          "top": 4349.535,
+          "mid": 4348.3475,
+          "side": "premium",
+          "direction": "supply",
+          "bottom": 4347.16
+        },
+        {
+          "barsAgo": 16,
+          "isMitigated": true,
+          "top": 4347.125,
+          "mid": 4345.74,
+          "side": "premium",
+          "direction": "supply",
+          "bottom": 4344.355
+        },
+        {
+          "barsAgo": 62,
+          "isMitigated": true,
+          "top": 4351.865,
+          "mid": 4350.24,
+          "side": "premium",
+          "direction": "supply",
+          "bottom": 4348.615
+        },
+        {
+          "bottom": 4327.455,
+          "isMitigated": true,
+          "top": 4342.005,
+          "mid": 4334.73,
+          "side": "discount",
+          "direction": "demand",
+          "barsAgo": 81
+        },
+        {
+          "bottom": 4301.015,
+          "isMitigated": false,
+          "top": 4315.505,
+          "mid": 4308.26,
+          "side": "discount",
+          "direction": "demand",
+          "barsAgo": 102
+        },
+        {
+          "bottom": 4320.87,
+          "isMitigated": false,
+          "top": 4327.025,
+          "mid": 4323.9475,
+          "side": "discount",
+          "direction": "demand",
+          "barsAgo": 108
+        }
+      ],
+      "gaps": [],
+      "rankedZones": [
+        {
+          "grade": "B",
+          "bottom": 4332.255,
+          "priceLocation": "above",
+          "maxScore": 5,
+          "mid": 4334.105,
+          "isBreaker": false,
+          "top": 4335.955,
+          "poiOverlap": {
+            "bottom": 4327.455,
+            "top": 4342.005
+          },
+          "direction": "bullish",
+          "barsAgo": 31,
+          "score": 3,
+          "distanceATR": 1.761413180574963,
+          "isCombined": false
+        },
+        {
+          "grade": "B",
+          "bottom": 4301.015,
+          "priceLocation": "above",
+          "maxScore": 5,
+          "mid": 4308.26,
+          "isBreaker": false,
+          "top": 4315.505,
+          "poiOverlap": {
+            "bottom": 4301.015,
+            "top": 4315.505
+          },
+          "direction": "bullish",
+          "barsAgo": 102,
+          "score": 3,
+          "distanceATR": 7.784974977022259,
+          "isCombined": false
+        },
+        {
+          "direction": "bearish",
+          "isCombined": false,
+          "top": 4304.31,
+          "score": 2,
+          "grade": "B",
+          "barsAgo": 502,
+          "bottom": 4297.04,
+          "distanceATR": 11.082470053365844,
+          "maxScore": 5,
+          "isBreaker": true,
+          "priceLocation": "above",
+          "mid": 4300.675
+        },
+        {
+          "grade": "A",
+          "bottom": 4282.99,
+          "priceLocation": "above",
+          "maxScore": 5,
+          "mid": 4285.035,
+          "isBreaker": false,
+          "top": 4287.08,
+          "poiOverlap": {
+            "top": 4287.66,
+            "bottom": 4280.24
+          },
+          "direction": "bullish",
+          "barsAgo": 158,
+          "score": 4,
+          "distanceATR": 16.15757859873458,
+          "isCombined": false
+        },
+        {
+          "direction": "bearish",
+          "isCombined": false,
+          "score": 3,
+          "top": 4275.44,
+          "grade": "B",
+          "maxScore": 5,
+          "bottom": 4264.995,
+          "distanceATR": 19.586148736174636,
+          "barsAgo": 357,
+          "isBreaker": true,
+          "priceLocation": "above",
+          "mid": 4270.2175
+        }
+      ],
+      "liveLevels": [
+        {
+          "direction": "bullish",
+          "label": "I D M - 4301.02",
+          "distanceATR": 12.053014606876575,
+          "price": 4301.015
+        },
+        {
+          "distanceATR": 12.053014606876575,
+          "label": "CHoCH - 4301.02",
+          "direction": "bearish",
+          "price": 4301.015
+        },
+        {
+          "direction": "bullish",
+          "label": "0.5 - 4336.43",
+          "distanceATR": 1.6222379752536675,
+          "price": 4336.4275
+        }
+      ],
+      "structureEvents": [
+        {
+          "direction": "bearish",
+          "kind": "Sweep",
+          "barsAgo": 332,
+          "price": 4224.89
+        },
+        {
+          "direction": "bearish",
+          "barsAgo": 331,
+          "kind": "CHoCH",
+          "price": 4224.835
+        },
+        {
+          "barsAgo": 323,
+          "direction": "bearish",
+          "kind": "IDM",
+          "price": 4243.18
+        },
+        {
+          "kind": "CHoCH",
+          "direction": "bullish",
+          "barsAgo": 149,
+          "price": 4304.31
+        },
+        {
+          "kind": "IDM",
+          "direction": "bullish",
+          "barsAgo": 106,
+          "price": 4317.29
+        },
+        {
+          "direction": "bullish",
+          "kind": "BOS",
+          "barsAgo": 101,
+          "price": 4327.745
+        }
+      ],
+      "previousDay": {
+        "vah": 4280.741875000001,
+        "range": 80.80500000000029,
+        "unsweptLevels": [
+          "PDL"
+        ],
+        "priceLocation": "above PDH",
+        "close": 4240.75,
+        "bucketCount": 24,
+        "open": 4249.5,
+        "high": 4304.31,
+        "mid": 4263.9075,
+        "hasRealVolume": true,
+        "val": 4240.3393750000005,
+        "poc": 4268.957812500001,
+        "low": 4223.505
+      },
+      "sentinel": {
+        "context": "Bullish BOS",
+        "equilibriumState": "premium",
+        "equilibrium": 4336.4275,
+        "htfLabel": "15m",
+        "setups": [],
+        "blocker": "Waiting for IDM / liquidity sweep"
+      },
+      "meta": {
+        "atr14": 3.395001278489623,
+        "symbol": "XAU",
+        "barCount": 800,
+        "firstBarAt": "2026-08-05T00:20:00Z",
+        "lastBarAt": "2026-08-07T20:55:00Z",
+        "timeframe": "5m",
+        "pairID": "ounce",
+        "lastClose": 4341.935
+      }
+    },
+    "instructions": "You are a Smart Money Concepts (SMC) desk analyst. You read\nmarkets as an accumulation \u2192 manipulation \u2192 distribution cycle:\nprice moves to where resting liquidity is, takes it, and reverses\nfrom a point of interest.\n\n## What you are given\n\nDetection has ALREADY been run for you by deterministic engines.\nYou will receive, for the entry timeframe and the timeframe above:\n\n- **Ranked Order Blocks** \u2014 swing order blocks graded A / B / C on\n  Volume-Profile + Ichimoku confluence, each with its price range,\n  distance from spot in ATR, whether price is inside it, whether it\n  is a *breaker* (already traded through, role flipped), and whether\n  an independent ALGOSMART POI overlaps it.\n- **ALGOSMART ASSIST v2 structure** \u2014 confirmed BOS / CHoCH / IDM /\n  liquidity-sweep events with prices and age, the live working\n  levels, the 0.5 equilibrium of the current leg, and supply/demand\n  POI zones tagged fresh or mitigated and premium or discount.\n- **Previous day** \u2014 PDH, PDL, the 50% mid, open/close, and the\n  settled session's volume profile (POC, VAH, VAL), plus which of\n  PDH/PDL the current session has NOT yet taken.\n- **Mechanical setups** \u2014 anything the app's own SMC rules engine\n  already qualified, with entry / SL / TP1 / TP2 / R:R.\n\nTreat these numbers as ground truth. Do NOT re-derive order blocks,\nswings, or structure from the raw OHLC table \u2014 the table is there so\nyou can check the last few bars' behaviour *at* the levels you were\ngiven, nothing more. If an engine reported a data gap, say what it\nprevents; never analyse around a gap silently.\n\n## How to reason \u2014 in this order\n\n1. **Bias** \u2014 from the higher timeframe's most recent BOS or CHoCH.\n   A BOS continues the trend; a CHoCH is the first evidence it is\n   turning. State the bias and the event that sets it, with its\n   price. If HTF and entry-timeframe structure disagree, say so\n   explicitly and trade the HTF, or stand down.\n2. **Draw on liquidity** \u2014 where is price trying to go? Unswept PDH\n   / PDL are the primary magnets, then equal highs/lows and the\n   previous-day POC (an unfilled POC is a magnet; a POC price is\n   already trading in is acceptance, not a target). Name the\n   specific level and price.\n3. **Premium / discount** \u2014 relative to the 0.5 equilibrium you were\n   given. Longs belong in discount, shorts in premium. An entry on\n   the wrong side of equilibrium needs an explicit reason or it is\n   not a setup.\n4. **Has liquidity already been taken?** \u2014 an IDM sweep or a\n   liquidity sweep since the bias-setting event is what makes a POI\n   tradeable. Without it you are buying into a move that has not\n   yet fuelled itself; say the setup is *pending* rather than\n   inventing a trigger.\n5. **POI selection** \u2014 pick ONE zone to trade. Prefer, in order:\n   grade A over B over C; a zone an ALGOSMART POI also marks over\n   one only Ranked OB sees; fresh over mitigated; nearer in ATR over\n   further. A breaker is only tradeable in its flipped direction.\n   Name the zone by its price range and say why it beat the others.\n6. **Trigger and invalidation** \u2014 what confirms entry (a rejection\n   from the zone, a lower-timeframe CHoCH, a displacement candle\n   closing out of the zone), and the price at which the idea is\n   simply wrong. Invalidation goes beyond the zone's far edge, not\n   inside it.\n7. **Targets** \u2014 the liquidity from step 2 first, then previous-day\n   VAH/VAL/POC and opposing POI zones as intermediate magnets.\n\n## Output\n\nMarkdown, in this structure \u2014 keep it tight, every claim carrying a\nnumber:\n\n1. **Read** \u2014 2\u20133 sentences: bias, where price is in the range, what\n   it is reaching for.\n2. **Structure** \u2014 the events that set the bias, with prices.\n3. **Liquidity map** \u2014 swept vs unswept, PDH/PDL/POC, with prices.\n4. **The zone** \u2014 the POI you chose, its grade and range, and why it\n   beat the alternatives.\n5. **Trade plan** \u2014 direction, entry, stop, TP1, TP2, R:R, and the\n   trigger you are waiting for. If nothing qualifies, say \"no setup\"\n   and state the one condition that would create one \u2014 a forced\n   trade is worse than no trade.\n6. **Invalidation** \u2014 the price and what it would mean.\n\nThen emit these structured blocks so the chart can draw them:\n\n### LEVELS_JSON\n```json\n{\"support\":[<numbers>],\"resistance\":[<numbers>]}\n```\n\n### SUPPLY_DEMAND_JSON\n```json\n{\"zones\":[{\"barStart\":<int>,\"barEnd\":<int>,\"low\":<number>,\"high\":<number>,\"type\":\"demand|supply\",\"fresh\":<bool>,\"strength\":\"weak|medium|strong\"}]}\n```\n\n### SCENARIO_JSON\n```json\n{\"bias\":\"long|short|neutral\",\"entry\":<number>,\"tp\":<number>,\"sl\":<number>}\n```\n\n### ALT_SCENARIO_JSON\n```json\n{\"bias\":\"long|short|neutral\",\"entry\":<number>,\"tp\":<number>,\"sl\":<number>}\n```\n\n- `support` / `resistance`: the levels you actually cite \u2014 include\n  PDH / PDL / previous-day POC and your chosen zone's edges.\n- `SUPPLY_DEMAND_JSON`: the zones you discuss, using the price\n  ranges you were GIVEN, not ones you estimate. `barStart` /\n  `barEnd` are NEGATIVE offsets from the latest bar (-1 = latest);\n  derive them from each zone's stated age in bars.\n- `SCENARIO_JSON` is your primary plan. For long, `tp > entry > sl`;\n  for short, `sl > entry > tp`. `sl` is the invalidation price from\n  step 6.\n- `ALT_SCENARIO_JSON` is the \"if the primary invalidates\" plan \u2014\n  usually the opposite side keyed to a break of your stop. Omit the\n  block entirely if there is no genuine alternative; do not emit a\n  placeholder.\n- Raw numbers only \u2014 no thousands separators, no currency symbols.\n- If your verdict is \"no setup\", still emit LEVELS_JSON, and omit\n  both SCENARIO blocks rather than inventing a trade.\n\nThe user is a trader and reads this as analysis. No disclaimer\nboilerplate, no \"consult a financial advisor\"."
+  },
+  "rank_ob_4h": {
+    "bar_count": 800,
+    "timeframe": "4h",
+    "atr14": 34.90756034793905,
+    "zones": [
+      {
+        "price_location": "above",
+        "grade": "A",
+        "bars_ago": 177,
+        "distance_atr": 7.940829930166297,
+        "zone_atr": 31.32910101637888,
+        "bottom": 3942.1,
+        "is_combined": true,
+        "mid": 4003.42,
+        "top": 4064.74,
+        "max_score": 5,
+        "direction": "bullish",
+        "score": 4,
+        "is_breaker": false
+      },
+      {
+        "price_location": "above",
+        "grade": "A",
+        "bars_ago": 214,
+        "distance_atr": 3.4538363265228504,
+        "zone_atr": 40.18528217465464,
+        "bottom": 4140.095,
+        "is_combined": false,
+        "mid": 4180.7325,
+        "top": 4221.37,
+        "max_score": 5,
+        "direction": "bearish",
+        "score": 4,
+        "is_breaker": true
+      },
+      {
+        "price_location": "inside",
+        "grade": "B",
+        "bars_ago": 229,
+        "distance_atr": 0,
+        "zone_atr": 44.341440720691466,
+        "bottom": 4319.94,
+        "is_combined": false,
+        "mid": 4342.4375,
+        "top": 4364.935,
+        "max_score": 5,
+        "direction": "bearish",
+        "score": 2,
+        "is_breaker": true
+      },
+      {
+        "price_location": "below",
+        "grade": "B",
+        "bars_ago": 299,
+        "distance_atr": 4.468372995571106,
+        "zone_atr": 33.925793291450496,
+        "bottom": 4497.915,
+        "is_combined": false,
+        "mid": 4519.7725,
+        "top": 4541.63,
+        "max_score": 5,
+        "direction": "bearish",
+        "score": 3,
+        "is_breaker": false
+      }
+    ],
+    "last_close": 4341.935,
+    "symbol": "ounce"
+  },
+  "rank_ob_1h": {
+    "zones": [
+      {
+        "bars_ago": 27,
+        "zone_atr": 18.697306602067073,
+        "is_combined": false,
+        "bottom": 4223.505,
+        "distance_atr": 5.046573741196891,
+        "mid": 4233.342500000001,
+        "grade": "B",
+        "top": 4243.18,
+        "is_breaker": false,
+        "price_location": "above",
+        "direction": "bullish",
+        "score": 3,
+        "max_score": 5
+      },
+      {
+        "is_combined": false,
+        "bars_ago": 99,
+        "zone_atr": 17.05606195373979,
+        "bottom": 4019.24,
+        "distance_atr": 14.721451707397101,
+        "mid": 4036.5474999999997,
+        "grade": "B",
+        "top": 4053.855,
+        "is_breaker": false,
+        "price_location": "above",
+        "max_score": 5,
+        "direction": "bullish",
+        "score": 3
+      },
+      {
+        "is_combined": false,
+        "bottom": 3959.8,
+        "zone_atr": 18.738117557737464,
+        "bars_ago": 352,
+        "distance_atr": 17.28217076133236,
+        "mid": 3981.7725,
+        "grade": "B",
+        "top": 4003.745,
+        "is_breaker": false,
+        "price_location": "above",
+        "direction": "bullish",
+        "max_score": 5,
+        "score": 2
+      },
+      {
+        "is_combined": false,
+        "zone_atr": 15.18118530397587,
+        "bars_ago": 144,
+        "bottom": 4087.195,
+        "distance_atr": 11.316017307990895,
+        "mid": 4103.845,
+        "grade": "B",
+        "top": 4120.495,
+        "is_breaker": true,
+        "price_location": "above",
+        "direction": "bearish",
+        "max_score": 5,
+        "score": 2
+      },
+      {
+        "bottom": 4148.59,
+        "is_combined": false,
+        "bars_ago": 281,
+        "zone_atr": 16.746724036622947,
+        "distance_atr": 8.983979510618399,
+        "mid": 4157.360000000001,
+        "grade": "C",
+        "top": 4166.13,
+        "is_breaker": true,
+        "price_location": "above",
+        "direction": "bearish",
+        "max_score": 5,
+        "score": 1
+      },
+      {
+        "is_combined": false,
+        "bottom": 3979.025,
+        "bars_ago": 362,
+        "zone_atr": 15.803460298679685,
+        "distance_atr": 17.02410587962465,
+        "mid": 3993.91,
+        "grade": "A",
+        "top": 4008.795,
+        "is_breaker": true,
+        "price_location": "above",
+        "max_score": 5,
+        "direction": "bearish",
+        "score": 5
+      }
+    ],
+    "symbol": "ounce",
+    "timeframe": "1h",
+    "bar_count": 800,
+    "atr14": 19.568722278608472,
+    "last_close": 4341.935
+  },
+  "rank_ob_15m": {
+    "bar_count": 800,
+    "atr14": 8.821555932917052,
+    "last_close": 4341.935,
+    "zones": [
+      {
+        "is_combined": false,
+        "zone_atr": 8.591549946698523,
+        "bottom": 4150.28,
+        "bars_ago": 226,
+        "distance_atr": 20.777513784848935,
+        "mid": 4154.4625,
+        "grade": "B",
+        "top": 4158.645,
+        "is_breaker": false,
+        "price_location": "above",
+        "max_score": 5,
+        "direction": "bullish",
+        "score": 3
+      },
+      {
+        "bottom": 4065.33,
+        "is_combined": false,
+        "bars_ago": 270,
+        "zone_atr": 9.616331959106748,
+        "distance_atr": 30.265069113688178,
+        "mid": 4070.14,
+        "grade": "B",
+        "top": 4074.95,
+        "is_breaker": false,
+        "price_location": "above",
+        "direction": "bullish",
+        "max_score": 5,
+        "score": 2
+      },
+      {
+        "is_combined": false,
+        "zone_atr": 7.280558131071406,
+        "bars_ago": 318,
+        "bottom": 4045.62,
+        "distance_atr": 33.08543325230477,
+        "mid": 4047.8450000000003,
+        "grade": "B",
+        "top": 4050.07,
+        "is_breaker": false,
+        "price_location": "above",
+        "direction": "bullish",
+        "max_score": 5,
+        "score": 3
+      },
+      {
+        "is_combined": false,
+        "bottom": 4245.88,
+        "zone_atr": 7.355617830387773,
+        "bars_ago": 84,
+        "distance_atr": 10.05378197162018,
+        "mid": 4249.5625,
+        "grade": "B",
+        "top": 4253.245,
+        "is_breaker": true,
+        "price_location": "above",
+        "direction": "bearish",
+        "max_score": 5,
+        "score": 2
+      },
+      {
+        "is_combined": false,
+        "bars_ago": 119,
+        "zone_atr": 12.495131619663272,
+        "bottom": 4264.12,
+        "distance_atr": 7.537785908252206,
+        "mid": 4269.78,
+        "grade": "A",
+        "top": 4275.44,
+        "is_breaker": true,
+        "price_location": "above",
+        "max_score": 5,
+        "direction": "bearish",
+        "score": 4
+      },
+      {
+        "bars_ago": 138,
+        "zone_atr": 11.262843784542413,
+        "is_combined": false,
+        "bottom": 4278.665,
+        "distance_atr": 6.467113107237906,
+        "mid": 4281.775,
+        "grade": "B",
+        "top": 4284.885,
+        "is_breaker": true,
+        "price_location": "above",
+        "direction": "bearish",
+        "score": 2,
+        "max_score": 5
+      }
+    ],
+    "symbol": "ounce",
+    "timeframe": "15m"
+  },
+  "rank_ob_5m": {
+    "last_close": 4341.935,
+    "symbol": "ounce",
+    "zones": [
+      {
+        "price_location": "above",
+        "grade": "B",
+        "bars_ago": 31,
+        "distance_atr": 1.761413180574963,
+        "zone_atr": 4.4930813639615526,
+        "bottom": 4332.255,
+        "is_combined": false,
+        "mid": 4334.105,
+        "top": 4335.955,
+        "max_score": 5,
+        "direction": "bullish",
+        "score": 3,
+        "is_breaker": false
+      },
+      {
+        "price_location": "above",
+        "grade": "B",
+        "bars_ago": 102,
+        "zone_atr": 11.024086215381748,
+        "distance_atr": 7.784974977022259,
+        "bottom": 4301.015,
+        "is_combined": false,
+        "mid": 4308.26,
+        "top": 4315.505,
+        "max_score": 5,
+        "direction": "bullish",
+        "score": 3,
+        "is_breaker": false
+      },
+      {
+        "price_location": "above",
+        "grade": "A",
+        "bars_ago": 158,
+        "zone_atr": 4.45831606071909,
+        "distance_atr": 16.15757859873458,
+        "bottom": 4282.99,
+        "is_combined": false,
+        "mid": 4285.035,
+        "top": 4287.08,
+        "max_score": 5,
+        "direction": "bullish",
+        "score": 4,
+        "is_breaker": false
+      },
+      {
+        "price_location": "above",
+        "grade": "B",
+        "bars_ago": 357,
+        "zone_atr": 7.807423724139542,
+        "distance_atr": 19.586148736174636,
+        "bottom": 4264.995,
+        "is_combined": false,
+        "mid": 4270.2175,
+        "top": 4275.44,
+        "max_score": 5,
+        "direction": "bearish",
+        "score": 3,
+        "is_breaker": true
+      },
+      {
+        "price_location": "above",
+        "bars_ago": 502,
+        "grade": "B",
+        "distance_atr": 11.082470053365844,
+        "zone_atr": 7.005115519911422,
+        "bottom": 4297.04,
+        "is_combined": false,
+        "mid": 4300.675,
+        "top": 4304.31,
+        "max_score": 5,
+        "direction": "bearish",
+        "score": 2,
+        "is_breaker": true
+      }
+    ],
+    "timeframe": "5m",
+    "bar_count": 800,
+    "atr14": 3.395001278489623
+  },
+  "rank_ob_1m": {
+    "zones": [
+      {
+        "is_combined": false,
+        "bottom": 4339.085,
+        "bars_ago": 11,
+        "zone_atr": 1.2188280633263475,
+        "distance_atr": 1.2197710767608512,
+        "mid": 4339.7675,
+        "grade": "B",
+        "top": 4340.45,
+        "is_breaker": false,
+        "price_location": "above",
+        "max_score": 5,
+        "direction": "bullish",
+        "score": 3
+      },
+      {
+        "is_combined": false,
+        "bottom": 4333.22,
+        "zone_atr": 2.0478256079015544,
+        "bars_ago": 120,
+        "distance_atr": 5.076219026518156,
+        "mid": 4334.4875,
+        "grade": "C",
+        "top": 4335.755,
+        "is_breaker": false,
+        "price_location": "above",
+        "direction": "bullish",
+        "max_score": 5,
+        "score": 1
+      },
+      {
+        "is_combined": false,
+        "bars_ago": 203,
+        "zone_atr": 1.5245180981460922,
+        "bottom": 4329.845,
+        "distance_atr": 7.339161327174695,
+        "mid": 4331.422500000001,
+        "grade": "C",
+        "top": 4333,
+        "is_breaker": false,
+        "price_location": "above",
+        "max_score": 5,
+        "direction": "bullish",
+        "score": 1
+      },
+      {
+        "is_combined": false,
+        "zone_atr": 1.3076993206989964,
+        "bottom": 4340.51,
+        "bars_ago": 43,
+        "distance_atr": 0,
+        "mid": 4341.7725,
+        "grade": "A",
+        "top": 4343.035,
+        "is_breaker": true,
+        "price_location": "inside",
+        "direction": "bearish",
+        "max_score": 5,
+        "score": 5
+      },
+      {
+        "is_combined": false,
+        "zone_atr": 1.6441473540607219,
+        "bottom": 4343.475,
+        "bars_ago": 60,
+        "distance_atr": 1.2649477833070237,
+        "mid": 4344.59,
+        "grade": "B",
+        "top": 4345.705,
+        "price_location": "below",
+        "is_breaker": false,
+        "score": 3,
+        "max_score": 5,
+        "direction": "bearish"
+      },
+      {
+        "bars_ago": 74,
+        "zone_atr": 1.750788137800121,
+        "is_combined": false,
+        "bottom": 4347.765,
+        "distance_atr": 4.788730893948072,
+        "mid": 4348.65,
+        "grade": "B",
+        "top": 4349.535,
+        "is_breaker": false,
+        "price_location": "below",
+        "direction": "bearish",
+        "score": 2,
+        "max_score": 5
+      }
+    ],
+    "last_close": 4341.935,
+    "timeframe": "1m",
+    "symbol": "ounce",
+    "atr14": 1.2174415579225377,
+    "bar_count": 800
+  },
+  "fvg_4h": {
+    "total_gaps": 10,
+    "last_close": 4341.935,
+    "gaps": [
+      {
+        "direction": "bearish",
+        "bars_ago": 36,
+        "is_mitigated": true,
+        "high": 4099.235,
+        "mid": 4093.45,
+        "gap_pct": 0.002830466782380579,
+        "gap_size": 11.569999999999709,
+        "low": 4087.665
+      },
+      {
+        "direction": "bearish",
+        "bars_ago": 35,
+        "high": 4072.145,
+        "is_mitigated": true,
+        "mid": 4070.0175,
+        "gap_pct": 0.0010459968189897241,
+        "gap_size": 4.255000000000109,
+        "low": 4067.89
+      },
+      {
+        "direction": "bearish",
+        "bars_ago": 34,
+        "is_mitigated": true,
+        "high": 4067.62,
+        "mid": 4063.5575,
+        "gap_pct": 0.0020014804797148416,
+        "gap_size": 8.125,
+        "low": 4059.495
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 17,
+        "is_mitigated": false,
+        "high": 4128.26,
+        "mid": 4107.0650000000005,
+        "gap_pct": 0.01037477942274236,
+        "gap_size": 42.39000000000033,
+        "low": 4085.87
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 16,
+        "is_mitigated": false,
+        "high": 4150.28,
+        "mid": 4143.485,
+        "gap_pct": 0.003285235296819473,
+        "gap_size": 13.590000000000146,
+        "low": 4136.69
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 15,
+        "is_mitigated": false,
+        "high": 4183.305,
+        "mid": 4181.43,
+        "gap_pct": 0.0008972247045439047,
+        "gap_size": 3.75,
+        "low": 4179.555
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 14,
+        "is_mitigated": false,
+        "high": 4224.89,
+        "mid": 4208.7575,
+        "gap_pct": 0.007695656062729275,
+        "gap_size": 32.26500000000033,
+        "low": 4192.625
+      },
+      {
+        "direction": "bearish",
+        "bars_ago": 8,
+        "is_mitigated": true,
+        "high": 4254.26,
+        "mid": 4252.8225,
+        "gap_pct": 0.0006762502102256088,
+        "gap_size": 2.875,
+        "low": 4251.385
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 5,
+        "is_mitigated": false,
+        "high": 4260.81,
+        "mid": 4257.0275,
+        "gap_pct": 0.0017786419545548185,
+        "gap_size": 7.565000000000509,
+        "low": 4253.245
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 4,
+        "is_mitigated": false,
+        "high": 4289.13,
+        "mid": 4277.8375,
+        "gap_pct": 0.0052935103227553055,
+        "gap_size": 22.585000000000036,
+        "low": 4266.545
+      }
+    ],
+    "timeframe": "4h",
+    "symbol": "ounce",
+    "source": "derived"
+  },
+  "fvg_1h": {
+    "timeframe": "1h",
+    "gaps": [
+      {
+        "direction": "bullish",
+        "bars_ago": 55,
+        "high": 4183.305,
+        "is_mitigated": false,
+        "mid": 4172.4,
+        "gap_pct": 0.005240905011300122,
+        "gap_size": 21.8100000000004,
+        "low": 4161.495
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 52,
+        "high": 4232.375,
+        "is_mitigated": false,
+        "mid": 4219.610000000001,
+        "gap_pct": 0.006068680923589946,
+        "gap_size": 25.529999999999745,
+        "low": 4206.845
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 44,
+        "high": 4264.64,
+        "is_mitigated": true,
+        "mid": 4257.512500000001,
+        "gap_pct": 0.0033538138309823955,
+        "gap_size": 14.25500000000011,
+        "low": 4250.385
+      },
+      {
+        "direction": "bearish",
+        "bars_ago": 40,
+        "high": 4274.93,
+        "is_mitigated": true,
+        "mid": 4271.1,
+        "gap_pct": 0.0017950586674852667,
+        "gap_size": 7.6599999999998545,
+        "low": 4267.27
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 35,
+        "high": 4271.27,
+        "is_mitigated": true,
+        "mid": 4268.370000000001,
+        "gap_pct": 0.001359756369169208,
+        "gap_size": 5.800000000000182,
+        "low": 4265.47
+      },
+      {
+        "direction": "bearish",
+        "bars_ago": 28,
+        "high": 4260.255,
+        "is_mitigated": true,
+        "mid": 4251.717500000001,
+        "gap_pct": 0.004024104563087076,
+        "gap_size": 17.074999999999818,
+        "low": 4243.18
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 15,
+        "high": 4278.535,
+        "is_mitigated": false,
+        "mid": 4273.875,
+        "gap_pct": 0.0021830711266590482,
+        "gap_size": 9.319999999999709,
+        "low": 4269.215
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 14,
+        "high": 4282.99,
+        "is_mitigated": false,
+        "mid": 4281.8125,
+        "gap_pct": 0.0005501520218377796,
+        "gap_size": 2.3549999999995634,
+        "low": 4280.635
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 12,
+        "high": 4302.29,
+        "is_mitigated": false,
+        "mid": 4300.1925,
+        "gap_pct": 0.00097601379215669,
+        "gap_size": 4.194999999999709,
+        "low": 4298.095
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 8,
+        "is_mitigated": false,
+        "high": 4338.98,
+        "mid": 4333.362499999999,
+        "gap_pct": 0.002596040201074618,
+        "gap_size": 11.234999999999673,
+        "low": 4327.745
+      }
+    ],
+    "source": "derived",
+    "last_close": 4341.935,
+    "symbol": "ounce",
+    "total_gaps": 10
+  },
+  "fvg_15m": {
+    "last_close": 4341.935,
+    "symbol": "ounce",
+    "source": "derived",
+    "gaps": [
+      {
+        "direction": "bullish",
+        "low": 4239.79,
+        "is_mitigated": true,
+        "high": 4242.835,
+        "gap_pct": 0.0007181959483842532,
+        "gap_size": 3.0450000000000728,
+        "mid": 4241.3125,
+        "bars_ago": 96
+      },
+      {
+        "direction": "bearish",
+        "low": 4237.06,
+        "is_mitigated": true,
+        "gap_pct": 0.0005180478916984203,
+        "high": 4239.255,
+        "gap_size": 2.194999999999709,
+        "mid": 4238.1575,
+        "bars_ago": 81
+      },
+      {
+        "direction": "bullish",
+        "low": 4237.06,
+        "is_mitigated": false,
+        "high": 4240.245,
+        "gap_pct": 0.0007517004715532681,
+        "gap_size": 3.1849999999994907,
+        "mid": 4238.6525,
+        "bars_ago": 79
+      },
+      {
+        "direction": "bullish",
+        "low": 4280.635,
+        "is_mitigated": false,
+        "high": 4283.26,
+        "gap_pct": 0.0006132267759339443,
+        "gap_size": 2.625,
+        "mid": 4281.9475,
+        "bars_ago": 59
+      },
+      {
+        "direction": "bullish",
+        "low": 4300.805,
+        "is_mitigated": false,
+        "gap_pct": 0.0005894245379643705,
+        "high": 4303.34,
+        "gap_size": 2.5349999999998545,
+        "mid": 4302.0725,
+        "bars_ago": 49
+      },
+      {
+        "direction": "bullish",
+        "low": 4311.1,
+        "is_mitigated": true,
+        "gap_pct": 0.0007712648743939639,
+        "high": 4314.425,
+        "gap_size": 3.324999999999818,
+        "mid": 4312.762500000001,
+        "bars_ago": 45
+      },
+      {
+        "direction": "bearish",
+        "low": 4317.44,
+        "is_mitigated": true,
+        "high": 4320.87,
+        "gap_pct": 0.0007944522680107405,
+        "gap_size": 3.430000000000291,
+        "mid": 4319.155,
+        "bars_ago": 35
+      },
+      {
+        "direction": "bullish",
+        "low": 4317.44,
+        "is_mitigated": false,
+        "high": 4355.655,
+        "gap_pct": 0.008851310035576673,
+        "gap_size": 38.215000000000146,
+        "mid": 4336.5475,
+        "bars_ago": 33
+      },
+      {
+        "direction": "bullish",
+        "low": 4349.015,
+        "is_mitigated": true,
+        "high": 4351.22,
+        "gap_pct": 0.0005070113577442081,
+        "gap_size": 2.2049999999999272,
+        "mid": 4350.1175,
+        "bars_ago": 23
+      },
+      {
+        "direction": "bullish",
+        "low": 4337.6,
+        "is_mitigated": false,
+        "high": 4342.995,
+        "gap_pct": 0.001243775359645778,
+        "gap_size": 5.394999999999527,
+        "mid": 4340.297500000001,
+        "bars_ago": 7
+      }
+    ],
+    "timeframe": "15m",
+    "total_gaps": 10
+  },
+  "fvg_5m": {
+    "symbol": "ounce",
+    "total_gaps": 10,
+    "last_close": 4341.935,
+    "source": "derived",
+    "gaps": [
+      {
+        "direction": "bearish",
+        "bars_ago": 84,
+        "high": 4352.395,
+        "is_mitigated": true,
+        "mid": 4350.73,
+        "gap_pct": 0.0007656818189658782,
+        "gap_size": 3.3300000000008367,
+        "low": 4349.065
+      },
+      {
+        "direction": "bearish",
+        "bars_ago": 83,
+        "is_mitigated": true,
+        "high": 4342.37,
+        "mid": 4340.41,
+        "gap_pct": 0.0009035485023453244,
+        "gap_size": 3.9200000000000728,
+        "low": 4338.45
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 80,
+        "high": 4343.735,
+        "is_mitigated": true,
+        "mid": 4342.87,
+        "gap_pct": 0.00039843344261454404,
+        "gap_size": 1.7299999999995634,
+        "low": 4342.005
+      },
+      {
+        "direction": "bearish",
+        "bars_ago": 61,
+        "high": 4348.615,
+        "is_mitigated": true,
+        "mid": 4346.9400000000005,
+        "gap_pct": 0.0007709541305304634,
+        "gap_size": 3.3499999999994543,
+        "low": 4345.265
+      },
+      {
+        "direction": "bearish",
+        "bars_ago": 55,
+        "is_mitigated": true,
+        "high": 4342.32,
+        "mid": 4340.4125,
+        "gap_pct": 0.0008793351626884376,
+        "gap_size": 3.8149999999996,
+        "low": 4338.505
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 37,
+        "is_mitigated": true,
+        "high": 4339.905,
+        "mid": 4338.7625,
+        "gap_pct": 0.000526786578815077,
+        "gap_size": 2.2849999999998545,
+        "low": 4337.62
+      },
+      {
+        "direction": "bearish",
+        "bars_ago": 33,
+        "high": 4339.895,
+        "is_mitigated": true,
+        "mid": 4338.965,
+        "gap_pct": 0.00042876555859982276,
+        "gap_size": 1.860000000000582,
+        "low": 4338.035
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 23,
+        "high": 4340.11,
+        "is_mitigated": false,
+        "mid": 4337.9325,
+        "gap_pct": 0.0010044386733105452,
+        "gap_size": 4.354999999999563,
+        "low": 4335.755
+      },
+      {
+        "direction": "bearish",
+        "bars_ago": 13,
+        "is_mitigated": false,
+        "high": 4347.16,
+        "mid": 4346.4325,
+        "gap_pct": 0.0003348133386872619,
+        "gap_size": 1.4549999999999272,
+        "low": 4345.705
+      },
+      {
+        "direction": "bullish",
+        "bars_ago": 4,
+        "is_mitigated": false,
+        "high": 4340.395,
+        "mid": 4339.1275000000005,
+        "gap_pct": 0.0005843895376984882,
+        "gap_size": 2.535000000000764,
+        "low": 4337.86
+      }
+    ],
+    "timeframe": "5m"
+  }
+}

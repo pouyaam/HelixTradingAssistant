@@ -197,6 +197,23 @@ struct ChartViewiPad: View {
         )
     }
 
+    /// Params for the SP2L + Pro BTB × Ranked OB indicator, or `nil`
+    /// when it's off.
+    private var rankedSP2LBTBParams: [String: ParamValue]? {
+        guard indicators.contains(.rankedSP2LBTB) else { return nil }
+        return indicatorInstances.first(where: { $0.kind == .rankedSP2LBTB })?.params ?? [:]
+    }
+
+    /// Graded SP2L / Pro BTB setups plus the live order blocks their
+    /// confluence leg was scored against.
+    private var rankedSP2LBTBOutput: RankedSP2LBTB.Output {
+        guard let params = rankedSP2LBTBParams else { return .empty }
+        return derived.rankedSP2LBTB(
+            candles: candles,
+            config: RankedSP2LBTB.Configuration(params: params)
+        )
+    }
+
     private var sonarlabOBZones: [SonarlabOrderBlocks.Zone] {
         guard indicators.contains(.sonarlabOrderBlock) else { return [] }
         let mitType: SonarlabOrderBlocks.MitigationType =
@@ -381,36 +398,6 @@ struct ChartViewiPad: View {
         return indices.allSatisfy { $0 >= 0 && $0 <= upper }
     }
 
-    private var pinBarComboResults: [PinBarComboSetup.Result] {
-        guard indicators.contains(.pinBarCombo) else { return [] }
-        let bases = derived.sp2lSetup(candles: candles, config: indicatorConfig)
-        let all = derived.pinBarComboSetup(
-            candles: candles,
-            sp2lResults: bases,
-            config: indicatorConfig
-        )
-        guard !all.isEmpty,
-              let bounds = ChartWindow.visibleBounds(domain: effectiveXDomain, count: candles.count)
-        else { return [] }
-        let margin = max(8, (bounds.hi - bounds.lo) / 4)
-        return all.suffix(6).filter { result in
-            pinBarComboResultFitsCurrentCandles(result)
-                && result.lastRelevantIndex >= bounds.lo - margin
-                && result.structureStartIndex <= bounds.hi + margin
-        }
-    }
-
-    private func pinBarComboResultFitsCurrentCandles(_ result: PinBarComboSetup.Result) -> Bool {
-        let upper = candles.count - 1
-        guard upper >= 0 else { return false }
-        let indices = [
-            result.structureStartIndex,
-            result.breakoutIndex,
-            result.confirmationIndex
-        ] + [result.resolveIndex].compactMap { $0 }
-        return indices.allSatisfy { $0 >= 0 && $0 <= upper }
-    }
-
     private var mtrResults: [MTRSetup.Result] {
         guard indicators.contains(.mtrStrategy) else { return [] }
         let all = derived.mtrSetup(candles: candles, config: indicatorConfig)
@@ -534,7 +521,6 @@ struct ChartViewiPad: View {
                 zigzagLineMarks
                 setupMarks
                 sp2lMarks
-                pinBarComboMarks
                 microMapMarks
                 mtrMarks
                 srLevelMarks
@@ -551,6 +537,7 @@ struct ChartViewiPad: View {
                 helixOBComboMarks
                 algoSmartAssistMarks
                 amdMarks
+                rankedSP2LBTBMarks
                 chochMarks
                 htfChochMarks
                 scenarioMarks
@@ -2069,119 +2056,6 @@ struct ChartViewiPad: View {
         return "MICROMAP \(direction) · \(quality) \(result.confluence.score)/6"
     }
 
-    // MARK: - Pin Bar Combo marks
-
-    @ChartContentBuilder
-    private var pinBarComboMarks: some ChartContent {
-        let lastIndex = max(0, candles.count - 1)
-        ForEach(pinBarComboResults) { result in
-            let color = pinBarComboColor(result.direction)
-            let confirmation = Double(result.confirmationIndex)
-            let start = Double(result.breakoutIndex)
-            let end = Double(result.resolveIndex ?? lastIndex)
-
-            RuleMark(
-                xStart: .value("Pin Bar level start", start),
-                xEnd: .value("Pin Bar level end", end),
-                y: .value("Pin Bar tested level", result.level)
-            )
-            .foregroundStyle(IndicatorKind.pinBarCombo.color.opacity(0.75))
-            .lineStyle(StrokeStyle(lineWidth: 1.2, dash: [4, 3]))
-
-            RectangleMark(
-                xStart: .value("Pin Bar candle start", confirmation - 0.34),
-                xEnd: .value("Pin Bar candle end", confirmation + 0.34),
-                yStart: .value("Pin Bar low", result.pinBarLow),
-                yEnd: .value("Pin Bar high", result.pinBarHigh)
-            )
-            .foregroundStyle(color.opacity(0.16))
-
-            PointMark(
-                x: .value("Pin Bar confirmation x", confirmation),
-                y: .value(
-                    "Pin Bar confirmation y",
-                    result.direction == .long ? result.pinBarLow : result.pinBarHigh
-                )
-            )
-            .symbolSize(68)
-            .foregroundStyle(color)
-            .annotation(
-                position: result.direction == .long ? .bottom : .top,
-                alignment: .center,
-                spacing: 3
-            ) {
-                setupTag(result.kind == .sp2l ? "PIN · SP2L" : "PIN · BTB", color: color)
-            }
-
-            RuleMark(
-                xStart: .value("Pin Bar entry start", confirmation),
-                xEnd: .value("Pin Bar entry end", end),
-                y: .value("Pin Bar entry", result.entry)
-            )
-            .foregroundStyle(color.opacity(0.95))
-            .lineStyle(StrokeStyle(lineWidth: 1.5))
-
-            RuleMark(
-                xStart: .value("Pin Bar SL start", confirmation),
-                xEnd: .value("Pin Bar SL end", end),
-                y: .value("Pin Bar SL", result.stopLoss)
-            )
-            .foregroundStyle(Theme.Color.danger.opacity(0.9))
-            .lineStyle(StrokeStyle(lineWidth: 1.2))
-
-            RuleMark(
-                xStart: .value("Pin Bar TP start", confirmation),
-                xEnd: .value("Pin Bar TP end", end),
-                y: .value("Pin Bar TP", result.takeProfit)
-            )
-            .foregroundStyle(Theme.Color.success.opacity(0.9))
-            .lineStyle(StrokeStyle(lineWidth: 1.2))
-
-            PointMark(
-                x: .value("Pin Bar entry label x", end),
-                y: .value("Pin Bar entry label y", result.entry)
-            )
-            .symbolSize(0)
-            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
-                setupTag(pinBarComboStatusLabel(result), color: color)
-            }
-
-            PointMark(
-                x: .value("Pin Bar SL label x", end),
-                y: .value("Pin Bar SL label y", result.stopLoss)
-            )
-            .symbolSize(0)
-            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
-                setupTag("SL", color: Theme.Color.danger)
-            }
-
-            PointMark(
-                x: .value("Pin Bar TP label x", end),
-                y: .value("Pin Bar TP label y", result.takeProfit)
-            )
-            .symbolSize(0)
-            .annotation(position: .overlay, alignment: .trailing, spacing: 0) {
-                setupTag(
-                    "TP R\(String(format: "%.2g", indicatorConfig.pinBarRiskReward))",
-                    color: Theme.Color.success
-                )
-            }
-        }
-    }
-
-    private func pinBarComboColor(_ direction: PinBarComboSetup.Direction) -> Color {
-        direction == .long ? Theme.Color.success : Theme.Color.danger
-    }
-
-    private func pinBarComboStatusLabel(_ result: PinBarComboSetup.Result) -> String {
-        switch result.status {
-        case .active: return result.direction == .long ? "LONG active" : "SHORT active"
-        case .hitTP: return "Target hit"
-        case .hitSL: return "Stopped"
-        case .expired: return "Time exit"
-        }
-    }
-
     // MARK: - Major Trend Reversal marks
 
     @ChartContentBuilder
@@ -2604,6 +2478,181 @@ struct ChartViewiPad: View {
         case .tp1:     return "AMD \(side) · TP1"
         case .tp2:     return "AMD \(side) · TP2"
         case .stopped: return "AMD \(side) · stopped"
+        }
+    }
+
+    // MARK: - SP2L + Pro BTB × Ranked OB
+
+    /// Mirrors `ChartView.RankedSP2LBTBStyle`.
+    private struct RankedSP2LBTBStyle {
+        let zones: Bool
+        let orderBlocks: Bool
+        let levels: Bool
+        let plan: Bool
+        let labels: Bool
+        let untriggered: Bool
+        let rightEdge: Double
+
+        init(params: [String: ParamValue], rightEdge: Double) {
+            zones = params["showZones"]?.boolValue ?? true
+            orderBlocks = params["showOrderBlocks"]?.boolValue ?? true
+            levels = params["showLevels"]?.boolValue ?? true
+            plan = params["showPlan"]?.boolValue ?? true
+            labels = params["showLabels"]?.boolValue ?? true
+            untriggered = params["showUntriggered"]?.boolValue ?? true
+            self.rightEdge = rightEdge
+        }
+    }
+
+    private func rankedSP2LBTBColor(_ setup: RankedSP2LBTB.Setup) -> Color {
+        let base = setup.direction.isLong ? Theme.Color.success : Theme.Color.danger
+        switch setup.grade {
+        case .a: return base
+        case .b: return base.opacity(0.75)
+        case .c, .unranked: return base.opacity(0.5)
+        }
+    }
+
+    @ChartContentBuilder
+    private var rankedSP2LBTBMarks: some ChartContent {
+        if let params = rankedSP2LBTBParams {
+            let lastBar = Double(max(0, candles.count - 1))
+            let style = RankedSP2LBTBStyle(
+                params: params,
+                rightEdge: max(lastBar, effectiveXDomain.upperBound)
+            )
+            let output = rankedSP2LBTBOutput
+
+            if style.orderBlocks {
+                ForEach(output.orderBlocks) { block in
+                    rankedSP2LBTBBlockMark(block, style: style)
+                }
+            }
+            ForEach(output.setups) { setup in
+                if style.untriggered || !setup.status.isUntriggered {
+                    rankedSP2LBTBSetupMark(setup, style: style)
+                }
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private func rankedSP2LBTBBlockMark(
+        _ block: RankedSP2LBTB.OrderBlock,
+        style: RankedSP2LBTBStyle
+    ) -> some ChartContent {
+        let tone = block.isBreaker
+            ? Theme.Color.textMuted
+            : (block.isBullish ? Theme.Color.success : Theme.Color.danger)
+        let xEnd = block.isBreaker ? Double(block.endIndex) : style.rightEdge
+
+        RectangleMark(
+            xStart: .value("SBOB x0", Double(block.startIndex) - 0.5),
+            xEnd:   .value("SBOB x1", xEnd),
+            yStart: .value("SBOB y0", block.bottom),
+            yEnd:   .value("SBOB y1", block.top)
+        )
+        .foregroundStyle(tone.opacity(block.grade == .a ? 0.16 : 0.09))
+
+        if style.labels {
+            PointMark(
+                x: .value("SBOB tag x", Double(block.startIndex)),
+                y: .value("SBOB tag y", (block.top + block.bottom) / 2)
+            )
+            .symbolSize(0)
+            .annotation(position: .overlay, alignment: .leading, spacing: 0) {
+                setupTag(block.badge, color: tone.opacity(0.7))
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private func rankedSP2LBTBSetupMark(
+        _ setup: RankedSP2LBTB.Setup,
+        style: RankedSP2LBTBStyle
+    ) -> some ChartContent {
+        let color = rankedSP2LBTBColor(setup)
+        let live = setup.status == .armed || setup.status == .triggered
+        let planEnd = live ? style.rightEdge : Double(setup.lastRelevantIndex)
+        let zoneEnd = setup.triggerIndex.map { Double($0) + 0.5 } ?? planEnd
+
+        if style.zones {
+            RectangleMark(
+                xStart: .value("SPBTB zone x0", Double(setup.armIndex) - 2.5),
+                xEnd:   .value("SPBTB zone x1", zoneEnd),
+                yStart: .value("SPBTB zone y0", setup.zoneBottom),
+                yEnd:   .value("SPBTB zone y1", setup.zoneTop)
+            )
+            .foregroundStyle(color.opacity(setup.status.isUntriggered ? 0.12 : 0.24))
+        }
+
+        if style.levels, let level = setup.brokenLevel {
+            RuleMark(
+                xStart: .value("SPBTB level x0", Double(setup.levelIndex ?? setup.armIndex)),
+                xEnd:   .value("SPBTB level x1", planEnd),
+                y:      .value("SPBTB level y", level)
+            )
+            .foregroundStyle(Theme.Color.warn.opacity(0.8))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 4]))
+        }
+
+        if style.plan,
+           let entry = setup.entry,
+           let stop = setup.stopLoss,
+           let target = setup.takeProfit,
+           let trigger = setup.triggerIndex {
+            let x0 = Double(trigger)
+            rankedSP2LBTBPlanLevel(entry, from: x0, to: planEnd, color: color, width: 1.6, dash: [])
+            rankedSP2LBTBPlanLevel(stop, from: x0, to: planEnd,
+                                   color: Theme.Color.danger, width: 1.3, dash: [5, 3])
+            rankedSP2LBTBPlanLevel(target, from: x0, to: planEnd,
+                                   color: Theme.Color.success, width: 1.3, dash: [5, 3])
+        }
+
+        if style.labels {
+            PointMark(
+                x: .value("SPBTB tag x", setup.triggerIndex.map(Double.init) ?? Double(setup.armIndex)),
+                y: .value("SPBTB tag y", setup.entry ?? setup.entryLevel)
+            )
+            .symbolSize(setup.triggerIndex == nil ? 0 : 44)
+            .foregroundStyle(color)
+            .annotation(
+                position: setup.direction.isLong ? .bottom : .top,
+                alignment: .center,
+                spacing: 3
+            ) {
+                setupTag(rankedSP2LBTBTag(setup), color: color)
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private func rankedSP2LBTBPlanLevel(
+        _ price: Double,
+        from x0: Double,
+        to x1: Double,
+        color: Color,
+        width: CGFloat,
+        dash: [CGFloat]
+    ) -> some ChartContent {
+        RuleMark(
+            xStart: .value("SPBTB plan x0", x0),
+            xEnd:   .value("SPBTB plan x1", x1),
+            y:      .value("SPBTB plan y", price)
+        )
+        .foregroundStyle(color)
+        .lineStyle(StrokeStyle(lineWidth: width, dash: dash))
+    }
+
+    private func rankedSP2LBTBTag(_ setup: RankedSP2LBTB.Setup) -> String {
+        let arrow = setup.direction.isLong ? "▲" : "▼"
+        switch setup.status {
+        case .armed:       return "\(setup.badge) \(arrow) armed"
+        case .triggered:   return "\(setup.badge) \(arrow)"
+        case .hitTP:       return "\(setup.badge) \(arrow) TP"
+        case .hitSL:       return "\(setup.badge) \(arrow) SL"
+        case .invalidated: return "\(setup.source.label) IFVG"
+        case .expired:     return "\(setup.source.label) expired"
         }
     }
 
@@ -4596,12 +4645,12 @@ struct ChartViewiPad: View {
             helixOBComboOutput: helixOBComboOutput,
             algoSmartAssistOutput: algoSmartAssistOutput,
             amdCycles: amdCycles,
+            rankedSP2LBTB: rankedSP2LBTBOutput,
             chochZones: chochZones,
             htfChochZones: htfChochZones,
             sessionRuns: sessionRuns,
             nySetupResults: nySetupResults,
             sp2lResults: sp2lResults,
-            pinBarComboResults: pinBarComboResults,
             microMapResults: microMapResults,
             mtrResults: mtrResults,
             volumeProfileSessions: volumeProfileSessions,

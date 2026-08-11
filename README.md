@@ -115,9 +115,16 @@ the chart, each with unit tests:
 
 - **NY Open Setup** — the New York open range play.
 - **SP2L** — session-pivot two-leg continuation.
-- **Pin Bar Combo / BTB** — pin-bar cluster reversals.
 - **MicroMap** — micro structure map of local highs/lows.
 - **MTR** — major trend reversal detection.
+- **AMD** — accumulation / manipulation / distribution phase rotation,
+  entering off the fair value gap inside the displacement leg.
+- **SP2L + Pro BTB × Ranked OB** — two trigger engines (a displacement
+  FVG pullback, and a pivot break that gets retested) feeding one
+  grading engine. Every setup scores out of Volume Profile, Ichimoku and
+  order-block confluence, maps to **A/B/C**, and only fires if it clears
+  the minimum grade you set. OB confluence can be a bonus or a hard
+  requirement.
 
 ---
 

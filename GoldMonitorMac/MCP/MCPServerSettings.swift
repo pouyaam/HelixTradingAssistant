@@ -73,6 +73,8 @@ final class MCPServerSettings: ObservableObject {
         maxBars = storedBars > 0 ? storedBars : 5000
 
         server.onStateChange = { [weak self] state in
+            print("[MCP Server] State changed: \(state)")
+            NSLog("[MCP Server] State changed: \(state)")
             self?.state = state
         }
         server.onToolCall = { [weak self] name, ok, elapsed in

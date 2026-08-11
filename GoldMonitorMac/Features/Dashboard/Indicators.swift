@@ -104,10 +104,6 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     /// a breakout + follow-through pressure gap, then rests a limit order
     /// at the first pullback level. Renders entry/SL/TP/add-on.
     case sp2lStrategy
-    /// Pin Bar Combo — confirmation overlay for SP2L pullbacks and BTB
-    /// broken-level retests. Enters only after a directional rejection
-    /// candle and draws the tested level plus entry/SL/TP plan.
-    case pinBarCombo
     /// MicroMap continuation strategy — strong spike, weak counter-trend
     /// micro-channel, then up to three close-confirmed entry attempts.
     case microMapStrategy
@@ -186,6 +182,15 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     /// The fair value gap left inside the displacement is the entry
     /// (see `AMDCycle` + ChartView's `amdMarks`).
     case amdCycle
+    /// SP2L + Pro BTB × Ranked OB — two trigger engines (a displacement
+    /// FVG pullback, and a pivot break that gets retested) feeding one
+    /// quality engine that grades every setup A/B/C on Volume-Profile,
+    /// Ichimoku and order-block confluence, so only setups clearing a
+    /// minimum grade fire. Renders graded zones, the broken level, the
+    /// live confluence order blocks, and the entry/SL/TP plan (see
+    /// `RankedSP2LBTB` + ChartView's `rankedSP2LBTBMarks`). Ported from
+    /// the PineScript v6 "SP2L + Pro BTB x Ranked OB".
+    case rankedSP2LBTB
 
     var id: String { rawValue }
 
@@ -203,7 +208,6 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .tradingSession: return "Trading Sessions"
         case .nyOpenSetup:    return "NY Open Setup"
         case .sp2lStrategy:   return "SP2L Strategy"
-        case .pinBarCombo:    return "Pin Bar · SP2L + BTB"
         case .microMapStrategy: return "MicroMap Strategy"
         case .mtrStrategy:    return "MTR · Major Trend Reversal"
         case .fairValueGap:   return "Fair Value Gap"
@@ -220,6 +224,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .helixOBCombo:   return "Helix+OB Combo"
         case .algoSmartAssist: return "ALGOSMART ASSIST v2"
         case .amdCycle:       return "AMD · Accum / Manip / Distrib"
+        case .rankedSP2LBTB:  return "SP2L + Pro BTB × Ranked OB"
         }
     }
 
@@ -237,7 +242,6 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .tradingSession: return Color(red: 0.40, green: 0.55, blue: 0.70)
         case .nyOpenSetup: return Color(red: 0.95, green: 0.75, blue: 0.30)
         case .sp2lStrategy: return Color(red: 0.25, green: 0.72, blue: 1.00)
-        case .pinBarCombo:  return Color(red: 1.00, green: 0.54, blue: 0.28)
         case .microMapStrategy: return Color(red: 0.20, green: 0.82, blue: 0.58)
         case .mtrStrategy: return Color(red: 0.66, green: 0.48, blue: 1.00)
         case .fairValueGap: return Color(red: 0.30, green: 0.80, blue: 0.75)
@@ -254,6 +258,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .helixOBCombo:   return Color(red: 0.15, green: 0.78, blue: 0.85)
         case .algoSmartAssist: return Color(red: 0.95, green: 0.82, blue: 0.20)
         case .amdCycle:       return Color(red: 0.55, green: 0.72, blue: 1.00)
+        case .rankedSP2LBTB:  return Color(red: 0.69, green: 0.49, blue: 1.00)
         }
     }
 
@@ -327,24 +332,6 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                 .double(key: "maxPullbackBars", label: "Limit order expiry (bars)", default: 6, step: 1, range: 1...30),
                 .double(key: "maxContinuationBars", label: "Continuation timeout (bars)", default: 10, step: 1, range: 1...50),
                 .double(key: "riskReward", label: "Risk reward", default: 1.0, step: 0.25, range: 0.25...5),
-            ]
-        case .pinBarCombo:
-            return [
-                .bool(key: "enableSP2L", label: "Confirm SP2L pullbacks", default: true),
-                .bool(key: "enableBTB", label: "Detect BTB retests", default: true),
-                .double(key: "atrPeriod", label: "ATR period", default: 14, step: 1, range: 2...100),
-                .double(key: "minWickBodyRatio", label: "Min rejection wick / body", default: 2.0, step: 0.25, range: 1...8),
-                .double(key: "minWickRangeRatio", label: "Min rejection wick / range", default: 0.55, step: 0.05, range: 0.3...0.9),
-                .double(key: "maxBodyRangeRatio", label: "Max body / range", default: 0.35, step: 0.05, range: 0.05...0.6),
-                .double(key: "minCloseLocation", label: "Min close near rejection side", default: 0.65, step: 0.05, range: 0.5...0.95),
-                .double(key: "oppositeWickDominance", label: "Rejection / opposite wick", default: 1.5, step: 0.25, range: 1...6),
-                .double(key: "touchToleranceATR", label: "Level touch tolerance (x ATR)", default: 0.10, step: 0.05, range: 0...1),
-                .double(key: "stopBufferATR", label: "Stop buffer (x ATR)", default: 0.05, step: 0.05, range: 0...1),
-                .double(key: "maxConfirmationBars", label: "Retest expiry (bars)", default: 8, step: 1, range: 1...30),
-                .double(key: "btbLookbackBars", label: "BTB level lookback", default: 12, step: 1, range: 3...50),
-                .double(key: "minBreakoutBodyATR", label: "Min BTB breakout body (x ATR)", default: 0.5, step: 0.1, range: 0...3),
-                .double(key: "riskReward", label: "Risk reward", default: 2.0, step: 0.25, range: 0.25...10),
-                .double(key: "maxContinuationBars", label: "Trade timeout (bars)", default: 20, step: 1, range: 1...100),
             ]
         case .microMapStrategy:
             return [
@@ -685,6 +672,89 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                 .bool(key: "showLabels", label: "Show phase labels", default: true),
                 .bool(key: "showFailed", label: "Show failed cycles", default: false),
                 .double(key: "maxCycles", label: "Cycles to show", default: 4, step: 1, range: 1...20),
+            ]
+        case .rankedSP2LBTB:
+            return [
+                // ── General ───────────────────────────────────────────
+                .bool(key: "enableSP2L", label: "Enable SP2L", default: true),
+                .bool(key: "enableBTB", label: "Enable Pro BTB", default: true),
+                .enum(key: "directionMode", label: "Direction", default: "both", options: [
+                    ParamOption(label: "Both", value: "both"),
+                    ParamOption(label: "Long only", value: "long"),
+                    ParamOption(label: "Short only", value: "short"),
+                ]),
+                .double(key: "atrLength", label: "ATR length", default: 14, step: 1, range: 2...100),
+                .double(key: "riskReward", label: "Risk : Reward", default: 3.0, step: 0.5, range: 0.5...20),
+                .double(key: "stopBufferATR", label: "SL buffer (× ATR)", default: 0.15, step: 0.05, range: 0...3),
+                .enum(key: "entryModel", label: "Entry inside zone", default: "centre", options: [
+                    ParamOption(label: "CE — 50% equilibrium", value: "centre"),
+                    ParamOption(label: "Edge (aggressive)", value: "edge"),
+                ]),
+                .bool(key: "requireConfirmation", label: "Require confirmation candle", default: true),
+                .double(key: "maxSetups", label: "Setups to show", default: 6, step: 1, range: 1...30),
+                // ── SP2L ──────────────────────────────────────────────
+                .double(key: "spikeATR", label: "SP2L · min displacement (× ATR)", default: 1.5, step: 0.1, range: 0.1...10),
+                .double(key: "maxWaitSP2L", label: "SP2L · bars to wait for pullback", default: 30, step: 1, range: 1...200),
+                // ── Pro BTB ───────────────────────────────────────────
+                .double(key: "pivotLength", label: "BTB · pivot lookback", default: 8, step: 1, range: 2...60),
+                .bool(key: "requireFVGOverlap", label: "BTB · FVG must straddle the level", default: true),
+                .double(key: "minBreakBodyATR", label: "BTB · min breakout body (× ATR)", default: 0.5, step: 0.1, range: 0...5),
+                .double(key: "retestToleranceATR", label: "BTB · retest tolerance (× ATR)", default: 0.10, step: 0.05, range: 0...3),
+                .double(key: "maxWaitBTB", label: "BTB · bars to wait for retest", default: 30, step: 1, range: 1...200),
+                // ── Grading ───────────────────────────────────────────
+                .enum(key: "minGrade", label: "Minimum grade to signal", default: "B", options: [
+                    ParamOption(label: "B or better", value: "B"),
+                    ParamOption(label: "A only", value: "A"),
+                    ParamOption(label: "C — all setups", value: "C"),
+                ]),
+                .bool(key: "useVolumeProfile", label: "Score with Volume Profile", default: true),
+                .bool(key: "useIchimoku", label: "Score with Ichimoku", default: true),
+                .bool(key: "useOrderBlocks", label: "Score with OB confluence", default: true),
+                .enum(key: "obMode", label: "OB confluence is", default: "bonus", options: [
+                    ParamOption(label: "Bonus", value: "bonus"),
+                    ParamOption(label: "Required", value: "required"),
+                ]),
+                .double(key: "obProximityATR", label: "OB proximity (× ATR)", default: 0.75, step: 0.25, range: 0...5),
+                // ── Trend filter ──────────────────────────────────────
+                .enum(key: "trendFilter", label: "Bias filter", default: "ema", options: [
+                    ParamOption(label: "EMA", value: "ema"),
+                    ParamOption(label: "Kumo", value: "kumo"),
+                    ParamOption(label: "EMA + Kumo", value: "both"),
+                    ParamOption(label: "Off", value: "off"),
+                ]),
+                .double(key: "emaLength", label: "EMA length", default: 60, step: 1, range: 2...400),
+                .bool(key: "filterZones", label: "Filter zones, not just entries", default: true),
+                // ── Volume Profile (scoring) ──────────────────────────
+                .double(key: "vpLookback", label: "VP lookback bars", default: 150, step: 5, range: 20...500),
+                .double(key: "vpRows", label: "VP rows", default: 24, step: 1, range: 5...60),
+                // ── Ichimoku (scoring) ────────────────────────────────
+                .double(key: "tenkanLength", label: "Tenkan-sen", default: 9, step: 1, range: 1...100),
+                .double(key: "kijunLength", label: "Kijun-sen", default: 26, step: 1, range: 1...200),
+                .double(key: "senkouBLength", label: "Senkou Span B", default: 52, step: 1, range: 2...300),
+                .double(key: "ichimokuDisplacement", label: "Displacement", default: 26, step: 1, range: 1...100),
+                // ── Order blocks ──────────────────────────────────────
+                .double(key: "swingLength", label: "OB · swing length", default: 10, step: 1, range: 3...60),
+                .enum(key: "zoneSource", label: "OB · zone built from", default: "wicks", options: [
+                    ParamOption(label: "Wicks", value: "wicks"),
+                    ParamOption(label: "Body", value: "body"),
+                ]),
+                .double(key: "maxOBATRMult", label: "OB · max size (× ATR)", default: 3.5, step: 0.5, range: 0.5...20),
+                .double(key: "obATRLength", label: "OB · ATR length", default: 10, step: 1, range: 1...100),
+                .enum(key: "obInvalidation", label: "OB · invalidation", default: "wick", options: [
+                    ParamOption(label: "Wick", value: "wick"),
+                    ParamOption(label: "Close", value: "close"),
+                ]),
+                .double(key: "obPerSide", label: "OB · drawn per side", default: 3, step: 1, range: 1...10),
+                .double(key: "obMaxStored", label: "OB · tracked per side", default: 20, step: 1, range: 5...60),
+                .bool(key: "showBreakerBlocks", label: "OB · show breakers", default: true),
+                .double(key: "obWindow", label: "OB · processing window (bars)", default: 1750, step: 50, range: 100...4900),
+                // ── Display ───────────────────────────────────────────
+                .bool(key: "showZones", label: "Show setup zones", default: true),
+                .bool(key: "showOrderBlocks", label: "Show confluence order blocks", default: true),
+                .bool(key: "showLevels", label: "Show broken levels", default: true),
+                .bool(key: "showPlan", label: "Show entry / SL / TP", default: true),
+                .bool(key: "showLabels", label: "Show labels", default: true),
+                .bool(key: "showUntriggered", label: "Show zones that never fired", default: true),
             ]
         }
     }

@@ -240,11 +240,6 @@ struct DashboardView: View {
     @State private var sp2lSeenEventKeys: Set<String> = []
     @State private var sp2lLastClosedTimestamp: TimeInterval?
 
-    /// Close-confirmed pin bars for SP2L pullbacks and BTB retests.
-    @State private var pinBarAlertContext: String?
-    @State private var pinBarSeenEventKeys: Set<String> = []
-    @State private var pinBarLastClosedTimestamp: TimeInterval?
-
     /// MTR alerts fire only when the neckline break is confirmed by a
     /// closed candle. Formation itself remains visual-only.
     @State private var mtrAlertContext: String?
@@ -585,85 +580,6 @@ struct DashboardView: View {
         "sp2l|\(app.selectedPairID ?? "")|\(timeframe.rawValue)|\(result.id)|formed"
     }
 
-    private func refreshPinBarNotifications(seedOnly: Bool) {
-        guard let pairID = app.selectedPairID,
-              let pair = app.pairs.first(where: { $0.id == pairID }),
-              isStrategyNotificationActive(.pinBarCombo),
-              candles.count > 1
-        else {
-            pinBarAlertContext = nil
-            pinBarSeenEventKeys = []
-            pinBarLastClosedTimestamp = nil
-            return
-        }
-
-        let closedCandles = Array(candles.dropLast())
-        guard let newestClosed = closedCandles.last else { return }
-        let sp2lResults = SP2LSetup.compute(
-            closedCandles,
-            minSpikeBars: oscillatorConfig.sp2lMinSpikeBars,
-            maxSpikeBars: oscillatorConfig.sp2lMaxSpikeBars,
-            rangeBars: oscillatorConfig.sp2lRangeBars,
-            atrPeriod: oscillatorConfig.sp2lATRPeriod,
-            minSpikeATR: oscillatorConfig.sp2lMinSpikeATR,
-            maxSpikeATR: oscillatorConfig.sp2lMaxSpikeATR,
-            maxRangeATR: oscillatorConfig.sp2lMaxRangeATR,
-            minGapPct: oscillatorConfig.sp2lMinGapPct,
-            maxPressureGapBar: oscillatorConfig.sp2lMaxPressureGapBar,
-            emaPeriod: oscillatorConfig.sp2lEMAPeriod,
-            useEMAContext: oscillatorConfig.sp2lUseEMAContext,
-            maxEMADistanceATR: oscillatorConfig.sp2lMaxEMADistanceATR,
-            maxPullbackBars: oscillatorConfig.sp2lMaxPullbackBars,
-            maxContinuationBars: oscillatorConfig.sp2lMaxContinuationBars,
-            riskReward: oscillatorConfig.sp2lRiskReward,
-            targetCount: oscillatorConfig.sp2lTargetCount
-        )
-        let results = PinBarComboSetup.compute(
-            closedCandles,
-            sp2lResults: sp2lResults,
-            configuration: oscillatorConfig.pinBarComboConfiguration
-        )
-        let context = "\(pairID)|\(timeframe.rawValue)"
-        let allKeys = Set(results.map(pinBarConfirmedEventKey))
-
-        guard !seedOnly,
-              pinBarAlertContext == context,
-              let previousTimestamp = pinBarLastClosedTimestamp
-        else {
-            pinBarAlertContext = context
-            pinBarSeenEventKeys = allKeys
-            pinBarLastClosedTimestamp = newestClosed.id.timeIntervalSince1970
-            return
-        }
-
-        for result in results {
-            guard result.confirmationIndex < closedCandles.count,
-                  closedCandles[result.confirmationIndex].id.timeIntervalSince1970 > previousTimestamp
-            else { continue }
-            let key = pinBarConfirmedEventKey(result)
-            guard !pinBarSeenEventKeys.contains(key) else { continue }
-            let side = result.direction == .long ? "LONG" : "SHORT"
-            let setup = result.kind == .sp2l ? "SP2L + Pin Bar" : "BTB + Pin Bar"
-            notificationInbox.record(
-                dedupKey: key,
-                cooldown: 10 * 365 * 24 * 60 * 60,
-                pairID: pairID,
-                pairLabel: pair.name,
-                category: .strategy,
-                title: "\(pair.name) - \(setup) \(side) confirmed",
-                body: "Entry \(PriceFormat.exact(result.entry)), stop \(PriceFormat.exact(result.stopLoss)), target \(PriceFormat.exact(result.takeProfit)).",
-                timeframeLabel: timeframe.rawValue
-            )
-        }
-
-        pinBarSeenEventKeys.formUnion(allKeys)
-        pinBarLastClosedTimestamp = newestClosed.id.timeIntervalSince1970
-    }
-
-    private func pinBarConfirmedEventKey(_ result: PinBarComboSetup.Result) -> String {
-        "pinbar|\(app.selectedPairID ?? "")|\(timeframe.rawValue)|\(result.id)|confirmed"
-    }
-
     private func refreshMTRNotifications(seedOnly: Bool) {
         guard let pairID = app.selectedPairID,
               let pair = app.pairs.first(where: { $0.id == pairID }),
@@ -947,22 +863,6 @@ struct DashboardView: View {
             if let v = p["maxContinuationBars"] { oscillatorConfig.sp2lMaxContinuationBars = Int(v.doubleValue) }
             if let v = p["riskReward"]          { oscillatorConfig.sp2lRiskReward = v.doubleValue }
             if let v = p["targetCount"]         { oscillatorConfig.sp2lTargetCount = Int(v.doubleValue) }
-        case .pinBarCombo:
-            if let v = p["enableSP2L"]            { oscillatorConfig.pinBarEnableSP2L = v.boolValue }
-            if let v = p["enableBTB"]             { oscillatorConfig.pinBarEnableBTB = v.boolValue }
-            if let v = p["atrPeriod"]             { oscillatorConfig.pinBarATRPeriod = Int(v.doubleValue) }
-            if let v = p["minWickBodyRatio"]      { oscillatorConfig.pinBarMinWickBodyRatio = v.doubleValue }
-            if let v = p["minWickRangeRatio"]     { oscillatorConfig.pinBarMinWickRangeRatio = v.doubleValue }
-            if let v = p["maxBodyRangeRatio"]     { oscillatorConfig.pinBarMaxBodyRangeRatio = v.doubleValue }
-            if let v = p["minCloseLocation"]      { oscillatorConfig.pinBarMinCloseLocation = v.doubleValue }
-            if let v = p["oppositeWickDominance"] { oscillatorConfig.pinBarOppositeWickDominance = v.doubleValue }
-            if let v = p["touchToleranceATR"]     { oscillatorConfig.pinBarTouchToleranceATR = v.doubleValue }
-            if let v = p["stopBufferATR"]         { oscillatorConfig.pinBarStopBufferATR = v.doubleValue }
-            if let v = p["maxConfirmationBars"]   { oscillatorConfig.pinBarMaxConfirmationBars = Int(v.doubleValue) }
-            if let v = p["btbLookbackBars"]       { oscillatorConfig.pinBarBTBLookbackBars = Int(v.doubleValue) }
-            if let v = p["minBreakoutBodyATR"]    { oscillatorConfig.pinBarMinBreakoutBodyATR = v.doubleValue }
-            if let v = p["riskReward"]            { oscillatorConfig.pinBarRiskReward = v.doubleValue }
-            if let v = p["maxContinuationBars"]   { oscillatorConfig.pinBarMaxContinuationBars = Int(v.doubleValue) }
         case .microMapStrategy:
             if let v = p["atrPeriod"]             { oscillatorConfig.microMapATRPeriod = Int(v.doubleValue) }
             if let v = p["minSpikeBars"]          { oscillatorConfig.microMapMinSpikeBars = Int(v.doubleValue) }
@@ -1577,7 +1477,6 @@ struct DashboardView: View {
             DispatchQueue.main.async {
                 self.refreshMicroMapNotifications(seedOnly: false)
                 self.refreshSP2LNotifications(seedOnly: false)
-                self.refreshPinBarNotifications(seedOnly: false)
                 self.refreshMTRNotifications(seedOnly: false)
             }
         }
@@ -1586,7 +1485,6 @@ struct DashboardView: View {
                 self.refreshNYSetupScenario()
                 self.refreshMicroMapNotifications(seedOnly: true)
                 self.refreshSP2LNotifications(seedOnly: true)
-                self.refreshPinBarNotifications(seedOnly: true)
                 self.refreshMTRNotifications(seedOnly: true)
             }
         }
@@ -1598,7 +1496,6 @@ struct DashboardView: View {
                 self.syncConfigToOscillatorInstances()
                 self.refreshMicroMapNotifications(seedOnly: true)
                 self.refreshSP2LNotifications(seedOnly: true)
-                self.refreshPinBarNotifications(seedOnly: true)
                 self.refreshMTRNotifications(seedOnly: true)
             }
         }
@@ -1606,7 +1503,6 @@ struct DashboardView: View {
             DispatchQueue.main.async {
                 self.refreshMicroMapNotifications(seedOnly: enabled)
                 self.refreshSP2LNotifications(seedOnly: enabled)
-                self.refreshPinBarNotifications(seedOnly: enabled)
                 self.refreshMTRNotifications(seedOnly: enabled)
             }
         }
@@ -3828,7 +3724,8 @@ struct DashboardView: View {
         let steroidOrderBlockActive = isStrategyNotificationActive(.steroidOrderBlock)
         let rankedOrderBlockActive = isStrategyNotificationActive(.rankedOrderBlock)
         let chochActive = isStrategyNotificationActive(.changeOfCharacter)
-        guard orderBlockActive || steroidOrderBlockActive || rankedOrderBlockActive || chochActive else { return }
+        let rankedSP2LBTBActive = isStrategyNotificationActive(.rankedSP2LBTB)
+        guard orderBlockActive || steroidOrderBlockActive || rankedOrderBlockActive || chochActive || rankedSP2LBTBActive else { return }
         let pairLabel = app.pairs.first(where: { $0.id == pairID })?.name ?? pairID
 
         // Each indicator's full-history `compute` runs on its own
@@ -3899,6 +3796,16 @@ struct DashboardView: View {
                     showMitigated: true
                 )
                 await self.alertStore.evaluateCHoCH(zones, pairID: pairID, pairLabel: pairLabel)
+            }
+        }
+        if rankedSP2LBTBActive {
+            let params = visibleIndicatorInstances.first(where: { $0.kind == .rankedSP2LBTB })?.params ?? [:]
+            Task.detached(priority: .utility) {
+                var config = RankedSP2LBTB.Configuration(params: params)
+                config.showBreakerBlocks = true
+                let output = RankedSP2LBTB.compute(candles, configuration: config)
+                await self.alertStore.evaluateRankedSP2LBTBOrderBlocks(output.orderBlocks, pairID: pairID, pairLabel: pairLabel)
+                await self.alertStore.evaluateRankedSP2LBTBSetups(output.setups, pairID: pairID, pairLabel: pairLabel)
             }
         }
     }

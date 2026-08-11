@@ -199,6 +199,10 @@ final class AlertStore: ObservableObject {
     private var lastStrategyStage: [String: RankedOBStrategy.Stage] = [:]
     private var strategyBaselineSeeded: Set<String> = []
 
+    /// SP2L + Pro BTB setup stage tracking for `evaluateRankedSP2LBTBSetups`.
+    private var lastSP2LBTBSetupStatus: [String: RankedSP2LBTB.Status] = [:]
+    private var sp2lbtbSetupBaselineSeeded: Set<String> = []
+
     /// Shared app-wide notification history every `notify*` call
     /// funnels through instead of posting to `UNUserNotificationCenter`
     /// directly. Attached by `DashboardView`'s mount `.task` (before
@@ -553,6 +557,112 @@ final class AlertStore: ObservableObject {
         }
         inbox?.record(
             dedupKey: "robs|\(key)|\(setup.stage.rawValue)",
+            cooldown: 60 * 60 * 6,
+            pairID: pairID,
+            pairLabel: pairLabel,
+            category: .strategy,
+            title: title,
+            body: body,
+            timeframeLabel: timeframeLabel.isEmpty ? nil : timeframeLabel
+        )
+    }
+
+    /// SP2L + Pro BTB × Ranked OB order block lifecycle notifications.
+    func evaluateRankedSP2LBTBOrderBlocks(
+        _ blocks: [RankedSP2LBTB.OrderBlock],
+        pairID: String,
+        pairLabel: String
+    ) {
+        evaluateBlockZones(
+            blocks.map { b in
+                BlockZoneSnapshot(
+                    key: BlockZoneSnapshot.stableKey(isBullish: b.isBullish, high: b.top, low: b.bottom),
+                    isBullish: b.isBullish,
+                    high: b.top,
+                    low: b.bottom,
+                    stage: b.isBreaker ? .exhausted : .fresh,
+                    detail: b.grade == .unranked ? nil : "Grade \(b.grade.rawValue) · \(b.score)/\(b.maxScore)"
+                )
+            },
+            namespace: "sp2lbtb_ob", label: "SP2L/BTB Order Block", category: .orderBlock,
+            pairID: pairID, pairLabel: pairLabel
+        )
+    }
+
+    /// SP2L + Pro BTB × Ranked OB setup notifications — armed, triggered/entered,
+    /// hitTP, hitSL, invalidated, and expired transitions.
+    func evaluateRankedSP2LBTBSetups(
+        _ setups: [RankedSP2LBTB.Setup],
+        pairID: String,
+        pairLabel: String
+    ) {
+        let baselineKey = "sp2lbtb_setup|\(pairID)"
+        let isFirstObservation = !sp2lbtbSetupBaselineSeeded.contains(baselineKey)
+        let keyPrefix = "\(baselineKey)|"
+        var seenKeys: Set<String> = []
+
+        for setup in setups {
+            let setupKey = "\(setup.source.rawValue)-\(setup.direction.rawValue)-\(setup.armIndex)-\(String(format: "%.5f", setup.zoneTop))-\(String(format: "%.5f", setup.zoneBottom))"
+            let storageKey = keyPrefix + setupKey
+            seenKeys.insert(storageKey)
+            let previous = lastSP2LBTBSetupStatus[storageKey]
+            defer { lastSP2LBTBSetupStatus[storageKey] = setup.status }
+
+            guard !isFirstObservation, previous != setup.status else { continue }
+
+            notifySP2LBTBSetupStatus(setup, key: setupKey, pairID: pairID, pairLabel: pairLabel)
+        }
+
+        lastSP2LBTBSetupStatus = lastSP2LBTBSetupStatus.filter { !$0.key.hasPrefix(keyPrefix) || seenKeys.contains($0.key) }
+        sp2lbtbSetupBaselineSeeded.insert(baselineKey)
+    }
+
+    private func notifySP2LBTBSetupStatus(
+        _ setup: RankedSP2LBTB.Setup,
+        key: String,
+        pairID: String,
+        pairLabel: String
+    ) {
+        let sourceLabel = setup.source.label
+        let side = setup.direction == .long ? "long" : "short"
+        let gradeStr = setup.grade == .unranked ? "" : " Grade \(setup.grade.rawValue) (\(setup.score)/\(setup.maxScore))"
+        let range = "\(Self.formatPrice(setup.zoneBottom))–\(Self.formatPrice(setup.zoneTop))"
+        let entryStr = Self.formatPrice(setup.entryLevel)
+
+        let title: String
+        let body: String
+
+        switch setup.status {
+        case .armed:
+            title = "\(pairLabel) — \(sourceLabel) \(side.capitalized) armed"
+            body = "\(sourceLabel)\(gradeStr) \(side) zone armed at \(range). Entry target: \(entryStr). Watching for retest."
+        case .triggered:
+            title = "\(pairLabel) — \(sourceLabel) \(side.capitalized) triggered"
+            var b = "Confirmed\(gradeStr) \(sourceLabel) \(side) setup filled entry at \(entryStr)."
+            if let sl = setup.stopLoss, let tp = setup.takeProfit {
+                b += " SL: \(Self.formatPrice(sl)), TP: \(Self.formatPrice(tp))."
+            }
+            body = b
+        case .hitTP:
+            title = "\(pairLabel) — \(sourceLabel) \(side.capitalized) hit target"
+            var b = "The\(gradeStr) \(sourceLabel) \(side) setup reached take-profit target"
+            if let tp = setup.takeProfit { b += " at \(Self.formatPrice(tp))" }
+            body = b + "."
+        case .hitSL:
+            title = "\(pairLabel) — \(sourceLabel) \(side.capitalized) stopped out"
+            var b = "The\(gradeStr) \(sourceLabel) \(side) setup hit stop loss"
+            if let sl = setup.stopLoss { b += " at \(Self.formatPrice(sl))" }
+            body = b + "."
+        case .invalidated:
+            title = "\(pairLabel) — \(sourceLabel) \(side.capitalized) invalidated"
+            body = "Price closed through the far side of \(sourceLabel)\(gradeStr) \(side) zone at \(range) before triggering."
+        case .expired:
+            title = "\(pairLabel) — \(sourceLabel) \(side.capitalized) expired"
+            body = "The \(sourceLabel)\(gradeStr) \(side) zone at \(range) expired or was replaced."
+        }
+
+        inbox?.record(
+            dedupKey: "sp2lbtb|\(key)|\(setup.status.rawValue)",
             cooldown: 60 * 60 * 6,
             pairID: pairID,
             pairLabel: pairLabel,

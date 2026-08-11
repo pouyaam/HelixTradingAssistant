@@ -244,7 +244,7 @@ struct SettingsView: View {
                             Text("Strategy formation notifications")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(Theme.Color.textPrimary)
-                            Text("Visible SP2L, Pin Bar, BTB, MicroMap, MTR, CHoCH and order-block layers")
+                            Text("Visible SP2L, MicroMap, MTR, CHoCH and order-block layers")
                                 .font(.system(size: 11))
                                 .foregroundStyle(Theme.Color.textMuted)
                         }
