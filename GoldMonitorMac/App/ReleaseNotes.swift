@@ -35,6 +35,28 @@ struct ReleaseNotes {
     let highlights: [ReleaseHighlight]
 
     static let latest = ReleaseNotes(
+        version: "1.7",
+        tagline: "Four new Smart-Money indicators, a Smart Money Desk with its own MCP server, and a Sentinel radar that watches every timeframe at once.",
+        highlights: [
+            .init(icon: "chart.line.uptrend.xyaxis",
+                  title: "EBP · Engulfing Bar Play",
+                  detail: "A candle that sweeps the previous candle's low with its wick only, then closes back above its body. Where that close lands decides the trade: a strong close rests a shallow limit with the stop inside the candle, a hesitant one retraces to the midpoint with the stop behind the whole bar, and a close already past halfway is taken at market. Detects on the chart's timeframe or any other you pin it to."),
+            .init(icon: "square.stack.3d.up.badge.a",
+                  title: "Three more indicators",
+                  detail: "AMD reads the accumulation → manipulation → distribution rotation and enters on the gap the expansion leaves behind. SP2L + Pro BTB grades every setup A/B/C on Volume-Profile, Ichimoku, and order-block confluence, and only fires above the grade you choose. Previous Day draws PDH/PDL, the midpoint, and the prior session's volume profile in the right margin."),
+            .init(icon: "dot.radiowaves.left.and.right",
+                  title: "Sentinel radar watches every timeframe",
+                  detail: "Pick a set of timeframes and the radar scans all of them at once instead of only the chart's. Every row is tagged with the timeframe that found it and filterable by a chip; clicking one moves the chart to that timeframe. A second tab tracks Engulfing Bar Play with its own running win/loss tally."),
+            .init(icon: "checkmark.seal.fill",
+                  title: "Higher-timeframe context corrected",
+                  detail: "The Sentinel built its higher-timeframe read by folding the chart's own candles, and the fold shifted every bucket boundary whenever older history loaded — which could flip the structural read and with it the direction on the radar. Context now comes from real higher-timeframe bars matched by date. The same fix reaches the Smart Money Desk and the MCP server."),
+            .init(icon: "terminal.fill",
+                  title: "Smart Money Desk + local MCP server",
+                  detail: "A dedicated SMC workspace, plus a local MCP server that exposes the app's own market-structure engines — ranked order blocks, fair value gaps, session ranges, previous-day levels, multi-timeframe bias, and position sizing — as tools any MCP client can call."),
+        ]
+    )
+
+    static let v1_6 = ReleaseNotes(
         version: "1.6",
         tagline: "Chart color theming with Green & Red, Blue & Red, and Black & White institutional modes.",
         highlights: [

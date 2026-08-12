@@ -446,9 +446,11 @@ leave the model to rank, narrate, and judge edge cases. All items open:
 
 | Version | Date | Highlights |
 |---|---|---|
+| v1.7 | 2026-08-12 | Four Smart-Money indicators — **EBP · Engulfing Bar Play** (wick-only sweep + body reclaim, strong/indecisive close picking the entry and stop, one trade at a time, detects on the chart's timeframe or any pinned one), **AMD** (accumulation → manipulation → distribution rotation, entry on the displacement gap), **SP2L + Pro BTB × Ranked OB** (two triggers graded A/B/C on VP + Ichimoku + OB confluence; replaces Pin Bar Combo) and **Previous Day** (PDH/PDL + midpoint + prior-session volume profile); **Sentinel radar scans a set of timeframes at once** with per-row TF badges, TF filter chips, persisted selection and per-timeframe blocker lines, plus an **EBP tab** carrying the win/loss/R tally; **Smart Money Desk + local MCP server** (ranked OBs, FVGs, session ranges, previous-day levels, MTF bias, position sizing as MCP tools); **fixed four correctness bugs in the higher-timeframe context path** shared by the radar, the Desk and MCP — index-based candle fold that shifted every bucket when history loaded, bar-count factor mapping HTF→LTF bars (now matched by date), colliding byte-XOR alert ids, and bar-index-seeded ids that were fresh every pass; timeframe ladder collapsed from three copies onto `Timeframe.higher`; SMC system-prompt timeframes; candle-storage data-loss fix. 281 tests |
+| v1.6 | 2026-07-29 | Chart color themes — Green & Red (classic), Blue & Red (TradingView), Black & White (monochrome institutional) for candle bodies, wicks and volume bars, across single charts, every grid pane, and iPad, persisted in settings |
 | v1.5 b8 | 2026-07-19 | On-chart long/short position tool with draggable entry/SL/TP/time, per-position balance + risk %, live lot size / P&L / R:R (Mac + iPad); `ContractSpec` per-instrument sizing + `PositionMetrics` + unit tests; **fixed 10× gold sizing error in the Risk Calculator** (price distance was multiplied by a per-$0.10 rate); drawings freed from the last-bar clamp so they can be placed ahead of price; iPad drawing drag/reshape implemented (previously inert); Backspace no longer deletes a selected drawing while typing in a field; SP2L / Pin Bar Combo / MicroMap / Major Trend Reversal close-confirmed strategies + overlays + unit tests; layer-eye-driven notifications with baselining + dedup; HTF CHoCH zones; grid-pane indicator legend; multi-chart perf overhaul (Equatable views, async first compute); focused-pane sidebar symbol targeting; WTI + DXY symbols; TradingView-style news markers (Mac + iPad); Volume Profile overhaul (trading-day sessions at 18:00 ET, ZigZag-trend and visible-range modes, ranked high-volume levels, two-tone up/down buckets, live-tick-aware caching) + unit tests; Ichimoku Cloud + Ichimoku-confluence OBs; Ranked Order Blocks (swing OBs graded A/B/C on VP + Ichimoku confluence, breaker lifecycle); Volume-Filtered Order Block Detector (swing-anchored OBs, volumetric split, breaker lifecycle, zone merging; Mac + iPad) + unit tests |
 | v1.4 b7 | 2026-07-12 | iPhone support (adaptive split/tab shell, Markets watchlist, touch design system), automatic Faraz re-login (WKWebView cookie capture) |
-| v1.6 | 2026-07-08 | Multi-instance indicators with per-instance params + floating settings panels; Volume Profile indicator; `ParamSpec` model |
+| v1.4 b8 ⚠️ | 2026-07-08 | Multi-instance indicators with per-instance params + floating settings panels; Volume Profile indicator; `ParamSpec` model. ⚠️ This row was labelled "v1.6" but predates the real v1.6 by three weeks and carries no matching tag — relabelled by date to sit with its neighbours |
 | v1.4 b6 | 2026-07-07 | Chart gesture polish; iPad trailing-window live ticks + deep-history backfill |
 | v1.5 | 2026-07-06 | Native iPad target, `./run.sh --ipad`, focused-pair syncing, iPad chart perf |
 | v1.4 b5 | 2026-07-05 | Fully async DB reads, incremental Yahoo fetch, batched upserts, 1 Hz publish throttle, AI streaming perf |
@@ -458,8 +460,19 @@ leave the model to rank, narrate, and judge edge cases. All items open:
 | v1.1 | 2026-06 | Order Blocks, Trading Sessions, NY Open Setup, axis scaling, free panning, model/effort pickers, Faraz crypto |
 | v1.0 | 2026-05-01 | Initial release: multi-source gold feed, bar-index charts, core indicators, Claude CLI analysis, journal, replay, infinite history |
 
-(Full granular notes lived in `CHANGELOG.md` / `RELEASE_NOTES*.md`; recover
-via git history if ever needed.)
+Per-release notes live in `CHANGELOG-<version>.md` at the repo root from
+v1.7 onward — that file is what `gh release create --notes-file` ships.
+Older granular notes lived in `CHANGELOG.md` / `RELEASE_NOTES*.md`;
+recover via git history if ever needed.
+
+**Cutting a release:** bump `CFBundleShortVersionString` + `CFBundleVersion`
+in `project.yml`, add the new `ReleaseNotes.latest` in
+`GoldMonitorMac/App/ReleaseNotes.swift` (demoting the old one to
+`v<major>_<minor>`), write `CHANGELOG-<version>.md`, add a row here, then
+`./run.sh --dmg --sign` and `gh release create v<version>
+dist/HelixTradingApp-<version>.dmg --notes-file CHANGELOG-<version>.md`.
+The in-app updater matches on the tag name `v<version>` and downloads the
+first `.dmg` asset, so both have to be present.
 
 ---
 
