@@ -1163,21 +1163,7 @@ struct AnalysisPage: View {
         }
     }
 
-    /// Pick the next higher timeframe for the HTF context block. The
-    /// jump factor mirrors how traders actually layer TFs (4× rule:
-    /// 15m → 1h, 1h → 4h, 4h → 1d). Returns nil for `.d1` since
-    /// we don't carry weekly bars.
-    private func higherTimeframe(above tf: Timeframe) -> Timeframe? {
-        switch tf {
-        case .m1:  return .m15
-        case .m5:  return .m30
-        case .m15: return .h1
-        case .m30: return .h4
-        case .h1:  return .h4
-        case .h4:  return .d1
-        case .d1:  return nil
-        }
-    }
+    private func higherTimeframe(above tf: Timeframe) -> Timeframe? { tf.higher }
 
     private func runMultiTimeframeAnalysis() {
         let tabID = currentTab.id

@@ -203,6 +203,10 @@ final class AlertStore: ObservableObject {
     private var lastSP2LBTBSetupStatus: [String: RankedSP2LBTB.Status] = [:]
     private var sp2lbtbSetupBaselineSeeded: Set<String> = []
 
+    /// EBP setup stage tracking for `evaluateEngulfingBarPlaySetups`.
+    private var lastEBPSetupStatus: [String: EngulfingBarPlay.Status] = [:]
+    private var ebpSetupBaselineSeeded: Set<String> = []
+
     /// Shared app-wide notification history every `notify*` call
     /// funnels through instead of posting to `UNUserNotificationCenter`
     /// directly. Attached by `DashboardView`'s mount `.task` (before
@@ -670,6 +674,101 @@ final class AlertStore: ObservableObject {
             title: title,
             body: body,
             timeframeLabel: timeframeLabel.isEmpty ? nil : timeframeLabel
+        )
+    }
+
+    /// EBP setup notifications — pending, filled, hitTP, hitSL,
+    /// breakeven, and expiry transitions. `.skipped` setups never fire:
+    /// they are drawn for context, not traded.
+    /// `timeframeLabel` overrides the store's chart timeframe for the
+    /// case where the indicator is pinned to a different one — the label
+    /// on the notification has to name the series the pattern printed on,
+    /// and it keys the baseline so switching timeframes re-seeds instead
+    /// of firing a burst of "new" setups.
+    func evaluateEngulfingBarPlaySetups(
+        _ setups: [EngulfingBarPlay.Setup],
+        pairID: String,
+        pairLabel: String,
+        timeframeLabel overrideTimeframe: String? = nil
+    ) {
+        let label = overrideTimeframe ?? timeframeLabel
+        let baselineKey = "ebp_setup|\(pairID)|\(label)"
+        let isFirstObservation = !ebpSetupBaselineSeeded.contains(baselineKey)
+        let keyPrefix = "\(baselineKey)|"
+        var seenKeys: Set<String> = []
+
+        for setup in setups where setup.status != .skipped {
+            // The bar index alone would collide across reloads that trim
+            // history, so the candle's own range pins the key.
+            let setupKey = "\(setup.direction.rawValue)-\(setup.index)-\(String(format: "%.5f", setup.barHigh))-\(String(format: "%.5f", setup.barLow))"
+            let storageKey = keyPrefix + setupKey
+            seenKeys.insert(storageKey)
+            let previous = lastEBPSetupStatus[storageKey]
+            defer { lastEBPSetupStatus[storageKey] = setup.status }
+
+            guard !isFirstObservation, previous != setup.status else { continue }
+
+            notifyEBPSetupStatus(setup, key: setupKey, pairID: pairID, pairLabel: pairLabel, timeframeLabel: label)
+        }
+
+        lastEBPSetupStatus = lastEBPSetupStatus.filter { !$0.key.hasPrefix(keyPrefix) || seenKeys.contains($0.key) }
+        ebpSetupBaselineSeeded.insert(baselineKey)
+    }
+
+    private func notifyEBPSetupStatus(
+        _ setup: EngulfingBarPlay.Setup,
+        key: String,
+        pairID: String,
+        pairLabel: String,
+        timeframeLabel label: String
+    ) {
+        let side = setup.direction == .long ? "bullish" : "bearish"
+        let quality = setup.closeQuality.label
+        let entryStr = Self.formatPrice(setup.entryLevel)
+
+        let title: String
+        let body: String
+
+        switch setup.status {
+        case .pending:
+            title = "\(pairLabel) — EBP \(side.capitalized) armed"
+            body = "A \(quality)-close \(side) EBP printed. Limit resting at \(entryStr)."
+        case .triggered:
+            title = "\(pairLabel) — EBP \(side.capitalized) entered"
+            var b = "\(quality.capitalized)-close \(side) EBP filled at \(entryStr) (\(setup.entryKind.label))."
+            if let sl = setup.stopLoss, let tp = setup.takeProfit {
+                b += " SL: \(Self.formatPrice(sl)), TP: \(Self.formatPrice(tp))."
+            }
+            body = b
+        case .hitTP:
+            title = "\(pairLabel) — EBP \(side.capitalized) hit target"
+            var b = "The \(side) EBP reached its target"
+            if let tp = setup.takeProfit { b += " at \(Self.formatPrice(tp))" }
+            body = b + "."
+        case .hitSL:
+            title = "\(pairLabel) — EBP \(side.capitalized) stopped out"
+            var b = "The \(side) EBP hit its stop"
+            if let sl = setup.stopLoss { b += " at \(Self.formatPrice(sl))" }
+            body = b + "."
+        case .breakeven:
+            title = "\(pairLabel) — EBP \(side.capitalized) closed at breakeven"
+            body = "The \(side) EBP came back to its entry at \(entryStr) after the stop had moved up."
+        case .cancelled:
+            title = "\(pairLabel) — EBP \(side.capitalized) expired"
+            body = "The \(side) EBP limit at \(entryStr) was never filled and has been cancelled."
+        case .skipped:
+            return
+        }
+
+        inbox?.record(
+            dedupKey: "ebp|\(label)|\(key)|\(setup.status.rawValue)",
+            cooldown: 60 * 60 * 6,
+            pairID: pairID,
+            pairLabel: pairLabel,
+            category: .strategy,
+            title: title,
+            body: body,
+            timeframeLabel: label.isEmpty ? nil : label
         )
     }
 

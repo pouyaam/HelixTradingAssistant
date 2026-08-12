@@ -84,6 +84,28 @@ enum Timeframe: String, CaseIterable, Identifiable, Codable {
         }
     }
 
+    /// The next timeframe up — the one that supplies directional context
+    /// when this timeframe is the entry read. Roughly the 4× ladder traders
+    /// actually layer (15m → 1h → 4h → 1d), with the two sub-5m steps jumping
+    /// further so a 1m entry isn't contextualised by 5m noise.
+    ///
+    /// `nil` for `.d1`: no weekly bars are stored, so a daily read has no
+    /// higher timeframe and callers should fall back to the daily itself.
+    ///
+    /// This is the single definition of the ladder. `AnalysisPage`,
+    /// `MCPToolbox` and `StrategySentinel` each used to carry their own copy.
+    var higher: Timeframe? {
+        switch self {
+        case .m1:  return .m15
+        case .m5:  return .m30
+        case .m15: return .h1
+        case .m30: return .h4
+        case .h1:  return .h4
+        case .h4:  return .d1
+        case .d1:  return nil
+        }
+    }
+
     /// How far back to look for snapshots when building a chart at this
     /// timeframe. Trades freshness for chart density — coarser bars need
     /// more history to render meaningfully.

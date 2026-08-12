@@ -61,6 +61,13 @@ struct ChartView: View {
     /// bar via `barIndex(forDate:)`. Reference-only context — drawn muted
     /// and tagged "·HTF" to read as secondary to the live LTF zones.
     var htfChochZones: [ChangeOfCharacter.DatedZone] = []
+    /// EBP setups detected on another timeframe, date-stamped by the
+    /// engine. Only populated when the indicator's "Detect on timeframe"
+    /// setting names something other than the chart's own timeframe;
+    /// otherwise the chart computes its own off `candles`.
+    var ebpExternal: EngulfingBarPlay.Output = .empty
+    /// Timeframe label for the external setups' tags, e.g. "4H".
+    var ebpExternalLabel: String?
 
     /// Support / resistance levels the user added from an AI analysis.
     /// Empty by default; populated when the user clicks "Add to chart"
@@ -581,6 +588,33 @@ struct ChartView: View {
         )
     }
 
+    /// Params for the EBP indicator, or `nil` when it's off. Display
+    /// toggles are read straight off these; the pattern + trade-model
+    /// settings go through `EngulfingBarPlay.Configuration`.
+    private var ebpParams: [String: ParamValue]? {
+        guard indicators.contains(.engulfingBarPlay) else { return nil }
+        return indicatorInstances.first(where: { $0.kind == .engulfingBarPlay })?.params ?? [:]
+    }
+
+    /// True when the indicator is detecting on some other timeframe and
+    /// `ebpExternal` is what should be drawn. `DashboardView` sets the
+    /// label exactly when it has loaded that series, so this stays false
+    /// while the load is in flight or when the chosen timeframe happens
+    /// to be the one already in view.
+    private var ebpIsExternal: Bool { ebpExternalLabel != nil }
+
+    /// Engulfing Bar Play setups plus the running win/loss tally —
+    /// either computed off the chart's own candles or handed down from
+    /// the timeframe the user pinned the indicator to.
+    private var ebpOutput: EngulfingBarPlay.Output {
+        guard let params = ebpParams else { return .empty }
+        if ebpIsExternal { return ebpExternal }
+        return derived.engulfingBarPlay(
+            candles: candles,
+            config: EngulfingBarPlay.Configuration(params: params)
+        )
+    }
+
     /// Params for the Previous Day indicator, or `nil` when it's off.
     private var previousDayParams: [String: ParamValue]? {
         guard indicators.contains(.previousDay) else { return nil }
@@ -916,6 +950,7 @@ struct ChartView: View {
             algoSmartAssistMarks
             amdMarks
             rankedSP2LBTBMarks
+            ebpMarks
             previousDayMarks
             htfChochMarks
             chochMarks
@@ -4218,6 +4253,189 @@ struct ChartView: View {
         }
     }
 
+    // MARK: - EBP · Engulfing Bar Play
+
+    /// Which parts of the overlay to draw, bundled so the per-setup
+    /// builder takes one argument instead of five.
+    private struct EBPStyle {
+        let zones: Bool
+        let plan: Bool
+        let labels: Bool
+        let untriggered: Bool
+        /// Right-hand anchor for anything still live.
+        let rightEdge: Double
+
+        init(params: [String: ParamValue], rightEdge: Double) {
+            zones = params["showZones"]?.boolValue ?? true
+            plan = params["showPlan"]?.boolValue ?? true
+            labels = params["showLabels"]?.boolValue ?? true
+            untriggered = params["showUntriggered"]?.boolValue ?? true
+            self.rightEdge = rightEdge
+        }
+    }
+
+    /// Where one setup lands on *this* chart's X axis. For a setup
+    /// detected on the chart's own timeframe that is just its bar index;
+    /// for one detected elsewhere every anchor is re-projected through
+    /// the wall clock, and its candle spans however many bars of the
+    /// displayed timeframe it covers.
+    private struct EBPAnchors {
+        let barStart: Double
+        let barEnd: Double
+        /// Where the plan's lines begin — the EBP bar itself.
+        let x0: Double
+        let planEnd: Double
+    }
+
+    private func ebpAnchors(_ setup: EngulfingBarPlay.Setup, style: EBPStyle) -> EBPAnchors? {
+        let live = setup.status == .pending || setup.status == .triggered
+
+        guard ebpIsExternal else {
+            let x0 = Double(setup.index)
+            return EBPAnchors(
+                barStart: x0 - 0.5,
+                barEnd: x0 + 0.5,
+                x0: x0,
+                planEnd: live ? style.rightEdge : Double(setup.lastRelevantIndex)
+            )
+        }
+
+        // A setup from another timeframe only knows wall-clock times.
+        guard let barDate = setup.barDate, let x0 = barIndex(forDate: barDate) else { return nil }
+        let sourceSeconds = ebpExternalLabel.flatMap { Timeframe(rawValue: $0) }?.seconds
+        let barEnd = sourceSeconds
+            .flatMap { barIndex(forDate: barDate.addingTimeInterval($0)) } ?? (x0 + 1)
+        let closingDate = setup.resolveDate ?? setup.triggerDate
+        let planEnd = live
+            ? style.rightEdge
+            : (closingDate.flatMap { barIndex(forDate: $0) } ?? barEnd)
+
+        return EBPAnchors(
+            barStart: x0,
+            barEnd: max(barEnd, x0),
+            x0: x0,
+            planEnd: max(planEnd, x0)
+        )
+    }
+
+    /// The EBP overlay: the pattern candle's range as a faint band, the
+    /// entry / stop / target of anything that filled, and a tag saying
+    /// which side of the model it came from and how it ended.
+    @ChartContentBuilder
+    private var ebpMarks: some ChartContent {
+        if let params = ebpParams {
+            let lastBar = Double(max(0, candles.count - 1))
+            let style = EBPStyle(
+                params: params,
+                rightEdge: max(lastBar, effectiveXDomain.upperBound)
+            )
+            ForEach(ebpOutput.setups) { setup in
+                if style.untriggered || !setup.status.isUntriggered,
+                   let anchors = ebpAnchors(setup, style: style) {
+                    ebpSetupMark(setup, anchors: anchors, style: style)
+                }
+            }
+        }
+    }
+
+    /// A setup that is still working reads in the direction's full
+    /// colour; one that never filled fades back, so the eye lands on the
+    /// trades that actually happened.
+    private func ebpColor(_ setup: EngulfingBarPlay.Setup) -> Color {
+        let base = setup.direction.isLong ? Theme.Color.success : Theme.Color.danger
+        switch setup.status {
+        case .skipped, .cancelled: return base.opacity(0.4)
+        case .pending:             return base.opacity(0.7)
+        default:                   return base
+        }
+    }
+
+    @ChartContentBuilder
+    private func ebpSetupMark(
+        _ setup: EngulfingBarPlay.Setup,
+        anchors: EBPAnchors,
+        style: EBPStyle
+    ) -> some ChartContent {
+        let color = ebpColor(setup)
+
+        if style.zones {
+            RectangleMark(
+                xStart: .value("EBP bar x0", anchors.barStart),
+                xEnd:   .value("EBP bar x1", anchors.barEnd),
+                yStart: .value("EBP bar y0", setup.barLow),
+                yEnd:   .value("EBP bar y1", setup.barHigh)
+            )
+            .foregroundStyle(color.opacity(0.15))
+        }
+
+        if style.plan, let stop = setup.stopLoss, let target = setup.takeProfit {
+            let x0 = anchors.x0
+            let planEnd = anchors.planEnd
+            // The entry line is dashed while the order is still resting
+            // and solid once it filled — the same read as the original's
+            // dashed limit / solid market line.
+            ebpPlanLevel(setup.entryLevel, from: x0, to: planEnd, color: color,
+                         width: 1.6, dash: setup.triggerIndex == nil ? [4, 3] : [])
+            ebpPlanLevel(stop, from: x0, to: planEnd,
+                         color: Theme.Color.danger, width: 1.3, dash: [5, 3])
+            ebpPlanLevel(target, from: x0, to: planEnd,
+                         color: Theme.Color.success, width: 1.3, dash: [5, 3])
+        }
+
+        if style.labels {
+            PointMark(
+                x: .value("EBP tag x", anchors.x0),
+                y: .value("EBP tag y", setup.direction.isLong ? setup.barLow : setup.barHigh)
+            )
+            .symbolSize(40)
+            .symbol(setup.direction.isLong ? .triangle : .diamond)
+            .foregroundStyle(color)
+            .annotation(
+                position: setup.direction.isLong ? .bottom : .top,
+                alignment: .center,
+                spacing: 3
+            ) {
+                setupTag(ebpTag(setup), color: color)
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private func ebpPlanLevel(
+        _ price: Double,
+        from x0: Double,
+        to x1: Double,
+        color: Color,
+        width: CGFloat,
+        dash: [CGFloat]
+    ) -> some ChartContent {
+        RuleMark(
+            xStart: .value("EBP plan x0", x0),
+            xEnd:   .value("EBP plan x1", x1),
+            y:      .value("EBP plan y", price)
+        )
+        .foregroundStyle(color)
+        .lineStyle(StrokeStyle(lineWidth: width, dash: dash))
+    }
+
+    /// "▲ EBP strong · limit" while it waits or runs, then how it ended.
+    /// A setup borrowed from another timeframe says so, since otherwise
+    /// there is nothing on the chart to explain why it sits between bars.
+    private func ebpTag(_ setup: EngulfingBarPlay.Setup) -> String {
+        let arrow = setup.direction.isLong ? "▲" : "▼"
+        let source = ebpExternalLabel.map { " · \($0.uppercased())" } ?? ""
+        let base = "\(arrow) \(setup.badge)\(source)"
+        switch setup.status {
+        case .pending:   return "\(base) · waiting"
+        case .triggered: return base
+        case .hitTP:     return "\(base) · TP"
+        case .hitSL:     return "\(base) · SL"
+        case .breakeven: return "\(base) · BE"
+        case .cancelled: return "\(base) · expired"
+        case .skipped:   return "\(arrow) EBP\(source) · not traded"
+        }
+    }
+
     /// A previous-day level: a horizontal rule with an optional price tag.
     @ChartContentBuilder
     private func previousDayLevel(
@@ -6767,6 +6985,7 @@ struct ChartView: View {
             algoSmartAssistOutput: algoSmartAssistOutput,
             amdCycles: amdCycles,
             rankedSP2LBTB: rankedSP2LBTBOutput,
+            engulfingBarPlay: ebpOutput,
             chochZones: chochZones,
             htfChochZones: htfChochZones,
             sessionRuns: sessionRuns,
@@ -6898,6 +7117,8 @@ extension ChartView: Equatable {
             && l.indicatorConfig == r.indicatorConfig
             && l.indicatorInstances == r.indicatorInstances
             && l.htfChochZones == r.htfChochZones
+            && l.ebpExternal == r.ebpExternal
+            && l.ebpExternalLabel == r.ebpExternalLabel
             && l.srLevels == r.srLevels
             && l.fvgZones == r.fvgZones
             && l.supplyDemandZones == r.supplyDemandZones

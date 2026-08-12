@@ -58,6 +58,17 @@ GRDB, and the local `claude` / `codex` / `opencode` CLIs.
   feeding one grading engine that scores every setup on Volume Profile,
   Ichimoku and order-block confluence, grades it A/B/C, and only fires
   above a configurable minimum; OB confluence is a bonus or a hard gate.
+  PineScript v6 port), and **EBP · Engulfing Bar Play**
+  (`EngulfingBarPlay`: a candle that sweeps the previous candle's
+  extreme with its shadow only and closes back through that candle's
+  body; where the close lands inside the EBP candle's own range picks
+  the plan — a strong close rests a shallow limit with the stop inside
+  the candle, an indecisive one retraces to the midpoint with the stop
+  behind the whole candle, and a close already past 50% is taken at
+  market. One trade at a time, with optional breakeven-on-new-extreme
+  and limit expiry. Detects on the chart's timeframe or on a pinned one
+  (projected onto the chart by date, like the HTF CHoCH overlay), has
+  its own notification toggle, and feeds the Sentinel radar's EBP tab.
   PineScript v6 port).
   Ranked OB also carries an optional **strategy layer**
   (`RankedOBStrategy`): grade filter → zone retest → confirmation
@@ -173,10 +184,10 @@ DashboardView (Features/Dashboard/)
 | `GoldMonitorMac/Fetching/` | `PriceFetcher` (concurrent sources), `Sources.swift`, `BackendClient`, `ProxyTransport` (SOCKS5), `YahooGoldSource` (incremental via `period1`), Faraz sources + `FarazAuthCoordinator`/`FarazLoginWebView` (401 → in-app login), TwelveData WS |
 | `GoldMonitorMac/Scheduling/` | `FetchScheduler` (60s), `YahooScheduler` (10s ticks, 1 Hz `@Published` throttle, `focusedPairID`, `dataResetToken`), `NewsStore` |
 | `GoldMonitorMac/AI/` | `AIEngine` protocol (`run(system:user:)` → `AsyncThrowingStream<String, Error>`), `ClaudeEngine` (spawns `claude --print --output-format stream-json --include-partial-messages --verbose`, prompt on stdin, `StreamJSONParser` for NDJSON deltas), `CodexEngine`, OpenCode engine (local `opencode run` or remote `opencode serve` + basic auth), `PromptBuilder` (kinds, system prompts, JSON-block parsers), `AnalysisStore` (per-(pair,kind) sessions, history capped at 50), `MarketSnapshot` |
-| `GoldMonitorMac/Features/Dashboard/` | `DashboardView`, `ChartView`, `ChartGridView`/`ChartPane`/`ChartPaneView` (multi-chart grid), `ChartDerivedCache`, `ChartWindowing`, indicators/oscillators + setups (`OrderBlocks`, `SteroidOrderBlocks`, `SonarlabOrderBlocks`, `FairValueGap`, `VolumeProfile`, `TradingSessions`, `ZigZag`, `ChangeOfCharacter`, `NYOpenSetup`, `SP2LSetup`, `MicroMapSetup`, `MTRSetup`, `AMDCycle`, `RankedSP2LBTB`, `UTBot`), `Drawings`/`DrawingInspector`, `ReplayController`, `RiskCalculatorView`, `IndicatorSettingsPanel`/`Sheet`, `Trades`, `TimeframeCountdown` |
+| `GoldMonitorMac/Features/Dashboard/` | `DashboardView`, `ChartView`, `ChartGridView`/`ChartPane`/`ChartPaneView` (multi-chart grid), `ChartDerivedCache`, `ChartWindowing`, indicators/oscillators + setups (`OrderBlocks`, `SteroidOrderBlocks`, `SonarlabOrderBlocks`, `FairValueGap`, `VolumeProfile`, `TradingSessions`, `ZigZag`, `ChangeOfCharacter`, `NYOpenSetup`, `SP2LSetup`, `MicroMapSetup`, `MTRSetup`, `AMDCycle`, `RankedSP2LBTB`, `EngulfingBarPlay`, `UTBot`), `Drawings`/`DrawingInspector`, `ReplayController`, `RiskCalculatorView`, `IndicatorSettingsPanel`/`Sheet`, `Trades`, `TimeframeCountdown` |
 | `GoldMonitorMac/Features/…` | `AIAnalysis` (report UI, MarkdownUI theme), `AutoTrader`, `Journal`, `Alerts`, `Inbox`, `News`, `Portfolio`, `Sidebar`, `Settings`, `Wizard`, `WhatsNewView` |
 | `GoldMonitorMac/UI/` | `Card`, buttons, `KeychainHelper` (secrets → macOS Keychain), `WindowConfigurator` |
-| `GoldMonitorMacTests/` | macOS unit tests — SP2L, MicroMap, MTR, AMD, RankedSP2LBTB detection/geometry/decoding suites |
+| `GoldMonitorMacTests/` | macOS unit tests — SP2L, MicroMap, MTR, AMD, RankedSP2LBTB, EngulfingBarPlay detection/geometry/decoding suites |
 | `ipadapp/HelixTradingApp-iPad/` | Touch target overrides (see iPad/iPhone section) |
 | `Tools/` | `HelixIconGen.swift` — regenerates app icons |
 

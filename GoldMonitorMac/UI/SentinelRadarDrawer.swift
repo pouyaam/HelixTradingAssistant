@@ -13,6 +13,9 @@ struct SentinelRadarDrawer: View {
     @ObservedObject var sentinel = StrategySentinel.shared
     @EnvironmentObject var app: AppState
 
+    /// The timeframe on the chart. Always scanned, and the one the header's
+    /// context line falls back to.
+    var chartTimeframe: Timeframe = .h1
     var livePrice: Double? = nil
     var onSelectAlert: ((RadarAlert) -> Void)?
     var onHoverAlert: ((RadarAlert?) -> Void)?
@@ -26,6 +29,18 @@ struct SentinelRadarDrawer: View {
     @State private var hoveredAlertID: UUID?
     @State private var expandedAccordionAlertID: UUID?
     @State private var activePopoverAlertID: UUID?
+    @State private var selectedSource: SourceTab = .smc
+    /// Which scanned timeframe the list is narrowed to. `nil` = all of them.
+    @State private var timeframeFilter: Timeframe?
+
+    /// Which engine the drawer is showing. The two are different animals
+    /// — SMC produces scored, filterable setup queues; EBP produces one
+    /// trade at a time plus a running tally — so they get separate
+    /// panels rather than a merged list with half the columns empty.
+    enum SourceTab: String, CaseIterable {
+        case smc = "SMC"
+        case ebp = "EBP"
+    }
 
     enum StageTab: String, CaseIterable {
         case active = "🚀 ACTIVE"
@@ -46,7 +61,18 @@ struct SentinelRadarDrawer: View {
 
     private var symbolAlerts: [RadarAlert] {
         guard let pairID = currentPairID else { return [] }
-        return sentinel.activeRadarAlerts.filter { $0.pairID == pairID }
+        return sentinel.activeRadarAlerts.filter { alert in
+            guard alert.pairID == pairID else { return false }
+            guard let only = timeframeFilter else { return true }
+            return alert.timeframe == only.rawValue
+        }
+    }
+
+    /// Every timeframe currently on the radar for this pair, smallest first.
+    /// Drives the filter row, which only appears once there is more than one.
+    private var scannedTimeframes: [Timeframe] {
+        let live = sentinel.scanTimeframes.union([chartTimeframe])
+        return live.sorted { $0.seconds < $1.seconds }
     }
 
     private let confidenceThresholds: [(label: String, value: Int)] = [
@@ -57,11 +83,117 @@ struct SentinelRadarDrawer: View {
         ("≥ 90%", 90)
     ]
 
+    /// The EBP engine's read for this symbol, or `nil` when the
+    /// indicator isn't on the chart.
+    private var ebp: EBPRadarSnapshot? {
+        guard let pairID = currentPairID else { return nil }
+        return sentinel.ebpSnapshots[pairID]
+    }
+
+    /// Count shown on the rail and in the header for the active tab.
+    private var badgeCount: Int {
+        switch selectedSource {
+        case .smc: return symbolAlerts.count
+        case .ebp: return ebp?.working.count ?? 0
+        }
+    }
+
     /// The engine's market read for this symbol — shown even when no setup
     /// qualifies, so an empty radar explains which rule is blocking.
+    /// There is one context per scanned timeframe now, so the header shows
+    /// the filtered one — falling back to the chart's, which is always
+    /// scanned. Any other choice goes incoherent the moment the user filters.
     private var context: StrategySentinel.MarketContext? {
         guard let pairID = currentPairID else { return nil }
-        return sentinel.marketContext[pairID]
+        let tf = timeframeFilter ?? chartTimeframe
+        return sentinel.marketContext(pairID: pairID, timeframe: tf.rawValue)
+    }
+
+    /// The timeframe whose context the header is showing.
+    private var contextTimeframe: Timeframe { timeframeFilter ?? chartTimeframe }
+
+    /// One blocking-rule line per scanned timeframe, for the empty state.
+    /// Honours the TF filter so filtering to 4h explains only 4h.
+    private var blockers: [(timeframe: String, blocker: String)] {
+        guard let pairID = currentPairID else { return [] }
+        let scope = timeframeFilter.map { [$0] } ?? scannedTimeframes
+        return scope.compactMap { tf in
+            guard let blocker = sentinel.marketContext(pairID: pairID,
+                                                      timeframe: tf.rawValue)?.blocker,
+                  !blocker.isEmpty else { return nil }
+            return (tf.rawValue, blocker)
+        }
+    }
+
+    /// Multi-select scan-timeframe picker. A `Menu` rather than a pill row for
+    /// the same reason `TimeframeSelector` is one: pills devour the 300pt
+    /// panel's horizontal space. The chart's own timeframe is always scanned,
+    /// so its row is shown pinned and non-interactive.
+    private var timeframeMenu: some View {
+        Menu {
+            Button {
+                sentinel.scanTimeframes = []
+                timeframeFilter = nil
+                pruneToSelection()
+            } label: {
+                Text("Follow chart only")
+            }
+
+            Divider()
+
+            ForEach(Timeframe.allCases, id: \.self) { tf in
+                if tf == chartTimeframe {
+                    Text("✓ \(tf.rawValue.uppercased())  (chart)")
+                } else {
+                    Button {
+                        toggleScan(tf)
+                    } label: {
+                        Text("\(sentinel.scanTimeframes.contains(tf) ? "✓ " : "")\(tf.rawValue.uppercased())")
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 2) {
+                Image(systemName: "clock.fill")
+                    .font(.system(size: 7, weight: .bold))
+                Text(scannedTimeframes.count > 1 ? "TF · \(scannedTimeframes.count)" : "TF · CHART")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            .background(scannedTimeframes.count > 1
+                        ? Theme.Color.accentStart.opacity(0.25)
+                        : Theme.Color.surfaceHi.opacity(0.6))
+            .foregroundStyle(scannedTimeframes.count > 1
+                             ? Theme.Color.accentStart
+                             : Theme.Color.textMuted)
+            .cornerRadius(3)
+        }
+        #if os(macOS)
+        .menuStyle(.borderlessButton)
+        #endif
+    }
+
+    /// Add or remove an auxiliary timeframe. Removing the one the list is
+    /// filtered to would leave the list empty with no way back, so clear it.
+    private func toggleScan(_ tf: Timeframe) {
+        var next = sentinel.scanTimeframes
+        if next.contains(tf) {
+            next.remove(tf)
+            if timeframeFilter == tf { timeframeFilter = nil }
+        } else {
+            next.insert(tf)
+        }
+        sentinel.scanTimeframes = next
+        pruneToSelection()
+    }
+
+    /// Drop rows for timeframes that are no longer selected. Without this the
+    /// deselected timeframe's setups sit in the list until something else
+    /// prunes them, which reads as the toggle not working.
+    private func pruneToSelection() {
+        sentinel.prune(pairID: currentPairID,
+                       keeping: sentinel.scanTimeframes.union([chartTimeframe]))
     }
 
     private var filteredAlerts: [RadarAlert] {
@@ -108,6 +240,14 @@ struct SentinelRadarDrawer: View {
             rail
         }
         .animation(.easeInOut(duration: 0.2), value: isExpanded)
+        .onChange(of: chartTimeframe) { _ in
+            // The chart's timeframe is always scanned, so moving it can strand
+            // the filter on a timeframe that just left the set — which would
+            // show an empty list with no obvious way back.
+            if let only = timeframeFilter, !scannedTimeframes.contains(only) {
+                timeframeFilter = nil
+            }
+        }
     }
 
     // MARK: - Rail
@@ -120,13 +260,13 @@ struct SentinelRadarDrawer: View {
                 Image(systemName: isExpanded ? "chevron.right" : "chevron.left")
                     .font(.system(size: 9, weight: .heavy))
 
-                Text("\(symbolAlerts.count)")
+                Text("\(badgeCount)")
                     .font(.system(size: 9, weight: .heavy, design: .monospaced))
                     .frame(width: 16, height: 16)
-                    .background(Circle().fill(Theme.Color.accentStart.opacity(symbolAlerts.isEmpty ? 0.15 : 0.9)))
-                    .foregroundStyle(symbolAlerts.isEmpty ? Theme.Color.textMuted : .white)
+                    .background(Circle().fill(Theme.Color.accentStart.opacity(badgeCount == 0 ? 0.15 : 0.9)))
+                    .foregroundStyle(badgeCount == 0 ? Theme.Color.textMuted : .white)
 
-                Text("SMC SENTINEL")
+                Text(selectedSource == .ebp ? "EBP SENTINEL" : "SMC SENTINEL")
                     .font(.system(size: 8, weight: .heavy, design: .monospaced))
                     .rotationEffect(.degrees(-90))
                     .fixedSize()
@@ -159,20 +299,79 @@ struct SentinelRadarDrawer: View {
                     .fill(Theme.Color.success)
                     .frame(width: 6, height: 6)
 
-                Text("SMC SENTINEL")
+                Text("SENTINEL")
                     .font(.system(size: 10, weight: .heavy, design: .monospaced))
                     .foregroundStyle(Theme.Color.textPrimary)
 
                 Spacer()
 
-                Text("\(filteredAlerts.count)/\(symbolAlerts.count)")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundStyle(Theme.Color.textMuted)
+                if selectedSource == .smc {
+                    Text("\(filteredAlerts.count)/\(symbolAlerts.count)")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Theme.Color.textMuted)
+                } else if let ebp {
+                    Text(ebp.timeframe.uppercased())
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Theme.Color.textMuted)
+                }
             }
 
+            // Engine tabs (SMC / EBP)
+            HStack(spacing: 3) {
+                ForEach(SourceTab.allCases, id: \.self) { source in
+                    Button {
+                        selectedSource = source
+                    } label: {
+                        Text(source.rawValue)
+                            .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 3)
+                            .background(selectedSource == source
+                                        ? Theme.Color.accentStart
+                                        : Theme.Color.surfaceHi.opacity(0.6))
+                            .foregroundStyle(selectedSource == source ? .white : Theme.Color.textMuted)
+                            .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if selectedSource == .ebp {
+                ebpPanel
+            } else {
+                smcPanel
+            }
+        }
+        .padding(Theme.Spacing.sm)
+        .frame(width: 300)
+        .frame(maxHeight: .infinity)
+        .background(Theme.Color.surface.opacity(0.95))
+        .overlay(
+            Rectangle()
+                .fill(Theme.Color.accentStart.opacity(0.35))
+                .frame(width: 1),
+            alignment: .leading
+        )
+    }
+
+    // MARK: - SMC panel
+
+    @ViewBuilder
+    private var smcPanel: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             // Market context read (HTF structure + premium/discount state)
             if let ctx = context {
                 HStack(spacing: 4) {
+                    // Which timeframe's read this is — the header shows one
+                    // context, so it has to say which.
+                    Text(contextTimeframe.rawValue.uppercased())
+                        .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 0.5)
+                        .background(Theme.Color.surfaceHi.opacity(0.8))
+                        .foregroundStyle(Theme.Color.textMuted)
+                        .cornerRadius(3)
+
                     Text("\(ctx.htfLabel) \(ctx.contextLabel)")
                         .font(.system(size: 8, weight: .bold, design: .monospaced))
                         .foregroundStyle(ctx.contextLabel.hasPrefix("Bullish")
@@ -229,6 +428,8 @@ struct SentinelRadarDrawer: View {
 
                 Spacer()
 
+                timeframeMenu
+
                 // Confidence Score filter dropdown
                 Menu {
                     ForEach(confidenceThresholds, id: \.value) { threshold in
@@ -254,6 +455,25 @@ struct SentinelRadarDrawer: View {
                 #endif
             }
 
+            // Per-timeframe filter. Pointless with a single timeframe on the
+            // radar, so it only shows up once the scan set widens.
+            if scannedTimeframes.count > 1 {
+                HStack(spacing: 3) {
+                    filterChip("ALL", isActive: timeframeFilter == nil) {
+                        timeframeFilter = nil
+                    }
+
+                    ForEach(scannedTimeframes, id: \.self) { tf in
+                        filterChip(tf.rawValue.uppercased(),
+                                   isActive: timeframeFilter == tf) {
+                            timeframeFilter = (timeframeFilter == tf) ? nil : tf
+                        }
+                    }
+
+                    Spacer()
+                }
+            }
+
             Divider()
 
             // Setup Card List
@@ -264,12 +484,16 @@ struct SentinelRadarDrawer: View {
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Theme.Color.textMuted)
 
-                    // When the engine produced nothing, name the rule that blocked.
-                    if symbolAlerts.isEmpty, let blocker = context?.blocker, !blocker.isEmpty {
-                        Text(blocker)
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(Theme.Color.accentStart)
-                            .multilineTextAlignment(.center)
+                    // When the engine produced nothing, name the rule that
+                    // blocked — once per scanned timeframe, so an empty radar
+                    // still says what every timeframe is waiting on.
+                    if symbolAlerts.isEmpty {
+                        ForEach(blockers, id: \.timeframe) { row in
+                            Text("\(row.timeframe.uppercased()) · \(row.blocker)")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(Theme.Color.accentStart)
+                                .multilineTextAlignment(.center)
+                        }
                     }
                     Spacer()
                 }
@@ -285,16 +509,180 @@ struct SentinelRadarDrawer: View {
                 }
             }
         }
-        .padding(Theme.Spacing.sm)
-        .frame(width: 300)
-        .frame(maxHeight: .infinity)
-        .background(Theme.Color.surface.opacity(0.95))
+    }
+
+    // MARK: - EBP panel
+
+    /// The Engulfing Bar Play read: the running tally the original drew
+    /// as an info table, then the setups newest-first. There are no
+    /// filters here — the engine holds one trade at a time, so the list
+    /// is short by construction.
+    @ViewBuilder
+    private var ebpPanel: some View {
+        if let ebp, !ebp.setups.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                ebpStatsRow(ebp.stats)
+                Divider()
+                ScrollView {
+                    LazyVStack(spacing: 6) {
+                        ForEach(ebp.setups) { setup in
+                            ebpRow(setup)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        } else {
+            VStack(spacing: 4) {
+                Spacer()
+                Text(ebp == nil ? "EBP is not on the chart" : "No EBP pattern yet")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.Color.textMuted)
+                if ebp == nil {
+                    Text("Add the EBP indicator to start tracking")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Theme.Color.accentStart)
+                        .multilineTextAlignment(.center)
+                }
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private func ebpStatsRow(_ stats: EngulfingBarPlay.Stats) -> some View {
+        HStack(spacing: 6) {
+            ebpStat("SETUPS", "\(stats.setups)", Theme.Color.textPrimary)
+            ebpStat("W/L", "\(stats.wins)/\(stats.losses)", Theme.Color.textPrimary)
+            ebpStat(
+                "WIN",
+                stats.winRate.map { String(format: "%.0f%%", $0) } ?? "–",
+                (stats.winRate ?? 0) >= 50 ? Theme.Color.success : Theme.Color.textMuted
+            )
+            ebpStat(
+                "R",
+                String(format: "%+.2f", stats.totalR),
+                stats.totalR >= 0 ? Theme.Color.success : Theme.Color.danger
+            )
+            Spacer()
+        }
+    }
+
+    private func ebpStat(_ label: String, _ value: String, _ color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(label)
+                .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                .foregroundStyle(Theme.Color.textMuted)
+            Text(value)
+                .font(.system(size: 10, weight: .heavy, design: .monospaced))
+                .foregroundStyle(color)
+        }
+    }
+
+    private func ebpRow(_ setup: EngulfingBarPlay.Setup) -> some View {
+        let isLong = setup.direction.isLong
+        let dirColor = isLong ? Theme.Color.success : Theme.Color.danger
+        let statusColor = ebpStatusColor(setup.status)
+
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Text(isLong ? "BULLISH" : "BEARISH")
+                    .font(.system(size: 8, weight: .heavy))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(dirColor.opacity(0.20))
+                    .foregroundStyle(dirColor)
+                    .cornerRadius(3)
+
+                Text(setup.closeQuality.label.uppercased())
+                    .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 0.5)
+                    .background(Theme.Color.surfaceHi.opacity(0.8))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .cornerRadius(3)
+
+                if setup.status != .skipped {
+                    Text(setup.entryKind.label.uppercased())
+                        .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 0.5)
+                        .background(Theme.Color.surfaceHi.opacity(0.8))
+                        .foregroundStyle(Theme.Color.textMuted)
+                        .cornerRadius(3)
+                }
+
+                Spacer()
+
+                Text(ebpStatusLabel(setup.status))
+                    .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(statusColor.opacity(0.20))
+                    .foregroundStyle(statusColor)
+                    .cornerRadius(3)
+            }
+
+            // The plan. A skipped pattern never had one.
+            if let stop = setup.stopLoss, let target = setup.takeProfit {
+                HStack(spacing: 6) {
+                    Text("E \(PriceFormat.exact(setup.entryLevel))")
+                        .foregroundStyle(Theme.Color.textPrimary)
+                    Text("SL \(PriceFormat.exact(stop))")
+                        .foregroundStyle(Theme.Color.danger.opacity(0.85))
+                    Text("TP \(PriceFormat.exact(target))")
+                        .foregroundStyle(Theme.Color.success.opacity(0.85))
+                    Spacer()
+                    if let r = setup.rMultiple {
+                        Text(String(format: "%+.1fR", r))
+                            .foregroundStyle(r >= 0 ? Theme.Color.success : Theme.Color.danger)
+                    }
+                }
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .lineLimit(1)
+            } else {
+                Text("Printed while another setup was working — not traded")
+                    .font(.system(size: 8, weight: .medium))
+                    .foregroundStyle(Theme.Color.textMuted)
+                    .lineLimit(2)
+            }
+
+            if setup.movedToBreakeven {
+                Text("Stop moved to breakeven")
+                    .font(.system(size: 7, weight: .bold, design: .monospaced))
+                    .foregroundStyle(Theme.Color.warn)
+            }
+        }
+        .padding(6)
+        .background(Theme.Color.surfaceHi.opacity(0.35))
+        .cornerRadius(5)
         .overlay(
-            Rectangle()
-                .fill(Theme.Color.accentStart.opacity(0.35))
-                .frame(width: 1),
-            alignment: .leading
+            RoundedRectangle(cornerRadius: 5)
+                .stroke(dirColor.opacity(setup.status.isUntriggered ? 0.15 : 0.35), lineWidth: 1)
         )
+    }
+
+    private func ebpStatusLabel(_ status: EngulfingBarPlay.Status) -> String {
+        switch status {
+        case .pending:   return "⏳ WAITING"
+        case .triggered: return "🚀 LIVE"
+        case .hitTP:     return "TP"
+        case .hitSL:     return "SL"
+        case .breakeven: return "BE"
+        case .cancelled: return "EXPIRED"
+        case .skipped:   return "SKIPPED"
+        }
+    }
+
+    private func ebpStatusColor(_ status: EngulfingBarPlay.Status) -> Color {
+        switch status {
+        case .triggered: return Color(red: 0.15, green: 0.85, blue: 0.95)
+        case .pending:   return Color(red: 1.00, green: 0.60, blue: 0.00)
+        case .hitTP:     return Theme.Color.success
+        case .hitSL:     return Theme.Color.danger
+        case .breakeven: return Theme.Color.warn
+        case .cancelled, .skipped: return Theme.Color.textMuted
+        }
     }
 
     private func filterChip(_ label: String, isActive: Bool, action: @escaping () -> Void) -> some View {
@@ -334,6 +722,20 @@ struct SentinelRadarDrawer: View {
                     .padding(.vertical, 1)
                     .background(dirColor.opacity(0.20))
                     .foregroundStyle(dirColor)
+                    .cornerRadius(3)
+
+                // Which timeframe found this setup. The list is a flat mix of
+                // every scanned timeframe, so the row has to say.
+                Text(alert.timeframe.uppercased())
+                    .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 0.5)
+                    .background(alert.timeframe == chartTimeframe.rawValue
+                                ? Theme.Color.surfaceHi.opacity(0.8)
+                                : Theme.Color.accentStart.opacity(0.20))
+                    .foregroundStyle(alert.timeframe == chartTimeframe.rawValue
+                                     ? Theme.Color.textMuted
+                                     : Theme.Color.accentStart)
                     .cornerRadius(3)
 
                 if alert.breakdown?.hasTrigger == true {

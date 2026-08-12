@@ -138,16 +138,14 @@ enum SMCSentinelEngine {
 
     // MARK: - Entry point
 
-    /// Runs the full strategy over a candle series and its aggregated
-    /// higher-timeframe series.
-    /// - Parameter htfFactor: how many LTF bars make one HTF bar. Used to map
-    ///   the HTF context bar back into LTF bar space so the liquidity grab can
-    ///   be required to happen *after* the context event.
+    /// Runs the full strategy over a candle series and its higher-timeframe
+    /// series. The two series are matched by **date**, not by bar count — the
+    /// HTF candles are loaded independently and need not start where the LTF
+    /// ones do.
     static func scan(
         candles: [Candle],
         htfCandles: [Candle],
-        htfLabel: String,
-        htfFactor: Int = 1
+        htfLabel: String
     ) -> ScanResult {
         guard candles.count >= 60, let last = candles.last else {
             return ScanResult(setups: [], context: nil, equilibrium: nil, blocker: .notEnoughBars)
@@ -191,7 +189,14 @@ enum SMCSentinelEngine {
         //    BOS → IDM sweep → BOS, so gating on the newest LTF BOS would throw
         //    away the very sweep that qualifies the setup.
         let ltfEvents = structureEvents(ltf)
-        let contextLTFBar = htf == nil ? context.bar : context.bar * max(1, htfFactor)
+        let contextLTFBar: Int
+        if htf == nil {
+            contextLTFBar = context.bar          // already an LTF index
+        } else if context.bar < htfCandles.count {
+            contextLTFBar = firstBar(in: candles, atOrAfter: htfCandles[context.bar].id)
+        } else {
+            contextLTFBar = lastBar
+        }
         let earliest = max(0, min(contextLTFBar, lastBar), lastBar - grabLookbackBars)
 
         let idmGrab = ltf.lines
@@ -397,6 +402,30 @@ enum SMCSentinelEngine {
     }
 
     // MARK: - Strategy primitives
+
+    /// Index of the first candle opening at or after `date`, or the last index
+    /// when the whole series predates it. Binary search — both series are
+    /// stored oldest-first.
+    ///
+    /// This is how an HTF bar is located in LTF bar space. Multiplying the HTF
+    /// index by a bar-count factor only works when both series start on the
+    /// same bar, which is false for any independently loaded HTF series.
+    static func firstBar(in candles: [Candle], atOrAfter date: Date) -> Int {
+        guard !candles.isEmpty else { return 0 }
+        var low = 0
+        var high = candles.count - 1
+        var found = candles.count
+        while low <= high {
+            let mid = (low + high) / 2
+            if candles[mid].id >= date {
+                found = mid
+                high = mid - 1
+            } else {
+                low = mid + 1
+            }
+        }
+        return min(found, candles.count - 1)
+    }
 
     /// Confirmed BOS / CHoCH lines, oldest first.
     static func structureEvents(_ out: AlgoSmartAssist.Output) -> [AlgoSmartAssist.StructureLine] {

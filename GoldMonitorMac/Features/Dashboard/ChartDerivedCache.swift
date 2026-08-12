@@ -953,6 +953,37 @@ final class ChartDerivedCache: ObservableObject {
         }
     }
 
+    /// EBP — Engulfing Bar Play. Keyed on the trailing bar's OHLC for the
+    /// same reason as `RankedSP2LBTBSig`: the live bar can be the one
+    /// that fills a resting limit or reaches a level, and watching that
+    /// happen is the point of the overlay.
+    private struct EBPSig: Equatable {
+        let count: Int
+        let firstTS: TimeInterval
+        let lastTS: TimeInterval
+        let lastHigh: Double
+        let lastLow: Double
+        let lastClose: Double
+        let config: EngulfingBarPlay.Configuration
+    }
+    private let ebpSlot = Slot<EBPSig, EngulfingBarPlay.Output>(.empty)
+
+    func engulfingBarPlay(candles: [Candle], config: EngulfingBarPlay.Configuration) -> EngulfingBarPlay.Output {
+        let last = candles.last
+        let sig = EBPSig(
+            count: candles.count,
+            firstTS: candles.first?.id.timeIntervalSince1970 ?? 0,
+            lastTS: last?.id.timeIntervalSince1970 ?? 0,
+            lastHigh: last?.high ?? 0,
+            lastLow: last?.low ?? 0,
+            lastClose: last?.close ?? 0,
+            config: config
+        )
+        return resolve(ebpSlot, signature: sig) {
+            EngulfingBarPlay.compute(candles, configuration: config)
+        }
+    }
+
     // ── Volume Profile ─────────────────────────────────────────────────
 
     /// Includes the trailing bar's timestamp/close/volume so the 1 Hz
@@ -1351,6 +1382,7 @@ final class ChartDerivedCache: ObservableObject {
         let algoSmartAssistOutput: AlgoSmartAssist.Output
         var amdCycles: [AMDCycle.Cycle] = []
         var rankedSP2LBTB: RankedSP2LBTB.Output = .empty
+        var engulfingBarPlay: EngulfingBarPlay.Output = .empty
         let chochZones: [ChangeOfCharacter.Zone]
         let htfChochZones: [ChangeOfCharacter.DatedZone]
         let sessionRuns: [TradingSessions.SessionRun]
@@ -1397,6 +1429,9 @@ final class ChartDerivedCache: ObservableObject {
         /// Same reasoning as `amdKeys`: a live setup's plan levels move
         /// while the setup count stays put.
         let rankedSP2LBTBKeys: [String]
+        /// Same reasoning again: a resting limit becomes a fill and a
+        /// breakeven rule moves the stop, both without changing the count.
+        let ebpKeys: [String]
         let chochCount: Int
         let htfChochCount: Int
         let sessionCount: Int
@@ -1455,6 +1490,9 @@ final class ChartDerivedCache: ObservableObject {
             rankedSP2LBTBKeys: data.rankedSP2LBTB.setups.map {
                 "\($0.id)|\($0.status.rawValue)|\($0.takeProfit ?? 0)"
             } + data.rankedSP2LBTB.orderBlocks.map(\.id),
+            ebpKeys: data.engulfingBarPlay.setups.map {
+                "\($0.id)|\($0.status.rawValue)|\($0.stopLoss ?? 0)"
+            },
             chochCount: data.chochZones.count,
             htfChochCount: data.htfChochZones.count,
             sessionCount: data.sessionRuns.count,
@@ -1607,6 +1645,14 @@ final class ChartDerivedCache: ObservableObject {
             for block in data.rankedSP2LBTB.orderBlocks {
                 if block.bottom < lo { lo = block.bottom }
                 if block.top > hi { hi = block.top }
+            }
+            for setup in data.engulfingBarPlay.setups {
+                var values = [setup.barHigh, setup.barLow, setup.entryLevel]
+                values.append(contentsOf: [setup.stopLoss, setup.takeProfit].compactMap { $0 })
+                for v in values {
+                    if v < lo { lo = v }
+                    if v > hi { hi = v }
+                }
             }
             // Ichimoku lines — Span B (widest window) and Kijun bound the
             // system; scanning both spans covers the cloud extremes too.

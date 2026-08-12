@@ -191,6 +191,16 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
     /// `RankedSP2LBTB` + ChartView's `rankedSP2LBTBMarks`). Ported from
     /// the PineScript v6 "SP2L + Pro BTB x Ranked OB".
     case rankedSP2LBTB
+    /// EBP — Engulfing Bar Play (the Omar Agag swing model). A candle
+    /// that sweeps the previous candle's extreme with its shadow only,
+    /// then closes back through that candle's body. Where the close
+    /// lands inside the EBP candle's own range decides the plan: a
+    /// strong close rests a shallow limit with the stop inside the
+    /// candle, an indecisive one retraces to the midpoint with the stop
+    /// behind the whole thing, and a close already past 50% is taken at
+    /// market (see `EngulfingBarPlay` + ChartView's `ebpMarks`). Ported
+    /// from the PineScript v6 "EBP – Engulfing Bar Play".
+    case engulfingBarPlay
 
     var id: String { rawValue }
 
@@ -225,6 +235,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .algoSmartAssist: return "ALGOSMART ASSIST v2"
         case .amdCycle:       return "AMD · Accum / Manip / Distrib"
         case .rankedSP2LBTB:  return "SP2L + Pro BTB × Ranked OB"
+        case .engulfingBarPlay: return "EBP · Engulfing Bar Play"
         }
     }
 
@@ -259,6 +270,7 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
         case .algoSmartAssist: return Color(red: 0.95, green: 0.82, blue: 0.20)
         case .amdCycle:       return Color(red: 0.55, green: 0.72, blue: 1.00)
         case .rankedSP2LBTB:  return Color(red: 0.69, green: 0.49, blue: 1.00)
+        case .engulfingBarPlay: return Color(red: 0.98, green: 0.55, blue: 0.42)
         }
     }
 
@@ -755,6 +767,51 @@ enum IndicatorKind: String, CaseIterable, Identifiable, Hashable, Codable {
                 .bool(key: "showPlan", label: "Show entry / SL / TP", default: true),
                 .bool(key: "showLabels", label: "Show labels", default: true),
                 .bool(key: "showUntriggered", label: "Show zones that never fired", default: true),
+            ]
+        case .engulfingBarPlay:
+            return [
+                // ── Source ────────────────────────────────────────────
+                // "Chart" follows whatever timeframe is on screen;
+                // anything else computes on that timeframe's candles and
+                // projects the result onto the chart by date.
+                .enum(key: "sourceTimeframe", label: "Detect on timeframe", default: "chart", options: [
+                    ParamOption(label: "Chart timeframe", value: "chart"),
+                    ParamOption(label: "1 min", value: "1m"),
+                    ParamOption(label: "5 min", value: "5m"),
+                    ParamOption(label: "15 min", value: "15m"),
+                    ParamOption(label: "30 min", value: "30m"),
+                    ParamOption(label: "1 hour", value: "1h"),
+                    ParamOption(label: "4 hours", value: "4h"),
+                    ParamOption(label: "1 day", value: "1d"),
+                ]),
+                .bool(key: "notify", label: "Send notifications", default: true),
+                // ── Pattern rules ─────────────────────────────────────
+                .enum(key: "directionMode", label: "Direction", default: "both", options: [
+                    ParamOption(label: "Both", value: "both"),
+                    ParamOption(label: "Bullish only", value: "long"),
+                    ParamOption(label: "Bearish only", value: "short"),
+                ]),
+                .bool(key: "requireOppositeColour", label: "Previous candle must be the opposite colour", default: true),
+                .bool(key: "wickOnlySweep", label: "Sweep must be made by the shadow only", default: true),
+                .bool(key: "requireFullEngulf", label: "Close must clear the previous high/low, not just the body", default: false),
+                .double(key: "minRangeATR", label: "Min EBP range (× ATR, 0 = off)", default: 0, step: 0.1, range: 0...10),
+                .double(key: "atrLength", label: "ATR length", default: 14, step: 1, range: 2...100),
+                .double(key: "minTimeframeMinutes", label: "Min bar size (minutes, 0 = off)", default: 0, step: 5, range: 0...1440),
+                // ── Trade model ───────────────────────────────────────
+                .double(key: "strongClosePercent", label: "Strong-close threshold (%)", default: 15, step: 1, range: 1...49),
+                .double(key: "strongEntryPercent", label: "Strong close · entry (% retrace)", default: 25, step: 1, range: 1...99),
+                .double(key: "strongStopPercent", label: "Strong close · stop (% retrace)", default: 75, step: 1, range: 2...100),
+                .double(key: "indecisiveEntryPercent", label: "Indecisive close · entry (% retrace)", default: 50, step: 1, range: 1...99),
+                .bool(key: "marketEntryBeyondHalf", label: "Market entry when the close is beyond 50%", default: true),
+                .double(key: "riskReward", label: "Target (R multiple)", default: 2.0, step: 0.5, range: 0.5...20),
+                .double(key: "expiryBars", label: "Cancel unfilled limit after N bars (0 = never)", default: 20, step: 1, range: 0...200),
+                .bool(key: "breakevenOnNewExtreme", label: "Stop to breakeven on a new extreme", default: false),
+                // ── Display ───────────────────────────────────────────
+                .double(key: "maxSetups", label: "Setups to show", default: 8, step: 1, range: 1...40),
+                .bool(key: "showZones", label: "Show the EBP candle range", default: true),
+                .bool(key: "showPlan", label: "Show entry / SL / TP", default: true),
+                .bool(key: "showLabels", label: "Show setup labels", default: true),
+                .bool(key: "showUntriggered", label: "Show setups that never filled", default: true),
             ]
         }
     }

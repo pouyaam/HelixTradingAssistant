@@ -600,7 +600,6 @@ final class AnalysisStore: ObservableObject {
         freeText: String? = nil,
         tabID: UUID? = nil
     ) {
-        let htfFactor = htfTimeframe.map { max(1, Int($0.seconds / timeframe.seconds)) } ?? 1
         let htfLabel = htfTimeframe?.rawValue ?? ""
 
         Task.detached(priority: .userInitiated) {
@@ -610,8 +609,7 @@ final class AnalysisStore: ObservableObject {
                 timeframe: timeframe,
                 candles: candles,
                 htfCandles: htfCandles,
-                htfLabel: htfLabel,
-                htfFactor: htfFactor
+                htfLabel: htfLabel
             )
             // The HTF pack is bias-only: no sentinel pass (its context
             // rule needs a timeframe *above* the one being scanned, and

@@ -252,7 +252,6 @@ struct MCPToolbox {
                     candles: req.candles,
                     htfCandles: htf.candles,
                     htfLabel: htf.label,
-                    htfFactor: htf.factor,
                     options: opts
                 )
 
@@ -413,8 +412,7 @@ struct MCPToolbox {
                     timeframe: req.timeframe,
                     candles: req.candles,
                     htfCandles: htf.candles,
-                    htfLabel: htf.label,
-                    htfFactor: htf.factor
+                    htfLabel: htf.label
                 )
 
                 var htfEvidence: SMCEvidence? = nil
@@ -897,7 +895,6 @@ struct MCPToolbox {
         let timeframe: Timeframe?
         let candles: [Candle]
         let label: String
-        let factor: Int
     }
 
     /// Load the bias timeframe: whatever `htf_timeframe` names, else one
@@ -907,7 +904,7 @@ struct MCPToolbox {
         request: SeriesRequest,
         load: Bool
     ) throws -> HTFSeries {
-        guard load else { return HTFSeries(timeframe: nil, candles: [], label: "", factor: 1) }
+        guard load else { return HTFSeries(timeframe: nil, candles: [], label: "") }
 
         let tf: Timeframe?
         if let named = args["htf_timeframe"]?.stringValue {
@@ -922,7 +919,7 @@ struct MCPToolbox {
             // Daily entry, or a caller that named a timeframe at or below
             // the entry one. No bias series — the evidence pack falls back
             // to its own read and reports the gap.
-            return HTFSeries(timeframe: nil, candles: [], label: "", factor: 1)
+            return HTFSeries(timeframe: nil, candles: [], label: "")
         }
 
         let until = Date()
@@ -938,21 +935,9 @@ struct MCPToolbox {
         return HTFSeries(
             timeframe: candles.isEmpty ? nil : tf,
             candles: Array(candles.suffix(400)),
-            label: candles.isEmpty ? "" : tf.rawValue,
-            factor: max(1, Int(tf.seconds / request.timeframe.seconds))
+            label: candles.isEmpty ? "" : tf.rawValue
         )
     }
 
-    /// Mirrors `AnalysisPage.higherTimeframe(above:)` — the 4× ladder.
-    static func higherTimeframe(above tf: Timeframe) -> Timeframe? {
-        switch tf {
-        case .m1:  return .m15
-        case .m5:  return .m30
-        case .m15: return .h1
-        case .m30: return .h4
-        case .h1:  return .h4
-        case .h4:  return .d1
-        case .d1:  return nil
-        }
-    }
+    static func higherTimeframe(above tf: Timeframe) -> Timeframe? { tf.higher }
 }

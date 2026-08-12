@@ -198,8 +198,8 @@ struct SMCEvidence: Codable, Equatable {
     ///
     /// - Parameters:
     ///   - htfCandles: higher-timeframe series for the sentinel's context
-    ///     rule. Pass empty to let it fall back to the LTF read.
-    ///   - htfFactor: how many LTF bars make one HTF bar (e.g. 15m → 1h = 4).
+    ///     rule. Pass empty to let it fall back to the LTF read. Matched to
+    ///     `candles` by date, so it need not start on the same bar.
     static func build(
         pairID: String,
         symbol: String,
@@ -207,7 +207,6 @@ struct SMCEvidence: Codable, Equatable {
         candles: [Candle],
         htfCandles: [Candle] = [],
         htfLabel: String = "",
-        htfFactor: Int = 1,
         options: Options = .default
     ) -> SMCEvidence {
         var gaps: [String] = []
@@ -299,8 +298,7 @@ struct SMCEvidence: Codable, Equatable {
             let scan = SMCSentinelEngine.scan(
                 candles: candles,
                 htfCandles: htfCandles,
-                htfLabel: htfLabel,
-                htfFactor: max(1, htfFactor)
+                htfLabel: htfLabel
             )
             sentinel = buildSentinelRead(scan, htfLabel: htfLabel, spot: spot)
         }

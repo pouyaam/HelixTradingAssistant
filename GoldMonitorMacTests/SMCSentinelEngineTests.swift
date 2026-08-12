@@ -237,8 +237,7 @@ final class SMCSentinelEngineTests: XCTestCase {
                 let result = SMCSentinelEngine.scan(
                     candles: candles,
                     htfCandles: aggregate(candles, factor: 4),
-                    htfLabel: "1h",
-                    htfFactor: 4
+                    htfLabel: "1h"
                 )
 
                 guard let context = result.context, let eq = result.equilibrium else {
@@ -304,8 +303,7 @@ final class SMCSentinelEngineTests: XCTestCase {
             let result = SMCSentinelEngine.scan(
                 candles: candles,
                 htfCandles: aggregate(candles, factor: 4),
-                htfLabel: "1h",
-                htfFactor: 4
+                htfLabel: "1h"
             )
             for s in result.setups {
                 XCTAssertTrue(
@@ -320,8 +318,8 @@ final class SMCSentinelEngineTests: XCTestCase {
     func testScanIsDeterministic() {
         let candles = syntheticMarket(bars: 423, drift: 4, seed: 1)
         let htf = aggregate(candles, factor: 4)
-        let a = SMCSentinelEngine.scan(candles: candles, htfCandles: htf, htfLabel: "1h", htfFactor: 4)
-        let b = SMCSentinelEngine.scan(candles: candles, htfCandles: htf, htfLabel: "1h", htfFactor: 4)
+        let a = SMCSentinelEngine.scan(candles: candles, htfCandles: htf, htfLabel: "1h")
+        let b = SMCSentinelEngine.scan(candles: candles, htfCandles: htf, htfLabel: "1h")
         XCTAssertEqual(a, b)
     }
 }

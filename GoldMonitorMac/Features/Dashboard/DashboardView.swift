@@ -73,6 +73,14 @@ struct DashboardView: View {
     /// zones on my LTF chart" overlay. Loaded from a separate HTF candle
     /// read; recomputed on pair / timeframe change and CHoCH settings edits.
     @State private var htfChochZones: [ChangeOfCharacter.DatedZone] = []
+    /// EBP setups detected on a timeframe *other* than the one on screen,
+    /// for the indicator's "Detect on timeframe" setting. Date-stamped by
+    /// the engine so `ChartView` can project them onto the displayed
+    /// series. Empty whenever the setting is "Chart timeframe" (the chart
+    /// computes that case itself, off its own candles).
+    @State private var ebpExternal: EngulfingBarPlay.Output = .empty
+    /// Label of the timeframe `ebpExternal` was detected on, for the tags.
+    @State private var ebpExternalLabel: String?
     /// User-pinned X-axis window, in *bar indices* (Double for fractional
     /// smoothness during pan/zoom). nil ⇒ chart auto-fits to the full
     /// series. Index-based so consecutive candles never get separated by
@@ -353,6 +361,14 @@ struct DashboardView: View {
     }
 
     private func focusOnRadarAlert(_ alert: RadarAlert) {
+        // The radar can list a setup found on a timeframe other than the one
+        // on screen. Framing its price window over the chart's bars would put
+        // the POI off-screen, so move the chart to the setup's own timeframe
+        // first — that is what a TF-tagged row implies.
+        if let tf = Timeframe(rawValue: alert.timeframe), tf != timeframe {
+            timeframe = tf
+        }
+
         let minP = min(alert.stopLoss, alert.entryPrice, alert.takeProfit)
         let maxP = max(alert.stopLoss, alert.entryPrice, alert.takeProfit)
         let span = max(0.5, maxP - minP)
@@ -743,6 +759,7 @@ struct DashboardView: View {
         indicatorInstances.append(inst)
         saveIndicators()
         if kind == .changeOfCharacter { Task { await reloadHTFChoch() } }
+        if kind == .engulfingBarPlay { Task { await reloadExternalEBP() } }
     }
 
     /// Remove an indicator instance by id.
@@ -751,6 +768,7 @@ struct DashboardView: View {
         indicatorInstances.removeAll { $0.id == id }
         saveIndicators()
         if removed?.kind == .changeOfCharacter { Task { await reloadHTFChoch() } }
+        if removed?.kind == .engulfingBarPlay { Task { await reloadExternalEBP() } }
     }
 
     /// Update an indicator instance in-place.
@@ -760,6 +778,7 @@ struct DashboardView: View {
         saveIndicators()
         syncIndicatorParamsToConfig(inst)
         if inst.kind == .changeOfCharacter { Task { await reloadHTFChoch() } }
+        if inst.kind == .engulfingBarPlay { Task { await reloadExternalEBP() } }
     }
 
     /// Toggle hide/show for an indicator instance.
@@ -768,6 +787,7 @@ struct DashboardView: View {
         indicatorInstances[idx].hidden.toggle()
         saveIndicators()
         if indicatorInstances[idx].kind == .changeOfCharacter { Task { await reloadHTFChoch() } }
+        if indicatorInstances[idx].kind == .engulfingBarPlay { Task { await reloadExternalEBP() } }
     }
 
     private func addOscillator(_ kind: OscillatorKind) {
@@ -1269,6 +1289,7 @@ struct DashboardView: View {
             loadOscillators()
             alertStore.attach(inbox: notificationInbox)
             StrategySentinel.shared.notificationInbox = notificationInbox
+            if let db = app.database { StrategySentinel.shared.attach(database: db) }
             alertStore.timeframeLabel = timeframe.rawValue
             autoTrader.candleLoader = { [weak app = self.app] pairID, tf in
                 guard app != nil else { return [] }
@@ -1461,11 +1482,13 @@ struct DashboardView: View {
                 self.recomputeTotalVolume()
                 self.refreshNYSetupScenario()
                 if let pairID = self.app.selectedPairID, let pair = self.app.pairs.first(where: { $0.id == pairID }) {
-                    StrategySentinel.shared.evaluateSymbol(
+                    StrategySentinel.shared.scan(
                         pairID: pairID,
                         symbol: pair.symbol,
-                        timeframe: self.timeframe.rawValue,
-                        candles: self.candles
+                        chartTimeframe: self.timeframe,
+                        chartCandles: self.candles,
+                        respectsWeekend: pair.category != .crypto,
+                        until: self.replay.cursor ?? Date()
                     )
                 }
             }
@@ -1779,6 +1802,8 @@ struct DashboardView: View {
                     indicatorConfig: oscillatorConfig,
                     indicatorInstances: visibleIndicatorInstances,
                     htfChochZones: htfChochZones,
+                    ebpExternal: ebpExternal,
+                    ebpExternalLabel: ebpExternalLabel,
                     srLevels: srVisible ? srLevels : .init(support: [], resistance: []),
                     fvgZones: fvgVisible ? fvgZones : [],
                     supplyDemandZones: supplyDemandVisible ? supplyDemandZones : [],
@@ -1981,6 +2006,7 @@ struct DashboardView: View {
                 // volume and sorted nearest-first by distance to live price.
                 .overlay(alignment: .trailing) {
                     SentinelRadarDrawer(
+                        chartTimeframe: timeframe,
                         livePrice: currentLivePrice,
                         onSelectAlert: { alert in
                             self.handleRadarAlertSelection(alert)
@@ -3622,7 +3648,9 @@ struct DashboardView: View {
             alertStore.evaluateRSI(r, pricePeek: livePeek, for: pairID)
         }
         notifyOrderBlockEvents(result, pairID: pairID)
+        refreshEBP(result, pairID: pairID)
         await reloadHTFChoch()
+        await reloadExternalEBP()
     }
 
     /// Load the higher-timeframe CHoCH zones for the multi-timeframe
@@ -3661,6 +3689,63 @@ struct DashboardView: View {
             showMitigated: cfg.chochShowMitigated,
             maxZones: max(1, cfg.chochHTFCount)
         )
+    }
+
+    /// The EBP indicator's params, or `nil` when it isn't on the chart.
+    private var ebpParams: [String: ParamValue]? {
+        visibleIndicatorInstances.first(where: { $0.kind == .engulfingBarPlay })?.params
+    }
+
+    /// The timeframe EBP should detect on, or `nil` for "follow the
+    /// chart" — which also covers a setting that names the timeframe
+    /// already in view, since detecting on it twice would be wasted work.
+    private func ebpSourceTimeframe(_ params: [String: ParamValue]) -> Timeframe? {
+        guard let raw = params["sourceTimeframe"]?.stringValue, raw != "chart",
+              let tf = Timeframe(rawValue: raw), tf != timeframe
+        else { return nil }
+        return tf
+    }
+
+    /// Load EBP setups from a timeframe other than the one on screen.
+    /// Mirrors `reloadHTFChoch`: a separate candle read for the chosen
+    /// timeframe, computed there, and left date-stamped so `ChartView`
+    /// can project it onto the displayed series. A no-op (and a clear)
+    /// unless the indicator is visible and set to a different timeframe.
+    private func reloadExternalEBP() async {
+        guard let params = ebpParams,
+              let tf = ebpSourceTimeframe(params),
+              let db = app.database,
+              let pairID = app.selectedPairID
+        else {
+            if !ebpExternal.setups.isEmpty { ebpExternal = .empty }
+            if ebpExternalLabel != nil { ebpExternalLabel = nil }
+            // The indicator may have just been switched back to the chart
+            // timeframe or removed entirely; let the radar catch up
+            // instead of holding a stale foreign-timeframe read.
+            if let pairID = app.selectedPairID { refreshEBP(candles, pairID: pairID) }
+            return
+        }
+
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        let respectsWeekend = pair?.category != .crypto
+        let until = replay.cursor ?? Date()
+        let sourceCandles = await OHLCCandleLoader.loadAsync(
+            repo: db.ohlcRepo, pairID: pairID, tf: tf,
+            since: Date.distantPast, until: until,
+            dropClosedDays: respectsWeekend
+        )
+        let config = EngulfingBarPlay.Configuration(params: params)
+        let output = await Task.detached(priority: .utility) {
+            EngulfingBarPlay.compute(sourceCandles, configuration: config)
+        }.value
+
+        ebpExternal = output
+        // The raw value, not a display string — `ChartView` maps it back
+        // to a `Timeframe` to size the projected bars.
+        ebpExternalLabel = tf.rawValue
+        // Push the fresh read straight to the radar / Inbox rather than
+        // waiting for the next candle refresh.
+        refreshEBP(candles, pairID: pairID)
     }
 
     /// Cheap live-tick path. The full `reloadCandles()` now re-reads the
@@ -3704,12 +3789,15 @@ struct DashboardView: View {
             alertStore.evaluateRSI(r, pricePeek: yahoo.latestPrices[pairID], for: pairID)
         }
         notifyOrderBlockEvents(merged, pairID: pairID)
+        refreshEBP(merged, pairID: pairID)
         if let pair = pair {
-            StrategySentinel.shared.evaluateSymbol(
+            StrategySentinel.shared.scan(
                 pairID: pairID,
                 symbol: pair.symbol,
-                timeframe: timeframe.rawValue,
-                candles: merged
+                chartTimeframe: timeframe,
+                chartCandles: merged,
+                respectsWeekend: pair.category != .crypto,
+                until: replay.cursor ?? Date()
             )
         }
     }
@@ -3725,7 +3813,8 @@ struct DashboardView: View {
         let rankedOrderBlockActive = isStrategyNotificationActive(.rankedOrderBlock)
         let chochActive = isStrategyNotificationActive(.changeOfCharacter)
         let rankedSP2LBTBActive = isStrategyNotificationActive(.rankedSP2LBTB)
-        guard orderBlockActive || steroidOrderBlockActive || rankedOrderBlockActive || chochActive || rankedSP2LBTBActive else { return }
+        guard orderBlockActive || steroidOrderBlockActive || rankedOrderBlockActive || chochActive
+            || rankedSP2LBTBActive else { return }
         let pairLabel = app.pairs.first(where: { $0.id == pairID })?.name ?? pairID
 
         // Each indicator's full-history `compute` runs on its own
@@ -3806,6 +3895,59 @@ struct DashboardView: View {
                 let output = RankedSP2LBTB.compute(candles, configuration: config)
                 await self.alertStore.evaluateRankedSP2LBTBOrderBlocks(output.orderBlocks, pairID: pairID, pairLabel: pairLabel)
                 await self.alertStore.evaluateRankedSP2LBTBSetups(output.setups, pairID: pairID, pairLabel: pairLabel)
+            }
+        }
+    }
+
+    /// One EBP pass that feeds both the Sentinel radar and the Inbox.
+    ///
+    /// Deliberately *not* part of `notifyOrderBlockEvents`: the radar
+    /// should mirror the chart whenever the indicator is on it, while
+    /// notifications are gated separately by the layer eye, the global
+    /// master switch and the indicator's own `notify` toggle. Computing
+    /// once and fanning out keeps the two from ever disagreeing.
+    private func refreshEBP(_ candles: [Candle], pairID: String) {
+        guard let params = ebpParams else {
+            StrategySentinel.shared.clearEBP(pairID: pairID)
+            return
+        }
+        let pair = app.pairs.first(where: { $0.id == pairID })
+        let pairLabel = pair?.name ?? pairID
+        let symbol = pair?.symbol ?? pairLabel
+        let notify = isStrategyNotificationActive(.engulfingBarPlay)
+            && (params["notify"]?.boolValue ?? true)
+
+        // Pinned to another timeframe: reuse the series that is already
+        // being drawn rather than recomputing on the chart's candles.
+        // `reloadExternalEBP` refreshes it on the reload cadence, so this
+        // trails it by at most one tick — well inside one bar of a
+        // higher timeframe.
+        if let tf = ebpSourceTimeframe(params) {
+            guard ebpExternalLabel != nil else { return }
+            StrategySentinel.shared.publishEBP(
+                pairID: pairID, symbol: symbol, timeframe: tf.rawValue, output: ebpExternal
+            )
+            if notify {
+                alertStore.evaluateEngulfingBarPlaySetups(
+                    ebpExternal.setups,
+                    pairID: pairID, pairLabel: pairLabel, timeframeLabel: tf.rawValue
+                )
+            }
+            return
+        }
+
+        let tfLabel = timeframe.rawValue
+        Task.detached(priority: .utility) {
+            let config = EngulfingBarPlay.Configuration(params: params)
+            let output = EngulfingBarPlay.compute(candles, configuration: config)
+            await MainActor.run {
+                StrategySentinel.shared.publishEBP(
+                    pairID: pairID, symbol: symbol, timeframe: tfLabel, output: output
+                )
+                guard notify else { return }
+                self.alertStore.evaluateEngulfingBarPlaySetups(
+                    output.setups, pairID: pairID, pairLabel: pairLabel
+                )
             }
         }
     }

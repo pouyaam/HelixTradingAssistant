@@ -214,6 +214,21 @@ struct ChartViewiPad: View {
         )
     }
 
+    /// Params for the EBP indicator, or `nil` when it's off.
+    private var ebpParams: [String: ParamValue]? {
+        guard indicators.contains(.engulfingBarPlay) else { return nil }
+        return indicatorInstances.first(where: { $0.kind == .engulfingBarPlay })?.params ?? [:]
+    }
+
+    /// Engulfing Bar Play setups plus the running win/loss tally.
+    private var ebpOutput: EngulfingBarPlay.Output {
+        guard let params = ebpParams else { return .empty }
+        return derived.engulfingBarPlay(
+            candles: candles,
+            config: EngulfingBarPlay.Configuration(params: params)
+        )
+    }
+
     private var sonarlabOBZones: [SonarlabOrderBlocks.Zone] {
         guard indicators.contains(.sonarlabOrderBlock) else { return [] }
         let mitType: SonarlabOrderBlocks.MitigationType =
@@ -538,6 +553,7 @@ struct ChartViewiPad: View {
                 algoSmartAssistMarks
                 amdMarks
                 rankedSP2LBTBMarks
+                ebpMarks
                 chochMarks
                 htfChochMarks
                 scenarioMarks
@@ -2656,6 +2672,129 @@ struct ChartViewiPad: View {
         }
     }
 
+    // MARK: - EBP · Engulfing Bar Play
+
+    /// Mirrors `ChartView.EBPStyle`.
+    private struct EBPStyle {
+        let zones: Bool
+        let plan: Bool
+        let labels: Bool
+        let untriggered: Bool
+        let rightEdge: Double
+
+        init(params: [String: ParamValue], rightEdge: Double) {
+            zones = params["showZones"]?.boolValue ?? true
+            plan = params["showPlan"]?.boolValue ?? true
+            labels = params["showLabels"]?.boolValue ?? true
+            untriggered = params["showUntriggered"]?.boolValue ?? true
+            self.rightEdge = rightEdge
+        }
+    }
+
+    private func ebpColor(_ setup: EngulfingBarPlay.Setup) -> Color {
+        let base = setup.direction.isLong ? Theme.Color.success : Theme.Color.danger
+        switch setup.status {
+        case .skipped, .cancelled: return base.opacity(0.4)
+        case .pending:             return base.opacity(0.7)
+        default:                   return base
+        }
+    }
+
+    @ChartContentBuilder
+    private var ebpMarks: some ChartContent {
+        if let params = ebpParams {
+            let lastBar = Double(max(0, candles.count - 1))
+            let style = EBPStyle(
+                params: params,
+                rightEdge: max(lastBar, effectiveXDomain.upperBound)
+            )
+            ForEach(ebpOutput.setups) { setup in
+                if style.untriggered || !setup.status.isUntriggered {
+                    ebpSetupMark(setup, style: style)
+                }
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private func ebpSetupMark(
+        _ setup: EngulfingBarPlay.Setup,
+        style: EBPStyle
+    ) -> some ChartContent {
+        let color = ebpColor(setup)
+        let live = setup.status == .pending || setup.status == .triggered
+        let planEnd = live ? style.rightEdge : Double(setup.lastRelevantIndex)
+
+        if style.zones {
+            RectangleMark(
+                xStart: .value("EBP bar x0", Double(setup.index) - 0.5),
+                xEnd:   .value("EBP bar x1", Double(setup.index) + 0.5),
+                yStart: .value("EBP bar y0", setup.barLow),
+                yEnd:   .value("EBP bar y1", setup.barHigh)
+            )
+            .foregroundStyle(color.opacity(0.15))
+        }
+
+        if style.plan, let stop = setup.stopLoss, let target = setup.takeProfit {
+            let x0 = Double(setup.index)
+            ebpPlanLevel(setup.entryLevel, from: x0, to: planEnd, color: color,
+                         width: 1.6, dash: setup.triggerIndex == nil ? [4, 3] : [])
+            ebpPlanLevel(stop, from: x0, to: planEnd,
+                         color: Theme.Color.danger, width: 1.3, dash: [5, 3])
+            ebpPlanLevel(target, from: x0, to: planEnd,
+                         color: Theme.Color.success, width: 1.3, dash: [5, 3])
+        }
+
+        if style.labels {
+            PointMark(
+                x: .value("EBP tag x", Double(setup.index)),
+                y: .value("EBP tag y", setup.direction.isLong ? setup.barLow : setup.barHigh)
+            )
+            .symbolSize(40)
+            .symbol(setup.direction.isLong ? .triangle : .diamond)
+            .foregroundStyle(color)
+            .annotation(
+                position: setup.direction.isLong ? .bottom : .top,
+                alignment: .center,
+                spacing: 3
+            ) {
+                setupTag(ebpTag(setup), color: color)
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private func ebpPlanLevel(
+        _ price: Double,
+        from x0: Double,
+        to x1: Double,
+        color: Color,
+        width: CGFloat,
+        dash: [CGFloat]
+    ) -> some ChartContent {
+        RuleMark(
+            xStart: .value("EBP plan x0", x0),
+            xEnd:   .value("EBP plan x1", x1),
+            y:      .value("EBP plan y", price)
+        )
+        .foregroundStyle(color)
+        .lineStyle(StrokeStyle(lineWidth: width, dash: dash))
+    }
+
+    private func ebpTag(_ setup: EngulfingBarPlay.Setup) -> String {
+        let arrow = setup.direction.isLong ? "▲" : "▼"
+        let base = "\(arrow) \(setup.badge)"
+        switch setup.status {
+        case .pending:   return "\(base) · waiting"
+        case .triggered: return base
+        case .hitTP:     return "\(base) · TP"
+        case .hitSL:     return "\(base) · SL"
+        case .breakeven: return "\(base) · BE"
+        case .cancelled: return "\(base) · expired"
+        case .skipped:   return "\(arrow) EBP · not traded"
+        }
+    }
+
     // MARK: - Order block marks
 
     @ChartContentBuilder
@@ -4646,6 +4785,7 @@ struct ChartViewiPad: View {
             algoSmartAssistOutput: algoSmartAssistOutput,
             amdCycles: amdCycles,
             rankedSP2LBTB: rankedSP2LBTBOutput,
+            engulfingBarPlay: ebpOutput,
             chochZones: chochZones,
             htfChochZones: htfChochZones,
             sessionRuns: sessionRuns,

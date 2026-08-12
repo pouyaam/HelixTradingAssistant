@@ -33,7 +33,7 @@ final class SentinelVerifyDebugTests: XCTestCase {
         let sentinel = StrategySentinel.shared
         for s in series {
             let until = Date()
-            let since = until.addingTimeInterval(-900 * Self.tfSecs(s.tf))
+            let since = until.addingTimeInterval(-900 * s.tf.seconds)
             let candles = await OHLCCandleLoader.loadAsync(
                 repo: db.ohlcRepo, pairID: s.pairID, tf: s.tf,
                 since: since, until: until, dropClosedDays: s.dropWeekends
@@ -43,12 +43,13 @@ final class SentinelVerifyDebugTests: XCTestCase {
             // Raw detector inventory: how many CHoCH events / VROB zones
             // does this series even have right now?
             let closed = Array(candles.dropLast())
-            let tfSecs = Self.tfSecs(s.tf)
             let atrVal = SMCEvidence.wilderATR(closed, period: 14) ?? 1.0
 
-            let htfName = s.tf == .m15 ? "1h" : (s.tf == .h1 ? "4h" : "1D")
-            let htfFactor = s.tf == .m15 ? 4 : (s.tf == .h1 ? 4 : 6)
-            let htfCandles = Self.aggregateCandles(closed, factor: htfFactor)
+            let higher = s.tf.higher
+            let htfName = higher?.rawValue ?? "—"
+            let htfCandles = higher.map {
+                StrategySentinel.aggregateCandles(closed, into: $0)
+            } ?? []
             var htfCfg = VolumeRankedOrderBlocks.Config()
             htfCfg.swingLength = 3
             htfCfg.zonesPerSide = 8
@@ -93,7 +94,10 @@ final class SentinelVerifyDebugTests: XCTestCase {
 
             let key = "\(s.pairID)|\(s.tf.rawValue)"
             let before = sentinel.lastScanTimestamp
-            sentinel.evaluateSymbol(pairID: s.pairID, symbol: s.symbol, timeframe: s.tf.rawValue, candles: candles)
+            sentinel.evaluateSymbol(
+                pairID: s.pairID, symbol: s.symbol, timeframe: s.tf.rawValue,
+                candles: candles, htfCandles: htfCandles, htfLabel: htfName
+            )
 
             // Pipeline runs detached — poll until this key (re)publishes.
             for _ in 0..<100 {
@@ -108,37 +112,5 @@ final class SentinelVerifyDebugTests: XCTestCase {
         }
     }
 
-    private static func tfSecs(_ tf: Timeframe) -> Double {
-        switch tf {
-        case .m1: return 60
-        case .m5: return 300
-        case .m15: return 900
-        case .m30: return 1800
-        case .h1: return 3600
-        case .h4: return 14400
-        case .d1: return 86400
-        }
-    }
-
-    private static func aggregateCandles(_ candles: [Candle], factor: Int) -> [Candle] {
-        guard factor > 1, candles.count >= factor else { return candles }
-        var result: [Candle] = []
-        let total = candles.count
-        var index = 0
-        while index < total {
-            let end = min(index + factor, total)
-            let slice = candles[index..<end]
-            guard let first = slice.first, let last = slice.last else { break }
-            var maxHigh = first.high, minLow = first.low, volSum = 0.0
-            for c in slice {
-                if c.high > maxHigh { maxHigh = c.high }
-                if c.low < minLow { minLow = c.low }
-                volSum += (c.volume ?? 1.0)
-            }
-            result.append(Candle(id: first.id, open: first.open, high: maxHigh, low: minLow, close: last.close, volume: volSum))
-            index = end
-        }
-        return result
-    }
 }
 
